@@ -5,7 +5,7 @@ import os
 
 app = Flask(__name__)
 
-# -------------------- DB --------------------
+# ---------------- DB ----------------
 
 def get_db():
     return sqlite3.connect("china_house.db")
@@ -19,7 +19,8 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         numero_orden INTEGER,
         fecha TEXT,
-        mesa TEXT,
+        tipo TEXT,  -- mesa / delivery / pickup
+        referencia TEXT, -- Mesa 1 o dirección
         estado TEXT
     )
     """)
@@ -33,29 +34,20 @@ def init_db():
     )
     """)
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS comandas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        numero_comanda INTEGER,
-        orden_id INTEGER,
-        fecha TEXT
-    )
-    """)
-
     conn.commit()
     conn.close()
 
 init_db()
 
-# -------------------- MENU --------------------
+# ---------------- MENU ----------------
 
 menu = [
-    {"nombre": "Arroz chino", "precio": 5},
-    {"nombre": "Pollo agridulce", "precio": 6},
-    {"nombre": "Pasta china", "precio": 5},
+    {"id": 1, "nombre": "Arroz chino", "precio": 5},
+    {"id": 2, "nombre": "Pollo agridulce", "precio": 6},
+    {"id": 3, "nombre": "Pasta china", "precio": 5},
 ]
 
-# -------------------- CREAR ORDEN --------------------
+# ---------------- UTIL ----------------
 
 def obtener_numero_orden(fecha):
     conn = get_db()
@@ -66,69 +58,85 @@ def obtener_numero_orden(fecha):
 
     conn.close()
 
-    if resultado is None:
-        return 1
-    return resultado + 1
+    return 1 if resultado is None else resultado + 1
 
-@app.route("/nueva_orden")
-def nueva_orden():
-    fecha = datetime.date.today().isoformat()
-    numero = obtener_numero_orden(fecha)
+# ---------------- INTERFAZ PRINCIPAL ----------------
 
-    mesa = request.args.get("mesa")
-
+@app.route("/")
+def venta():
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("""
-    INSERT INTO ordenes (numero_orden, fecha, mesa, estado)
-    VALUES (?, ?, ?, ?)
-    """, (numero, fecha, mesa, "abierta"))
-
-    conn.commit()
-    conn.close()
-
-    return redirect("/ordenes")
-
-# -------------------- LISTA DE ORDENES --------------------
-
-@app.route("/ordenes")
-def ordenes():
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT id, numero_orden, mesa, estado FROM ordenes WHERE estado != 'pagada'")
+    cursor.execute("SELECT id, numero_orden, tipo, referencia, estado FROM ordenes WHERE estado != 'pagada'")
     ordenes = cursor.fetchall()
 
     conn.close()
 
-    html = "<h1>Órdenes</h1>"
+    html = "<h1>💻 China House - Ventas</h1>"
 
-    # Crear orden
-    html += "<h3>Crear nueva orden</h3>"
-    for i in range(1, 11):
-        html += f'<a href="/nueva_orden?mesa=Mesa {i}">Mesa {i}</a><br>'
+    # CREAR ORDEN
+    html += """
+    <h2>Nueva Orden</h2>
+    <form action="/crear_orden" method="post">
+        Tipo:
+        <select name="tipo">
+            <option value="mesa">Mesa</option>
+            <option value="delivery">Delivery</option>
+            <option value="pickup">Pick Up</option>
+        </select><br><br>
 
-    html += "<hr><h3>Órdenes abiertas</h3>"
+        Referencia (Mesa o dirección):
+        <input type="text" name="referencia"><br><br>
+
+        <button type="submit">Crear Orden</button>
+    </form>
+    """
+
+    # ORDENES ACTIVAS
+    html += "<h2>Órdenes activas</h2>"
 
     for o in ordenes:
         html += f"""
-        <div>
-            Orden #{o[1]} - {o[2]} - {o[3]}
-            <a href="/orden/{o[0]}">Entrar</a>
+        <div style="border:1px solid black; padding:10px; margin:5px;">
+            Orden #{o[1]} - {o[2]} - {o[3]} - {o[4]}
+            <br>
+            <a href="/orden/{o[0]}">Abrir</a>
         </div>
         """
 
     return html
 
-# -------------------- VER ORDEN --------------------
+# ---------------- CREAR ORDEN ----------------
+
+@app.route("/crear_orden", methods=["POST"])
+def crear_orden():
+    tipo = request.form["tipo"]
+    referencia = request.form["referencia"]
+
+    fecha = datetime.date.today().isoformat()
+    numero = obtener_numero_orden(fecha)
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT INTO ordenes (numero_orden, fecha, tipo, referencia, estado)
+    VALUES (?, ?, ?, ?, ?)
+    """, (numero, fecha, tipo, referencia, "abierta"))
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/")
+
+# ---------------- VER ORDEN ----------------
 
 @app.route("/orden/<int:orden_id>")
 def ver_orden(orden_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT numero_orden, mesa, estado FROM ordenes WHERE id = ?", (orden_id,))
+    cursor.execute("SELECT numero_orden, tipo, referencia, estado FROM ordenes WHERE id = ?", (orden_id,))
     orden = cursor.fetchone()
 
     cursor.execute("SELECT producto, precio FROM orden_detalle WHERE orden_id = ?", (orden_id,))
@@ -136,108 +144,87 @@ def ver_orden(orden_id):
 
     conn.close()
 
-    html = f"<h1>Orden #{orden[0]} - {orden[1]}</h1>"
-    html += f"<p>Estado: {orden[2]}</p>"
+    html = f"<h1>Orden #{orden[0]}</h1>"
+    html += f"<p>{orden[1]} - {orden[2]}</p>"
+    html += f"<p>Estado: {orden[3]}</p>"
 
-    html += "<h3>Productos</h3>"
     total = 0
+    html += "<h3>Productos</h3>"
 
     for p in productos:
         html += f"{p[0]} - ${p[1]}<br>"
         total += p[1]
 
-    html += f"<h3>Total: ${total}</h3>"
+    html += f"<h2>Total: ${total}</h2>"
 
-    html += "<hr><h3>Agregar producto</h3>"
-
+    # AGREGAR PRODUCTOS
+    html += "<h3>Agregar</h3>"
     for m in menu:
         html += f"""
-        <a href="/agregar/{orden_id}/{m['nombre']}/{m['precio']}">
-            {m['nombre']} - ${m['precio']}
+        <a href="/agregar/{orden_id}/{m['id']}">
+        {m['nombre']} - ${m['precio']}
         </a><br>
         """
 
     html += "<hr>"
 
-    html += f'<a href="/comanda/{orden_id}">🔥 Enviar a cocina</a><br>'
+    html += f'<a href="/cocina/{orden_id}">🔥 Enviar a cocina</a><br>'
     html += f'<a href="/pagar/{orden_id}">💰 Cobrar</a><br>'
-    html += '<a href="/ordenes">⬅ Volver</a>'
+    html += '<a href="/">⬅ Volver</a>'
 
     return html
 
-# -------------------- AGREGAR PRODUCTO --------------------
+# ---------------- AGREGAR PRODUCTO ----------------
 
-@app.route("/agregar/<int:orden_id>/<producto>/<float:precio>")
-def agregar_producto(orden_id, producto, precio):
+@app.route("/agregar/<int:orden_id>/<int:producto_id>")
+def agregar(orden_id, producto_id):
+    producto = next((p for p in menu if p["id"] == producto_id), None)
+
+    if not producto:
+        return "Producto no encontrado"
+
     conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute("""
     INSERT INTO orden_detalle (orden_id, producto, precio)
     VALUES (?, ?, ?)
-    """, (orden_id, producto, precio))
+    """, (orden_id, producto["nombre"], producto["precio"]))
 
     conn.commit()
     conn.close()
 
     return redirect(f"/orden/{orden_id}")
 
-# -------------------- COMANDA --------------------
+# ---------------- COCINA ----------------
 
-def obtener_numero_comanda(orden_id):
+@app.route("/cocina/<int:orden_id>")
+def cocina(orden_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT MAX(numero_comanda) FROM comandas WHERE orden_id = ?", (orden_id,))
-    resultado = cursor.fetchone()[0]
-
-    conn.close()
-
-    if resultado is None:
-        return 1
-    return resultado + 1
-
-@app.route("/comanda/<int:orden_id>")
-def generar_comanda(orden_id):
-    fecha = datetime.datetime.now().isoformat()
-    numero = obtener_numero_comanda(orden_id)
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    INSERT INTO comandas (numero_comanda, orden_id, fecha)
-    VALUES (?, ?, ?)
-    """, (numero, orden_id, fecha))
-
-    cursor.execute("UPDATE ordenes SET estado = 'cocina' WHERE id = ?", (orden_id,))
+    cursor.execute("UPDATE ordenes SET estado='cocina' WHERE id = ?", (orden_id,))
 
     conn.commit()
     conn.close()
 
-    return f"Comanda #{numero} enviada a cocina <br><a href='/orden/{orden_id}'>Volver</a>"
+    return redirect(f"/orden/{orden_id}")
 
-# -------------------- PAGAR --------------------
+# ---------------- PAGAR ----------------
 
 @app.route("/pagar/<int:orden_id>")
 def pagar(orden_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("UPDATE ordenes SET estado = 'pagada' WHERE id = ?", (orden_id,))
+    cursor.execute("UPDATE ordenes SET estado='pagada' WHERE id = ?", (orden_id,))
 
     conn.commit()
     conn.close()
 
-    return redirect("/ordenes")
+    return redirect("/")
 
-# -------------------- HOME --------------------
-
-@app.route("/")
-def home():
-    return '<h1>China House</h1><a href="/ordenes">Ir al sistema</a>'
-
-# -------------------- RUN --------------------
+# ---------------- RUN ----------------
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
