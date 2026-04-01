@@ -134,6 +134,8 @@ def pos():
 
     <a href="/tasa">💱 Cambiar tasa</a>
 
+    <a href="/cocina">🍳 Pantalla cocina</a><br><br>
+
     <h2>Nueva Orden</h2>
     <form action="/crear_orden" method="post">
         Tipo:
@@ -486,6 +488,71 @@ def cierre():
 
     <a href="/">⬅ Volver</a>
     """
+# ---------------- COCINA ----------------
+@app.route("/cocina")
+def pantalla_cocina():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT id, numero_orden, tipo, referencia
+    FROM ordenes
+    WHERE estado = 'en cocina'
+    ORDER BY fecha_hora ASC
+    """)
+
+    ordenes = cursor.fetchall()
+
+    html = """
+    <html>
+    <head>
+    <style>
+        body { font-family: Arial; background:black; color:white; }
+        .orden { border:2px solid white; margin:10px; padding:15px; }
+        .btn { padding:10px; background:green; color:white; border:none; }
+    </style>
+    </head>
+    <body>
+
+    <h1>🍳 COCINA</h1>
+    """
+
+    for o in ordenes:
+        html += f"<div class='orden'>"
+        html += f"<h2>Orden #{o[1]}</h2>"
+        html += f"<p>{o[2]} - {o[3]}</p>"
+
+        # productos
+        cursor.execute("SELECT producto FROM orden_items WHERE orden_id=?", (o[0],))
+        items = cursor.fetchall()
+
+        for i in items:
+            html += f"<p>• {i[0]}</p>"
+
+        html += f"""
+        <a href="/listo/{o[0]}">
+            <button class="btn">✅ LISTO</button>
+        </a>
+        """
+
+        html += "</div>"
+
+    html += "</body></html>"
+
+    conn.close()
+    return html
+# ---------------- LISTO ----------------    
+@app.route("/listo/<int:orden_id>")
+def marcar_listo(orden_id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("UPDATE ordenes SET estado='listo' WHERE id=?", (orden_id,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/cocina")
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
