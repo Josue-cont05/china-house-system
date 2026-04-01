@@ -303,23 +303,82 @@ def cocina(orden_id):
 
 # ---------------- COBRAR ----------------
 
-@app.route("/cobrar/<int:orden_id>")
+@app.route("/cobrar/<int:orden_id>", methods=["GET", "POST"])
 def cobrar(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    # VALIDACIÓN
-    cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
-    if cursor.fetchone()[0] == 0:
+    # Obtener items
+    cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
+    items = cursor.fetchall()
+
+    if len(items) == 0:
         conn.close()
         return "No puedes cobrar una orden vacía"
 
-    cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
+    total_usd = sum(i[0] for i in items)
 
-    conn.commit()
+    # Obtener tasa
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa = row[0] if row else 1
+
+    total_bs = total_usd * tasa
+
+    if request.method == "POST":
+        metodo = request.form["metodo"]
+        monto = float(request.form["monto"])
+        referencia = request.form.get("referencia", "")
+
+        # VALIDACIONES
+        if metodo == "usd":
+            if monto < total_usd:
+                return "Pago insuficiente en USD"
+
+        elif metodo == "bs_efectivo":
+            if monto < total_bs:
+                return "Pago insuficiente en Bs"
+
+        elif metodo == "bs_pago_movil":
+            if monto < total_bs:
+                return "Pago móvil insuficiente"
+            if referencia.strip() == "":
+                return "Debes colocar la referencia del pago móvil"
+
+        # Cerrar orden
+        cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        return redirect("/")
+
     conn.close()
 
-    return redirect("/")
+    return f"""
+    <h1>💰 Cobro Orden #{orden_id}</h1>
+
+    <h2>Total USD: ${total_usd}</h2>
+    <h2>Total Bs: Bs {total_bs}</h2>
+
+    <form method="post">
+        <label>Método de pago:</label><br>
+        <select name="metodo">
+            <option value="usd">$ Efectivo</option>
+            <option value="bs_efectivo">Bs Efectivo</option>
+            <option value="bs_pago_movil">Pago Móvil</option>
+        </select><br><br>
+
+        <label>Monto recibido:</label><br>
+        <input name="monto"><br><br>
+
+        <label>Referencia (solo pago móvil):</label><br>
+        <input name="referencia"><br><br>
+
+        <button type="submit">Confirmar pago</button>
+    </form>
+
+    <a href="/orden/{orden_id}">⬅ Volver</a>
+    """
 
 # ---------------- TASA ----------------
 
