@@ -23,7 +23,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS ordenes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         numero_orden INTEGER,
-        fecha TEXT,
+        fecha_hora TEXT,
         tipo TEXT,
         referencia TEXT,
         cliente TEXT,
@@ -69,7 +69,12 @@ def siguiente_numero():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT MAX(numero_orden) FROM ordenes WHERE fecha = ?", (hoy,))
+    cursor.execute("""
+    SELECT MAX(numero_orden)
+    FROM ordenes
+    WHERE date(fecha_hora) = ?
+    """, (hoy,))
+
     ultimo = cursor.fetchone()[0]
 
     conn.close()
@@ -83,9 +88,6 @@ def pos():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM productos")
-    productos = cursor.fetchall()
-
     cursor.execute("SELECT * FROM ordenes WHERE estado != 'cerrada'")
     ordenes = cursor.fetchall()
 
@@ -96,10 +98,9 @@ def pos():
     <head>
     <style>
         body { font-family: Arial; margin:20px; }
-        .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; }
-        .btn { padding:20px; font-size:18px; border:none; background:#3498db; color:white; cursor:pointer; }
         .orden { border:1px solid #ccc; padding:10px; margin:10px; }
         input, select { padding:8px; margin:5px; }
+        button { padding:10px; }
     </style>
     </head>
     <body>
@@ -134,6 +135,7 @@ def pos():
         <div class="orden">
             <b>#{o[1]}</b> | {o[3]} - {o[4]}<br>
             Cliente: {o[5] if o[5] else '-'}<br>
+            Hora: {o[2]}<br>
             Estado: {o[6]}<br>
             <a href="/orden/{o[0]}">Abrir</a>
         </div>
@@ -151,15 +153,15 @@ def crear_orden():
     cliente = request.form.get("cliente", "")
 
     numero = siguiente_numero()
-    fecha = datetime.date.today().isoformat()
+    fecha_hora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
     cursor.execute("""
-    INSERT INTO ordenes (numero_orden, fecha, tipo, referencia, cliente, estado)
+    INSERT INTO ordenes (numero_orden, fecha_hora, tipo, referencia, cliente, estado)
     VALUES (?, ?, ?, ?, ?, ?)
-    """, (numero, fecha, tipo, referencia, cliente, "abierta"))
+    """, (numero, fecha_hora, tipo, referencia, cliente, "abierta"))
 
     conn.commit()
     orden_id = cursor.lastrowid
@@ -167,14 +169,17 @@ def crear_orden():
 
     return redirect(f"/orden/{orden_id}")
 
-# ---------------- PANTALLA DE ORDEN (POS REAL) ----------------
+# ---------------- ORDEN (POS REAL) ----------------
 
 @app.route("/orden/<int:orden_id>")
 def orden(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT numero_orden, tipo, referencia, cliente, estado FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute("""
+    SELECT numero_orden, tipo, referencia, cliente, estado, fecha_hora 
+    FROM ordenes WHERE id=?
+    """, (orden_id,))
     o = cursor.fetchone()
 
     cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
@@ -218,6 +223,7 @@ def orden(orden_id):
         <h2>Orden #{o[0]}</h2>
         <p>{o[1]} - {o[2]}</p>
         <p>Cliente: {o[3] if o[3] else '-'}</p>
+        <p>Hora: {o[5]}</p>
         <p>Estado: {o[4]}</p>
 
         <hr>
