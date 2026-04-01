@@ -30,8 +30,18 @@ def init_db():
         estado TEXT
     )
     """)
-
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pagos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        orden_id INTEGER,
+        metodo TEXT,
+        monto REAL,
+        referencia TEXT,
+        fecha TEXT
+    )
+    """)
+    cursor.execute("""
+    
     CREATE TABLE IF NOT EXISTS orden_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         orden_id INTEGER,
@@ -344,7 +354,14 @@ def cobrar(orden_id):
                 return "Pago móvil insuficiente"
             if referencia.strip() == "":
                 return "Debes colocar la referencia del pago móvil"
+                
+        fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        cursor.execute("""
+        INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
+        VALUES (?, ?, ?, ?, ?)
+        """, (orden_id, metodo, monto, referencia, fecha))
+        
         # Cerrar orden
         cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
         conn.commit()
@@ -379,7 +396,7 @@ def cobrar(orden_id):
 
     <a href="/orden/{orden_id}">⬅ Volver</a>
     """
-
+ 
 # ---------------- TASA ----------------
 
 @app.route("/tasa", methods=["GET", "POST"])
