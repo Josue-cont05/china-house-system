@@ -367,34 +367,38 @@ def orden(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # 🔹 Datos de la orden
     cursor.execute("""
     SELECT numero_orden, tipo, referencia, cliente, estado, fecha_hora 
     FROM ordenes WHERE id=?
     """, (orden_id,))
     o = cursor.fetchone()
 
+    # 🔹 Items de la orden
     cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
 
+    # 🔹 Productos con categoría
     cursor.execute("""
     SELECT p.id, p.nombre, p.precio, c.nombre
     FROM productos p
     LEFT JOIN categorias c ON p.categoria_id = c.id
     ORDER BY c.nombre
     """)
+    productos = cursor.fetchall()
 
-productos = cursor.fetchall()
-
-    # 🔥 OBTENER TASA (SEGURO)
+    # 🔥 Obtener tasa (seguro)
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
     row = cursor.fetchone()
     tasa = row[0] if row else 1
 
     conn.close()
 
+    # 🔹 Totales
     total_usd = sum(i[1] for i in items)
     total_bs = total_usd * tasa
 
+    # 🔹 HTML
     html = f"""
     <html>
     <head>
@@ -411,23 +415,25 @@ productos = cursor.fetchall()
         <h2>Agregar productos</h2>
     """
 
-   categoria_actual = None
+    # 🔥 Agrupar por categorías
+    categoria_actual = None
 
-   for p in productos:
-       categoria = p[3] if p[3] else "Sin categoría"
+    for p in productos:
+        categoria = p[3] if p[3] else "Sin categoría"
 
-       if categoria != categoria_actual:
-          categoria_actual = categoria
-          html += f"<h3>🍽 {categoria}</h3>"
+        if categoria != categoria_actual:
+            categoria_actual = categoria
+            html += f"<h3>🍽 {categoria}</h3>"
 
-       html += f"""
-       <a href="/agregar/{orden_id}/{p[0]}">
-          <button class="btn">{p[1]} - ${p[2]}</button>
-       </a>
-    """
+        html += f"""
+        <a href="/agregar/{orden_id}/{p[0]}">
+            <button class="btn">{p[1]} - ${p[2]}</button>
+        </a>
+        """
 
     html += "</div>"
 
+    # 🔹 Panel derecho
     html += f"""
     <div class="panel">
         <h2>Orden #{o[0]}</h2>
@@ -458,7 +464,6 @@ productos = cursor.fetchall()
     """
 
     return html
-
 # ---------------- AGREGAR ----------------
 
 @app.route("/agregar/<int:orden_id>/<int:producto_id>")
