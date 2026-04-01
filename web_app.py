@@ -18,7 +18,17 @@ def init_db():
         precio REAL
     )
     """)
-
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tasa (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        valor REAL
+    )
+    """)
+    # 🔥 VALOR INICIAL
+    cursor.execute("SELECT COUNT(*) FROM tasa")
+    if cursor.fetchone()[0] == 0:
+       cursor.execute("INSERT INTO tasa (valor) VALUES (36)")
+    
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
