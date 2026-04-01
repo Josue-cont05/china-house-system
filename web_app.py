@@ -18,17 +18,7 @@ def init_db():
         precio REAL
     )
     """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS tasa (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        valor REAL
-    )
-    """)
-    # 🔥 VALOR INICIAL
-    cursor.execute("SELECT COUNT(*) FROM tasa")
-    if cursor.fetchone()[0] == 0:
-       cursor.execute("INSERT INTO tasa (valor) VALUES (36)")
-    
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +39,19 @@ def init_db():
         precio REAL
     )
     """)
+
+    # 🔥 NUEVA TABLA TASA
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tasa (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        valor REAL
+    )
+    """)
+
+    # 🔥 ASEGURAR QUE EXISTA UNA TASA
+    cursor.execute("SELECT COUNT(*) FROM tasa")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO tasa (valor) VALUES (36)")
 
     conn.commit()
     conn.close()
@@ -117,6 +120,8 @@ def pos():
 
     <h1>🍜 China House POS</h1>
 
+    <a href="/tasa">💱 Cambiar tasa</a>
+
     <h2>Nueva Orden</h2>
     <form action="/crear_orden" method="post">
         Tipo:
@@ -179,7 +184,7 @@ def crear_orden():
 
     return redirect(f"/orden/{orden_id}")
 
-# ---------------- ORDEN (POS REAL) ----------------
+# ---------------- ORDEN ----------------
 
 @app.route("/orden/<int:orden_id>")
 def orden(orden_id):
@@ -198,6 +203,11 @@ def orden(orden_id):
     cursor.execute("SELECT id, nombre, precio FROM productos")
     productos = cursor.fetchall()
 
+    # 🔥 OBTENER TASA (SEGURO)
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa = row[0] if row else 1
+
     conn.close()
 
     total_usd = sum(i[1] for i in items)
@@ -211,7 +221,6 @@ def orden(orden_id):
         .productos {{ width:60%; }}
         .panel {{ width:40%; padding:20px; border-left:2px solid #ccc; }}
         .btn {{ width:100%; padding:20px; margin:5px; font-size:18px; background:#27ae60; color:white; border:none; }}
-        .acciones a {{ display:block; margin:10px 0; font-size:18px; }}
     </style>
     </head>
     <body>
@@ -244,18 +253,14 @@ def orden(orden_id):
 
     for i in items:
         html += f"{i[0]} - ${i[1]}<br>"
-    
+
     html += f"""
     <h2>Total USD: ${total_usd}</h2>
     <h2>Total Bs: Bs {total_bs}</h2>
-    """
-    
-    html += f"""
-        <div class="acciones">
-            🔥 <a href="/enviar_cocina/{orden_id}">Enviar a cocina</a>
-            💰 <a href="/cobrar/{orden_id}">Cobrar</a>
-            ⬅ <a href="/">Volver</a>
-        </div>
+
+    <a href="/enviar_cocina/{orden_id}">🔥 Enviar a cocina</a><br>
+    <a href="/cobrar/{orden_id}">💰 Cobrar</a><br>
+    <a href="/">⬅ Volver</a>
     </div>
 
     </body>
@@ -303,6 +308,12 @@ def cobrar(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # VALIDACIÓN
+    cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+    if cursor.fetchone()[0] == 0:
+        conn.close()
+        return "No puedes cobrar una orden vacía"
+
     cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
 
     conn.commit()
@@ -311,17 +322,36 @@ def cobrar(orden_id):
     return redirect("/")
 
 # ---------------- TASA ----------------
-@app.route("/tasa", methods=["GET", "POST"])
-def tasa():
-    # tu lógica aquí
-    pass
 
+@app.route("/tasa", methods=["GET", "POST"])
+def cambiar_tasa():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nueva = float(request.form["tasa"])
+        cursor.execute("UPDATE tasa SET valor=?", (nueva,))
+        conn.commit()
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    tasa = cursor.fetchone()[0]
+
+    conn.close()
+
+    return f"""
+    <h1>💱 Tasa actual: {tasa}</h1>
+    <form method="post">
+        Nueva tasa: <input name="tasa">
+        <button>Guardar</button>
+    </form>
+    <a href="/">Volver</a>
+    """
 
 # ---------------- MAIN ----------------
+
 if __name__ == "__main__":
     init_db()
     cargar_productos()
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
