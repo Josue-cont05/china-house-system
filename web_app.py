@@ -136,6 +136,8 @@ def pos():
 
     <a href="/cocina">🍳 Pantalla cocina</a><br><br>
 
+    <a href="/menu">📋 Administrar menú</a><br><br>
+
     <h2>Nueva Orden</h2>
     <form action="/crear_orden" method="post">
         Tipo:
@@ -172,6 +174,112 @@ def pos():
 
     html += "</body></html>"
     return html
+
+
+
+# ---------------- MENU ----------------
+@app.route("/menu")
+def menu():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, nombre, precio FROM productos")
+    productos = cursor.fetchall()
+
+    conn.close()
+
+    html = """
+    <h1>📋 Menú</h1>
+
+    <a href="/">⬅ Volver</a><br><br>
+
+    <h2>Agregar producto</h2>
+    <form action="/agregar_producto" method="post">
+        Nombre: <input name="nombre"><br><br>
+        Precio: <input name="precio"><br><br>
+        <button>Agregar</button>
+    </form>
+
+    <hr>
+
+    <h2>Productos actuales</h2>
+    """
+
+    for p in productos:
+        html += f"""
+        <div>
+            {p[1]} - ${p[2]}
+
+            <a href="/editar_producto/{p[0]}">✏️ Editar</a>
+            <a href="/eliminar_producto/{p[0]}">❌ Eliminar</a>
+        </div>
+        """
+
+    return html
+
+# ---------------- Agregar producto ----------------
+@app.route("/agregar_producto", methods=["POST"])
+def agregar_producto():
+    nombre = request.form["nombre"]
+    precio = float(request.form["precio"])
+
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("INSERT INTO productos (nombre, precio) VALUES (?, ?)", (nombre, precio))
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/menu")
+# ---------------- ELIMINAR PRODUCTO ----------------
+@app.route("/eliminar_producto/<int:id>")
+def eliminar_producto(id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM productos WHERE id=?", (id,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/menu")
+# ---------------- EDITAR PRODUCTO ----------------
+@app.route("/editar_producto/<int:id>", methods=["GET", "POST"])
+def editar_producto(id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nombre = request.form["nombre"]
+        precio = float(request.form["precio"])
+
+        cursor.execute("""
+        UPDATE productos SET nombre=?, precio=?
+        WHERE id=?
+        """, (nombre, precio, id))
+
+        conn.commit()
+        conn.close()
+
+        return redirect("/menu")
+
+    cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (id,))
+    p = cursor.fetchone()
+
+    conn.close()
+
+    return f"""
+    <h1>Editar producto</h1>
+
+    <form method="post">
+        Nombre: <input name="nombre" value="{p[0]}"><br><br>
+        Precio: <input name="precio" value="{p[1]}"><br><br>
+        <button>Guardar</button>
+    </form>
+
+    <a href="/menu">Volver</a>
+    """
 
 # ---------------- CREAR ORDEN ----------------
 
