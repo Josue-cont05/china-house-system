@@ -9,11 +9,34 @@ app = Flask(__name__)
 def get_db():
     return sqlite3.connect("china_house.db")
 
-
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
+    # configuración (tasa)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS configuracion (
+        clave TEXT PRIMARY KEY,
+        valor TEXT
+    )
+    """)
+
+    # 🔥 IMPORTANTE
+    conn.commit()
+    conn.close()
+
+
+def obtener_tasa():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT valor FROM configuracion WHERE clave='tasa'")
+    row = cursor.fetchone()
+
+    conn.close()
+
+    return float(row[0]) if row else 35
+    
     # productos
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS productos (
@@ -158,6 +181,32 @@ def crear_orden():
     </form>
     """
 
+@app.route("/tasa", methods=["GET", "POST"])
+def tasa():
+    if request.method == "POST":
+        nueva = request.form["tasa"]
+
+        conn = get_db()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        INSERT OR REPLACE INTO configuracion (clave, valor)
+        VALUES ('tasa', ?)
+        """, (nueva,))
+
+        conn.commit()
+        conn.close()
+
+        return redirect("/")
+
+    return """
+    <h1>Configurar tasa</h1>
+    <form method="POST">
+        Nueva tasa: <input name="tasa">
+        <button>Guardar</button>
+    </form>
+    """
+
 # ---------------- VER ORDEN ----------------
 
 @app.route("/orden/<int:orden_id>")
@@ -176,7 +225,10 @@ def ver_orden(orden_id):
 
     conn.close()
 
+    tasa = obtener_tasa()
+
     total = sum(i[3] for i in items)
+    total_bs = round(total * tasa, 2)
 
     html = f"""
     <h1>Orden #{orden[1]}</h1>
@@ -188,7 +240,7 @@ def ver_orden(orden_id):
 
     <hr>
 
-    <h2>Total: ${total}</h2>
+   <h2>Total: ${total} | Bs {total_bs}</h2>
     """
 
     for i in items:
