@@ -42,7 +42,7 @@ except:
     nombre TEXT
     )
     """)
-       cursor.execute("SELECT COUNT(*) FROM categorias")
+    cursor.execute("SELECT COUNT(*) FROM categorias")
        if cursor.fetchone()[0] == 0:
            categorias = [
               ("Arroces",),
