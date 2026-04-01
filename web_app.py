@@ -19,7 +19,10 @@ def init_db():
     )
     """)
     
-   cursor.execute("""ALTER TABLE productos ADD COLUMN categoria_id INTEGER""")
+ try:
+    cursor.execute("ALTER TABLE productos ADD COLUMN categoria_id INTEGER")
+except:
+    pass
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
