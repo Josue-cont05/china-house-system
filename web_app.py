@@ -27,10 +27,7 @@ def init_db():
         tipo TEXT,
         referencia TEXT,
         cliente TEXT,
-        estado TEXT,
-        metodo_pago TEXT,
-        monto REAL,
-        referencia_pago TEXT
+        estado TEXT
     )
     """)
 
@@ -40,6 +37,16 @@ def init_db():
         orden_id INTEGER,
         producto TEXT,
         precio REAL
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pagos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        orden_id INTEGER,
+        metodo TEXT,
+        monto REAL,
+        referencia TEXT
     )
     """)
 
@@ -84,7 +91,7 @@ def siguiente_numero():
 
     return 1 if ultimo is None else ultimo + 1
 
-# ---------------- POS PRINCIPAL ----------------
+# ---------------- HOME ----------------
 
 @app.route("/")
 def pos():
@@ -97,20 +104,8 @@ def pos():
     conn.close()
 
     html = """
-    <html>
-    <head>
-    <style>
-        body { font-family: Arial; margin:20px; }
-        .orden { border:1px solid #ccc; padding:10px; margin:10px; }
-        input, select { padding:8px; margin:5px; }
-        button { padding:10px; }
-    </style>
-    </head>
-    <body>
-
     <h1>🍜 China House POS</h1>
 
-    <h2>Nueva Orden</h2>
     <form action="/crear_orden" method="post">
         Tipo:
         <select name="tipo">
@@ -125,26 +120,21 @@ def pos():
         Cliente:
         <input name="cliente">
 
-        <button type="submit">Crear</button>
+        <button type="submit">Crear Orden</button>
     </form>
 
     <hr>
-
-    <h2>Órdenes activas</h2>
+    <h2>Órdenes</h2>
     """
 
     for o in ordenes:
         html += f"""
-        <div class="orden">
-            <b>#{o[1]}</b> | {o[3]} - {o[4]}<br>
-            Cliente: {o[5] if o[5] else '-'}<br>
-            Hora: {o[2]}<br>
-            Estado: {o[6]}<br>
+        <div>
+            #{o[1]} | {o[3]} - {o[4]} | {o[6]}
             <a href="/orden/{o[0]}">Abrir</a>
         </div>
         """
 
-    html += "</body></html>"
     return html
 
 # ---------------- CREAR ORDEN ----------------
@@ -163,8 +153,8 @@ def crear_orden():
 
     cursor.execute("""
     INSERT INTO ordenes (numero_orden, fecha_hora, tipo, referencia, cliente, estado)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (numero, fecha_hora, tipo, referencia, cliente, "abierta"))
+    VALUES (?, ?, ?, ?, ?, 'abierta')
+    """, (numero, fecha_hora, tipo, referencia, cliente))
 
     conn.commit()
     orden_id = cursor.lastrowid
@@ -172,20 +162,14 @@ def crear_orden():
 
     return redirect(f"/orden/{orden_id}")
 
-# ---------------- ORDEN (POS REAL) ----------------
+# ---------------- ORDEN ----------------
 
 @app.route("/orden/<int:orden_id>")
 def orden(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT numero_orden, tipo, referencia, cliente, estado, fecha_hora 
-    FROM ordenes WHERE id=?
-    """, (orden_id,))
-    o = cursor.fetchone()
-
-    cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
+    cursor.execute("SELECT * FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
 
     cursor.execute("SELECT id, nombre, precio FROM productos")
@@ -193,63 +177,20 @@ def orden(orden_id):
 
     conn.close()
 
-    total = sum(i[1] for i in items)
+    total = sum(i[3] for i in items)
 
-    html = f"""
-    <html>
-    <head>
-    <style>
-        body {{ font-family: Arial; display:flex; }}
-        .productos {{ width:60%; }}
-        .panel {{ width:40%; padding:20px; border-left:2px solid #ccc; }}
-        .btn {{ width:100%; padding:20px; margin:5px; font-size:18px; background:#27ae60; color:white; border:none; }}
-        .acciones a {{ display:block; margin:10px 0; font-size:18px; }}
-    </style>
-    </head>
-    <body>
-
-    <div class="productos">
-        <h2>Agregar productos</h2>
-    """
-
-    for p in productos:
-        html += f"""
-        <a href="/agregar/{orden_id}/{p[0]}">
-            <button class="btn">{p[1]} - ${p[2]}</button>
-        </a>
-        """
-
-    html += "</div>"
-
-    html += f"""
-    <div class="panel">
-        <h2>Orden #{o[0]}</h2>
-        <p>{o[1]} - {o[2]}</p>
-        <p>Cliente: {o[3] if o[3] else '-'}</p>
-        <p>Hora: {o[5]}</p>
-        <p>Estado: {o[4]}</p>
-
-        <hr>
-
-        <h3>Productos</h3>
-    """
+    html = "<h2>Orden</h2>"
 
     for i in items:
-        html += f"{i[0]} - ${i[1]}<br>"
+        html += f"{i[2]} - ${i[3]}<br>"
 
-    html += f"<h2>Total: ${total}</h2>"
+    html += f"<h3>Total: ${total}</h3><hr>"
 
-    html += f"""
-        <div class="acciones">
-            🔥 <a href="/enviar_cocina/{orden_id}">Enviar a cocina</a>
-            💰 <a href="/cobrar/{orden_id}">Cobrar</a>
-            ⬅ <a href="/">Volver</a>
-        </div>
-    </div>
+    for p in productos:
+        html += f"<a href='/agregar/{orden_id}/{p[0]}'>{p[1]}</a><br>"
 
-    </body>
-    </html>
-    """
+    html += f"<br><a href='/cobrar/{orden_id}'>💰 Cobrar</a>"
+    html += "<br><a href='/'>Volver</a>"
 
     return html
 
@@ -271,81 +212,112 @@ def agregar(orden_id, producto_id):
 
     return redirect(f"/orden/{orden_id}")
 
-# ---------------- COCINA ----------------
-
-@app.route("/enviar_cocina/<int:orden_id>")
-def cocina(orden_id):
-    conn = sqlite3.connect("china_house.db")
-    cursor = conn.cursor()
-
-    cursor.execute("UPDATE ordenes SET estado='en cocina' WHERE id=?", (orden_id,))
-
-    conn.commit()
-    conn.close()
-
-    return redirect(f"/orden/{orden_id}")
-
-# ---------------- COBRAR (VISTA) ----------------
+# ---------------- COBRAR (PRO) ----------------
 
 @app.route("/cobrar/<int:orden_id>")
-def cobrar_vista(orden_id):
+def cobrar(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT numero_orden FROM ordenes WHERE id=?", (orden_id,))
-    orden = cursor.fetchone()
-
-    cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
+    cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
+
+    cursor.execute("SELECT metodo, monto FROM pagos WHERE orden_id=?", (orden_id,))
+    pagos = cursor.fetchall()
 
     conn.close()
 
-    total = sum(i[0] for i in items)
+    subtotal = sum(i[1] for i in items)
 
-    return f"""
-    <h1>Cobrar Orden #{orden[0]}</h1>
-    <h2>Total: ${total}</h2>
+    html = f"""
+    <h1>Cobro</h1>
 
-    <form action="/procesar_pago/{orden_id}" method="post">
+    <h3>Factura</h3>
+    """
 
-        Método de pago:
+    for i in items:
+        html += f"{i[0]} - ${i[1]}<br>"
+
+    html += f"<hr>Subtotal: ${subtotal}<br>"
+
+    html += f"""
+    <form action="/calcular/{orden_id}" method="post">
+
+        Descuento:
+        <input name="descuento" value="0"><br>
+
+        Impuesto (%):
+        <input name="impuesto" value="0"><br>
+
+        Tasa Bs:
+        <input name="tasa" value="40"><br>
+
+        <button type="submit">Calcular</button>
+    </form>
+
+    <hr>
+
+    <h3>Pagos realizados</h3>
+    """
+
+    total_pagado = 0
+    for p in pagos:
+        html += f"{p[0]} - ${p[1]}<br>"
+        total_pagado += p[1]
+
+    html += f"<br>Total pagado: ${total_pagado}<br>"
+
+    html += f"""
+    <form action="/agregar_pago/{orden_id}" method="post">
+        Metodo:
         <select name="metodo">
             <option>Efectivo $</option>
             <option>Efectivo Bs</option>
             <option>Pago móvil</option>
-        </select><br><br>
+        </select>
 
         Monto:
-        <input name="monto" value="{total}"><br><br>
+        <input name="monto">
 
         Referencia:
-        <input name="referencia"><br><br>
+        <input name="ref">
 
-        <button type="submit">Confirmar pago</button>
+        <button>Agregar pago</button>
     </form>
 
-    <a href="/orden/{orden_id}">Volver</a>
+    <br><a href="/cerrar/{orden_id}">Cerrar orden</a>
+    <br><a href="/orden/{orden_id}">Volver</a>
     """
 
-# ---------------- PROCESAR PAGO ----------------
+    return html
 
-@app.route("/procesar_pago/<int:orden_id>", methods=["POST"])
-def procesar_pago(orden_id):
+# ---------------- PAGOS ----------------
+
+@app.route("/agregar_pago/<int:orden_id>", methods=["POST"])
+def agregar_pago(orden_id):
     metodo = request.form["metodo"]
-    monto = request.form["monto"]
-    referencia = request.form.get("referencia", "")
+    monto = float(request.form["monto"])
+    ref = request.form.get("ref", "")
 
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("""
-    UPDATE ordenes 
-    SET estado='cerrada',
-        metodo_pago=?,
-        monto=?,
-        referencia_pago=?
-    WHERE id=?
-    """, (metodo, monto, referencia, orden_id))
+    cursor.execute("INSERT INTO pagos (orden_id, metodo, monto, referencia) VALUES (?, ?, ?, ?)",
+                   (orden_id, metodo, monto, ref))
+
+    conn.commit()
+    conn.close()
+
+    return redirect(f"/cobrar/{orden_id}")
+
+# ---------------- CERRAR ----------------
+
+@app.route("/cerrar/<int:orden_id>")
+def cerrar(orden_id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
 
     conn.commit()
     conn.close()
