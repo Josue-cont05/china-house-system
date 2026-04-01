@@ -18,6 +18,8 @@ def init_db():
         precio REAL
     )
     """)
+    
+   cursor.execute("""ALTER TABLE productos ADD COLUMN categoria_id INTEGER""")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
@@ -30,6 +32,24 @@ def init_db():
         estado TEXT
     )
     """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS categorias (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre TEXT
+    )
+    """)
+       cursor.execute("SELECT COUNT(*) FROM categorias")
+       if cursor.fetchone()[0] == 0:
+           categorias = [
+              ("Arroces",),
+              ("Especiales",),
+            ("Bebidas",)
+    ]
+    cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
+    
+
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS pagos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +101,10 @@ def cargar_productos():
         ]
         cursor.executemany("INSERT INTO productos (nombre, precio) VALUES (?, ?)", productos)
 
+    cursor.execute("""
+    ALTER TABLE productos ADD COLUMN categoria_id INTEGER
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -183,8 +207,13 @@ def menu():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # Productos
     cursor.execute("SELECT id, nombre, precio FROM productos")
     productos = cursor.fetchall()
+
+    # Categorías
+    cursor.execute("SELECT id, nombre FROM categorias")
+    categorias = cursor.fetchall()
 
     conn.close()
 
@@ -194,9 +223,26 @@ def menu():
     <a href="/">⬅ Volver</a><br><br>
 
     <h2>Agregar producto</h2>
+    """
+
+    # 🔥 FORMULARIO
+    html += """
     <form action="/agregar_producto" method="post">
         Nombre: <input name="nombre"><br><br>
         Precio: <input name="precio"><br><br>
+
+        Categoría:
+        <select name="categoria_id">
+    """
+
+    # 🔥 OPCIONES DINÁMICAS
+    for c in categorias:
+        html += f"<option value='{c[0]}'>{c[1]}</option>"
+
+    # 🔥 CIERRE FORM
+    html += """
+        </select><br><br>
+
         <button>Agregar</button>
     </form>
 
@@ -205,6 +251,7 @@ def menu():
     <h2>Productos actuales</h2>
     """
 
+    # 🔥 LISTADO
     for p in productos:
         html += f"""
         <div>
@@ -222,11 +269,15 @@ def menu():
 def agregar_producto():
     nombre = request.form["nombre"]
     precio = float(request.form["precio"])
+    categoria_id = int(request.form["categoria_id"])
 
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("INSERT INTO productos (nombre, precio) VALUES (?, ?)", (nombre, precio))
+    cursor.execute("""
+    INSERT INTO productos (nombre, precio, categoria_id)
+    VALUES (?, ?, ?)
+    """, (nombre, precio, categoria_id))
 
     conn.commit()
     conn.close()
@@ -322,8 +373,14 @@ def orden(orden_id):
     cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
 
-    cursor.execute("SELECT id, nombre, precio FROM productos")
-    productos = cursor.fetchall()
+   cursor.execute("""
+   SELECT p.id, p.nombre, p.precio, c.nombre
+   FROM productos p
+   LEFT JOIN categorias c ON p.categoria_id = c.id
+   ORDER BY c.nombre
+   """)
+
+productos = cursor.fetchall()
 
     # 🔥 OBTENER TASA (SEGURO)
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
@@ -351,12 +408,20 @@ def orden(orden_id):
         <h2>Agregar productos</h2>
     """
 
-    for p in productos:
-        html += f"""
-        <a href="/agregar/{orden_id}/{p[0]}">
-            <button class="btn">{p[1]} - ${p[2]}</button>
-        </a>
-        """
+   categoria_actual = None
+
+   for p in productos:
+       categoria = p[3] if p[3] else "Sin categoría"
+
+       if categoria != categoria_actual:
+          categoria_actual = categoria
+          html += f"<h3>🍽 {categoria}</h3>"
+
+       html += f"""
+       <a href="/agregar/{orden_id}/{p[0]}">
+          <button class="btn">{p[1]} - ${p[2]}</button>
+       </a>
+    """
 
     html += "</div>"
 
