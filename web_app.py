@@ -1,26 +1,32 @@
 from flask import Flask, request, redirect
 import sqlite3
-import datetime
-import os
+from datetime import datetime
 
 app = Flask(__name__)
 
-# ---------------- DB ----------------
-
+# =========================
+# DB
+# =========================
 def get_db():
     return sqlite3.connect("china_house.db")
+
 
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS configuracion (
+        clave TEXT PRIMARY KEY,
+        valor TEXT
+    )
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS productos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nombre TEXT,
         precio REAL,
-        tipo TEXT,
-        descripcion TEXT,
         activo INTEGER DEFAULT 1
     )
     """)
@@ -28,8 +34,8 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        numero_orden INTEGER,
-        fecha_hora TEXT,
+        numero INTEGER,
+        fecha TEXT,
         tipo TEXT,
         referencia TEXT,
         cliente TEXT,
@@ -46,52 +52,64 @@ def init_db():
     )
     """)
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS config (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tasa REAL
-    )
-    """)
-
     conn.commit()
     conn.close()
 
-# ---------------- TASA ----------------
 
 def obtener_tasa():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT tasa FROM config ORDER BY id DESC LIMIT 1")
-    data = cursor.fetchone()
+    cursor.execute("SELECT valor FROM configuracion WHERE clave='tasa'")
+    row = cursor.fetchone()
     conn.close()
-    return data[0] if data else None
+    return float(row[0]) if row else 35
 
-@app.route("/config", methods=["GET", "POST"])
-def config():
-    if request.method == "POST":
-        try:
-            tasa = float(request.form["tasa"])
-        except:
-            return "Error: tasa inválida"
 
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO config (tasa) VALUES (?)", (tasa,))
-        conn.commit()
-        conn.close()
+init_db()
 
-        return redirect("/")
+# =========================
+# HOME
+# =========================
+@app.route("/")
+def home():
+    tasa = obtener_tasa()
 
-    return """
-    <h1>Configurar tasa Bs</h1>
-    <form method="post">
-        <input name="tasa" required>
+    return f"""
+    <h1>Sistema China House</h1>
+
+    <h3>Tasa actual: Bs {tasa}</h3>
+    <form method="POST" action="/tasa">
+        Nueva tasa: <input name="tasa">
         <button>Guardar</button>
     </form>
+
+    <hr>
+
+    <a href="/crear_orden">➕ Nueva Orden</a><br>
+    <a href="/productos">📦 Productos</a>
     """
 
-# ---------------- PRODUCTOS ----------------
 
+@app.route("/tasa", methods=["POST"])
+def tasa():
+    nueva = request.form["tasa"]
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    INSERT OR REPLACE INTO configuracion (clave, valor)
+    VALUES ('tasa', ?)
+    """, (nueva,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/")
+
+# =========================
+# PRODUCTOS
+# =========================
 @app.route("/productos")
 def productos():
     conn = get_db()
@@ -102,26 +120,16 @@ def productos():
 
     conn.close()
 
-    html = "<h1>Menú</h1>"
+    html = "<h1>Productos</h1>"
 
     for p in productos:
-        html += f"""
-        {p[1]} - ${p[2]} ({p[3]})
-        <a href="/eliminar_producto/{p[0]}">❌</a><br>
-        """
+        html += f"{p[1]} - ${p[2]}<br>"
 
     html += """
     <hr>
-    <h3>Nuevo producto / combo</h3>
-    <form action="/crear_producto" method="post">
-        Nombre:<input name="nombre" required><br>
-        Precio:<input name="precio" required><br>
-        Tipo:
-        <select name="tipo">
-            <option>producto</option>
-            <option>combo</option>
-        </select><br>
-        Descripción:<input name="descripcion"><br>
+    <form method="POST" action="/crear_producto">
+        Nombre: <input name="nombre"><br>
+        Precio: <input name="precio"><br>
         <button>Crear</button>
     </form>
 
@@ -130,147 +138,76 @@ def productos():
 
     return html
 
+
 @app.route("/crear_producto", methods=["POST"])
 def crear_producto():
-    try:
-        nombre = request.form.get("nombre", "").strip()
-        precio = request.form.get("precio", "").strip()
-        tipo = request.form.get("tipo", "producto")
-        descripcion = request.form.get("descripcion", "")
+    nombre = request.form["nombre"]
+    precio = request.form["precio"]
 
-        if not nombre or not precio:
-            return "Error: datos incompletos"
-
-        precio = float(precio)
-
-        conn = get_db()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-        INSERT INTO productos (nombre, precio, tipo, descripcion)
-        VALUES (?, ?, ?, ?)
-        """, (nombre, precio, tipo, descripcion))
-
-        conn.commit()
-        conn.close()
-
-        return redirect("/productos")
-
-    except Exception as e:
-        return f"Error: {e}"
-
-@app.route("/eliminar_producto/<int:id>")
-def eliminar_producto(id):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("UPDATE productos SET activo=0 WHERE id=?", (id,))
+    cursor.execute("INSERT INTO productos (nombre,precio) VALUES (?,?)", (nombre, precio))
+
     conn.commit()
     conn.close()
 
     return redirect("/productos")
 
-# ---------------- CONSECUTIVO ----------------
+# =========================
+# ORDENES
+# =========================
+@app.route("/crear_orden", methods=["GET", "POST"])
+def crear_orden():
+    if request.method == "POST":
+        tipo = request.form["tipo"]
+        referencia = request.form["referencia"]
+        cliente = request.form["cliente"]
 
-def siguiente_numero():
-    hoy = datetime.date.today().isoformat()
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = get_db()
-    cursor = conn.cursor()
+        conn = get_db()
+        cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT MAX(numero_orden)
-    FROM ordenes
-    WHERE date(fecha_hora)=?
-    """, (hoy,))
+        # consecutivo diario
+        hoy = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute("SELECT COUNT(*) FROM ordenes WHERE fecha LIKE ?", (f"{hoy}%",))
+        numero = cursor.fetchone()[0] + 1
 
-    ultimo = cursor.fetchone()[0]
-    conn.close()
+        cursor.execute("""
+        INSERT INTO ordenes (numero,fecha,tipo,referencia,cliente,estado)
+        VALUES (?,?,?,?,?,'abierta')
+        """, (numero, fecha, tipo, referencia, cliente))
 
-    return 1 if ultimo is None else ultimo + 1
+        conn.commit()
 
-# ---------------- HOME ----------------
+        orden_id = cursor.lastrowid
+        conn.close()
 
-@app.route("/")
-def home():
-    tasa = obtener_tasa()
+        return redirect(f"/orden/{orden_id}")
 
-    if not tasa:
-        return redirect("/config")
+    return """
+    <h1>Nueva Orden</h1>
 
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM ordenes WHERE estado!='cerrada'")
-    ordenes = cursor.fetchall()
-
-    conn.close()
-
-    html = f"""
-    <h1>🍜 China House POS</h1>
-
-    <b>Tasa Bs:</b> {tasa}
-    <a href="/config">✏️</a>
-    <br>
-    <a href="/productos">Gestionar menú</a>
-
-    <hr>
-
-    <h3>Nueva orden</h3>
-    <form action="/crear_orden" method="post">
+    <form method="POST">
         Tipo:
         <select name="tipo">
-            <option>Mesa</option>
-            <option>Delivery</option>
-            <option>Pickup</option>
+            <option>mesa</option>
+            <option>delivery</option>
+            <option>pickup</option>
         </select><br>
 
-        Referencia:<input name="referencia"><br>
-        Cliente:<input name="cliente"><br>
+        Referencia (ej: Mesa 1): <input name="referencia"><br>
 
-        <button>Crear orden</button>
+        Cliente (opcional): <input name="cliente"><br>
+
+        <button>Crear</button>
     </form>
-
-    <hr>
-
-    <h3>Órdenes activas</h3>
     """
 
-    for o in ordenes:
-        html += f"""
-        #{o[1]} - {o[3]} {o[4]}
-        <a href="/orden/{o[0]}">Abrir</a><br>
-        """
-
-    return html
-
-# ---------------- CREAR ORDEN ----------------
-
-@app.route("/crear_orden", methods=["POST"])
-def crear_orden():
-    tipo = request.form.get("tipo", "")
-    referencia = request.form.get("referencia", "")
-    cliente = request.form.get("cliente", "")
-
-    numero = siguiente_numero()
-    fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    conn = get_db()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    INSERT INTO ordenes (numero_orden, fecha_hora, tipo, referencia, cliente, estado)
-    VALUES (?, ?, ?, ?, ?, 'abierta')
-    """, (numero, fecha, tipo, referencia, cliente))
-
-    conn.commit()
-    orden_id = cursor.lastrowid
-    conn.close()
-
-    return redirect(f"/orden/{orden_id}")
-
-# ---------------- ORDEN ----------------
-
+# =========================
+# VER ORDEN
+# =========================
 @app.route("/orden/<int:orden_id>")
 def orden(orden_id):
     tasa = obtener_tasa()
@@ -278,10 +215,13 @@ def orden(orden_id):
     conn = get_db()
     cursor = conn.cursor()
 
+    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
+    orden = cursor.fetchone()
+
     cursor.execute("SELECT * FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
 
-    cursor.execute("SELECT id,nombre,precio FROM productos WHERE activo=1")
+    cursor.execute("SELECT * FROM productos WHERE activo=1")
     productos = cursor.fetchall()
 
     conn.close()
@@ -289,12 +229,23 @@ def orden(orden_id):
     total = sum(i[3] for i in items)
     total_bs = round(total * tasa, 2)
 
-    html = f"<h2>Total: ${total} | Bs {total_bs}</h2><hr>"
+    html = f"""
+    <h1>Orden #{orden[1]}</h1>
+
+    Tipo: {orden[3]}<br>
+    Referencia: {orden[4]}<br>
+    Cliente: {orden[5] if orden[5] else "No especificado"}<br>
+    Fecha: {orden[2]}<br>
+
+    <hr>
+
+    <h2>Total: ${total} | Bs {total_bs}</h2>
+    """
 
     for i in items:
         html += f"{i[2]} - ${i[3]}<br>"
 
-    html += "<hr><h3>Agregar</h3>"
+    html += "<hr><h3>Agregar producto</h3>"
 
     for p in productos:
         html += f"""
@@ -304,27 +255,28 @@ def orden(orden_id):
         """
 
     html += f"""
+    <hr>
+
+    🔥 <a href="/cocina/{orden_id}">Enviar a cocina</a><br>
+    💵 <a href="/cobrar/{orden_id}">Cobrar</a><br>
+
     <br><a href="/">Volver</a>
     """
 
     return html
 
-# ---------------- AGREGAR ----------------
 
 @app.route("/agregar/<int:orden_id>/<int:producto_id>")
 def agregar(orden_id, producto_id):
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (producto_id,))
+    cursor.execute("SELECT nombre,precio FROM productos WHERE id=?", (producto_id,))
     p = cursor.fetchone()
 
-    if not p:
-        return "Producto no encontrado"
-
     cursor.execute("""
-    INSERT INTO orden_items (orden_id, producto, precio)
-    VALUES (?, ?, ?)
+    INSERT INTO orden_items (orden_id,producto,precio)
+    VALUES (?,?,?)
     """, (orden_id, p[0], p[1]))
 
     conn.commit()
@@ -332,10 +284,76 @@ def agregar(orden_id, producto_id):
 
     return redirect(f"/orden/{orden_id}")
 
-# ---------------- MAIN ----------------
+# =========================
+# COBRAR
+# =========================
+@app.route("/cobrar/<int:orden_id>", methods=["GET", "POST"])
+def cobrar(orden_id):
+    tasa = obtener_tasa()
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM orden_items WHERE orden_id=?", (orden_id,))
+    items = cursor.fetchall()
+
+    total = sum(i[3] for i in items)
+
+    if request.method == "POST":
+        pago_usd = float(request.form.get("usd") or 0)
+        pago_bs = float(request.form.get("bs") or 0)
+        descuento = float(request.form.get("descuento") or 0)
+
+        total_final = total - descuento
+        total_bs = total_final * tasa
+
+        total_pagado = pago_usd + (pago_bs / tasa)
+
+        vuelto = round(total_pagado - total_final, 2)
+
+        cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        return f"""
+        <h1>Pago completado</h1>
+
+        Total: ${total_final}<br>
+        Pagado: ${total_pagado}<br>
+        Vuelto: ${vuelto}
+
+        <br><br>
+        <a href="/">Volver</a>
+        """
+
+    total_bs = round(total * tasa, 2)
+
+    html = f"""
+    <h1>Cobrar Orden #{orden_id}</h1>
+
+    <h2>Total: ${total} | Bs {total_bs}</h2>
+
+    <form method="POST">
+        Descuento: <input name="descuento"><br><br>
+
+        Pago USD: <input name="usd"><br>
+        Pago Bs: <input name="bs"><br><br>
+
+        <button>Confirmar pago</button>
+    </form>
+
+    <br><a href="/orden/{orden_id}">Volver</a>
+    """
+
+    return html
+
+# =========================
+# COCINA
+# =========================
+@app.route("/cocina/<int:orden_id>")
+def cocina(orden_id):
+    return f"<h1>Orden {orden_id} enviada a cocina 🔥</h1><a href='/orden/{orden_id}'>Volver</a>"
+
 
 if __name__ == "__main__":
-    init_db()
-
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
