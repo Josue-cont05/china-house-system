@@ -43,14 +43,14 @@ except:
     )
     """)
     cursor.execute("SELECT COUNT(*) FROM categorias")
-       if cursor.fetchone()[0] == 0:
-           categorias = [
-              ("Arroces",),
-              ("Especiales",),
+    if cursor.fetchone()[0] == 0:
+        categorias = [
+            ("Arroces",),
+            ("Especiales",),
             ("Bebidas",)
-    ]
+        ]
+
     cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
-    
 
 
     cursor.execute("""
