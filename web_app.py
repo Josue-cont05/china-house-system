@@ -130,6 +130,8 @@ def pos():
 
     <h1>🍜 China House POS</h1>
 
+    <a href="/cierre">📊 Ver cierre del día</a><br><br>
+
     <a href="/tasa">💱 Cambiar tasa</a>
 
     <h2>Nueva Orden</h2>
@@ -423,6 +425,67 @@ def cambiar_tasa():
     <a href="/">Volver</a>
     """
 
+# ---------------- CIERRE ----------------
+@app.route("/cierre")
+def cierre():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    hoy = datetime.date.today().isoformat()
+
+    # Total órdenes
+    cursor.execute("""
+    SELECT COUNT(*) FROM ordenes
+    WHERE date(fecha_hora) = ? AND estado = 'cerrada'
+    """, (hoy,))
+    total_ordenes = cursor.fetchone()[0]
+
+    # Total USD
+    cursor.execute("""
+    SELECT SUM(monto) FROM pagos
+    WHERE metodo = 'usd' AND date(fecha) = ?
+    """, (hoy,))
+    total_usd = cursor.fetchone()[0] or 0
+
+    # Total Bs efectivo
+    cursor.execute("""
+    SELECT SUM(monto) FROM pagos
+    WHERE metodo = 'bs_efectivo' AND date(fecha) = ?
+    """, (hoy,))
+    total_bs_efectivo = cursor.fetchone()[0] or 0
+
+    # Total Pago Móvil
+    cursor.execute("""
+    SELECT SUM(monto) FROM pagos
+    WHERE metodo = 'bs_pago_movil' AND date(fecha) = ?
+    """, (hoy,))
+    total_pago_movil = cursor.fetchone()[0] or 0
+
+    # Total general en USD (referencial)
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    tasa = cursor.fetchone()[0]
+
+    total_bs = total_bs_efectivo + total_pago_movil
+    total_general_usd = total_usd + (total_bs / tasa)
+
+    conn.close()
+
+    return f"""
+    <h1>📊 Cierre del día</h1>
+
+    <h2>Órdenes cerradas: {total_ordenes}</h2>
+
+    <h3>💵 USD: ${total_usd}</h3>
+    <h3>💰 Bs efectivo: Bs {total_bs_efectivo}</h3>
+    <h3>📱 Pago móvil: Bs {total_pago_movil}</h3>
+
+    <hr>
+
+    <h2>Total Bs: Bs {total_bs}</h2>
+    <h2>Total general (USD ref): ${round(total_general_usd, 2)}</h2>
+
+    <a href="/">⬅ Volver</a>
+    """
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
