@@ -27,7 +27,10 @@ def init_db():
         tipo TEXT,
         referencia TEXT,
         cliente TEXT,
-        estado TEXT
+        estado TEXT,
+        metodo_pago TEXT,
+        monto REAL,
+        referencia_pago TEXT
     )
     """)
 
@@ -282,14 +285,67 @@ def cocina(orden_id):
 
     return redirect(f"/orden/{orden_id}")
 
-# ---------------- COBRAR ----------------
+# ---------------- COBRAR (VISTA) ----------------
 
 @app.route("/cobrar/<int:orden_id>")
-def cobrar(orden_id):
+def cobrar_vista(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
+    cursor.execute("SELECT numero_orden FROM ordenes WHERE id=?", (orden_id,))
+    orden = cursor.fetchone()
+
+    cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
+    items = cursor.fetchall()
+
+    conn.close()
+
+    total = sum(i[0] for i in items)
+
+    return f"""
+    <h1>Cobrar Orden #{orden[0]}</h1>
+    <h2>Total: ${total}</h2>
+
+    <form action="/procesar_pago/{orden_id}" method="post">
+
+        Método de pago:
+        <select name="metodo">
+            <option>Efectivo $</option>
+            <option>Efectivo Bs</option>
+            <option>Pago móvil</option>
+        </select><br><br>
+
+        Monto:
+        <input name="monto" value="{total}"><br><br>
+
+        Referencia:
+        <input name="referencia"><br><br>
+
+        <button type="submit">Confirmar pago</button>
+    </form>
+
+    <a href="/orden/{orden_id}">Volver</a>
+    """
+
+# ---------------- PROCESAR PAGO ----------------
+
+@app.route("/procesar_pago/<int:orden_id>", methods=["POST"])
+def procesar_pago(orden_id):
+    metodo = request.form["metodo"]
+    monto = request.form["monto"]
+    referencia = request.form.get("referencia", "")
+
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    UPDATE ordenes 
+    SET estado='cerrada',
+        metodo_pago=?,
+        monto=?,
+        referencia_pago=?
+    WHERE id=?
+    """, (metodo, monto, referencia, orden_id))
 
     conn.commit()
     conn.close()
