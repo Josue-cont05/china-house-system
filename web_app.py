@@ -200,7 +200,8 @@ def orden(orden_id):
 
     conn.close()
 
-    total = sum(i[1] for i in items)
+    total_usd = sum(i[1] for i in items)
+    total_bs = total_usd * tasa
 
     html = f"""
     <html>
@@ -244,7 +245,8 @@ def orden(orden_id):
     for i in items:
         html += f"{i[0]} - ${i[1]}<br>"
 
-    html += f"<h2>Total: ${total}</h2>"
+    html += f"<h2>Total USD: ${total_usd}</h2>
+              <h2>Total Bs: Bs {total_bs}</h2>
 
     html += f"""
         <div class="acciones">
@@ -314,3 +316,8 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
+# ---------------- TASA ----------------
+@app.route("/tasa", methods=["GET", "POST"])
+
+    
