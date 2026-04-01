@@ -495,7 +495,7 @@ def pantalla_cocina():
     cursor = conn.cursor()
 
     cursor.execute("""
-    SELECT id, numero_orden, tipo, referencia
+    SELECT id, numero_orden, tipo, referencia, fecha_hora
     FROM ordenes
     WHERE estado = 'en cocina'
     ORDER BY fecha_hora ASC
@@ -503,42 +503,141 @@ def pantalla_cocina():
 
     ordenes = cursor.fetchall()
 
+    ahora = datetime.datetime.now()
+
     html = """
     <html>
     <head>
-    <style>
-        body { font-family: Arial; background:black; color:white; }
-        .orden { border:2px solid white; margin:10px; padding:15px; }
-        .btn { padding:10px; background:green; color:white; border:none; }
-    </style>
-    </head>
+
     <meta http-equiv="refresh" content="5">
+
+    <style>
+        body { 
+            font-family: Arial; 
+            background:black; 
+            color:white; 
+            font-size:22px;
+        }
+
+        .container {
+            display:flex;
+        }
+
+        .col {
+            width:50%;
+            padding:10px;
+        }
+
+        .orden {
+            border:4px solid white;
+            margin:10px;
+            padding:15px;
+            border-radius:10px;
+        }
+
+        .green { border-color: green; }
+        .orange { border-color: orange; }
+        .red { border-color: red; }
+
+        .btn {
+            padding:10px;
+            background:green;
+            color:white;
+            border:none;
+            font-size:18px;
+        }
+
+        h1 { text-align:center; }
+    </style>
+
+    <script>
+        let lastCount = 0;
+
+        function checkNewOrders(currentCount) {
+            if (currentCount > lastCount) {
+                let audio = new Audio('https://www.soundjay.com/buttons/sounds/button-3.mp3');
+                audio.play();
+            }
+            lastCount = currentCount;
+        }
+    </script>
+
+    </head>
     <body>
 
     <h1>🍳 COCINA</h1>
+
+    <div class="container">
+        <div class="col">
+            <h2>🟡 ESTACIÓN ARROZ</h2>
     """
 
-    for o in ordenes:
-        html += f"<div class='orden'>"
-        html += f"<h2>Orden #{o[1]}</h2>"
-        html += f"<p>{o[2]} - {o[3]}</p>"
+    arroz_html = ""
+    caliente_html = ""
 
-        # productos
+    total_ordenes = len(ordenes)
+
+    for o in ordenes:
+        fecha_orden = datetime.datetime.strptime(o[4], "%Y-%m-%d %H:%M:%S")
+        minutos = (ahora - fecha_orden).seconds / 60
+
+        if minutos < 5:
+            color_class = "green"
+        elif minutos < 10:
+            color_class = "orange"
+        else:
+            color_class = "red"
+
         cursor.execute("SELECT producto FROM orden_items WHERE orden_id=?", (o[0],))
         items = cursor.fetchall()
 
-        for i in items:
-            html += f"<p>• {i[0]}</p>"
+        tiene_arroz = any("Arroz chino" in i[0] for i in items)
+        tiene_otro = any("Arroz chino" not in i[0] for i in items)
 
-        html += f"""
-        <a href="/listo/{o[0]}">
-            <button class="btn">✅ LISTO</button>
-        </a>
+        bloque = f"""
+        <div class="orden {color_class}">
+            <h2>Orden #{o[1]}</h2>
+            <p>{o[2]} - {o[3]}</p>
+            <p>⏱ {int(minutos)} min</p>
         """
 
-        html += "</div>"
+        for i in items:
+            bloque += f"<p>• {i[0]}</p>"
 
-    html += "</body></html>"
+        bloque += f"""
+            <a href="/listo/{o[0]}">
+                <button class="btn">✅ LISTO</button>
+            </a>
+        </div>
+        """
+
+        if tiene_arroz:
+            arroz_html += bloque
+
+        if tiene_otro:
+            caliente_html += bloque
+
+    html += arroz_html
+
+    html += """
+        </div>
+        <div class="col">
+            <h2>🔵 ESTACIÓN CALIENTE</h2>
+    """
+
+    html += caliente_html
+
+    html += f"""
+        </div>
+    </div>
+
+    <script>
+        checkNewOrders({total_ordenes});
+    </script>
+
+    </body>
+    </html>
+    """
 
     conn.close()
     return html
