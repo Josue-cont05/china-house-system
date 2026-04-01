@@ -376,12 +376,12 @@ def orden(orden_id):
     cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
 
-   cursor.execute("""
-   SELECT p.id, p.nombre, p.precio, c.nombre
-   FROM productos p
-   LEFT JOIN categorias c ON p.categoria_id = c.id
-   ORDER BY c.nombre
-   """)
+    cursor.execute("""
+    SELECT p.id, p.nombre, p.precio, c.nombre
+    FROM productos p
+    LEFT JOIN categorias c ON p.categoria_id = c.id
+    ORDER BY c.nombre
+    """)
 
 productos = cursor.fetchall()
 
