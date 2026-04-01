@@ -244,10 +244,12 @@ def orden(orden_id):
 
     for i in items:
         html += f"{i[0]} - ${i[1]}<br>"
-
-    html += f"<h2>Total USD: ${total_usd}</h2>
-              <h2>Total Bs: Bs {total_bs}</h2>
-
+    
+    html += f"""
+    <h2>Total USD: ${total_usd}</h2>
+    <h2>Total Bs: Bs {total_bs}</h2>
+    """
+    
     html += f"""
         <div class="acciones">
             🔥 <a href="/enviar_cocina/{orden_id}">Enviar a cocina</a>
