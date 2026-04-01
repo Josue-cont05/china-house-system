@@ -512,6 +512,7 @@ def pantalla_cocina():
         .btn { padding:10px; background:green; color:white; border:none; }
     </style>
     </head>
+    <meta http-equiv="refresh" content="5">
     <body>
 
     <h1>🍳 COCINA</h1>
