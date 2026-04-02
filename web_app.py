@@ -455,18 +455,61 @@ def orden(orden_id):
     total_usd = sum(i[1] for i in items)
     total_bs = total_usd * tasa
 
-    # 🔹 HTML
     html = f"""
     <html>
     <head>
     <style>
-        body {{ font-family: Arial; display:flex; }}
-        .productos {{ width:60%; }}
-        .panel {{ width:40%; padding:20px; border-left:2px solid #ccc; }}
-        .btn {{ width:100%; padding:20px; margin:5px; font-size:18px; background:#27ae60; color:white; border:none; }}
-    </style>
-    </head>
-    <body>
+        body {{
+            font-family: Arial;
+            display:flex;
+            margin:0;
+        }}
+
+        .productos {{
+            width:65%;
+            padding:10px;
+            background:#f5f5f5;
+        }}
+
+        .panel {{
+            width:35%;
+            padding:20px;
+            background:white;
+            border-left:3px solid #ccc;
+        }}
+
+        .btn {{
+            width:48%;
+            padding:20px;
+            margin:5px 1%;
+            font-size:18px;
+            background:#27ae60;
+            color:white;
+            border:none;
+            border-radius:10px;
+        }}
+
+        .categoria {{
+            background:#333;
+            color:white;
+            padding:8px;
+            margin-top:10px;
+            border-radius:5px;
+        }}
+
+        .acciones a {{
+            display:block;
+            margin:10px 0;
+            padding:10px;
+            background:#3498db;
+            color:white;
+            text-align:center;
+            text-decoration:none;
+            border-radius:5px;
+        }}
+
+</style>
+</head>
 
     <div class="productos">
         <h2>Agregar productos</h2>
@@ -480,7 +523,7 @@ def orden(orden_id):
 
         if categoria != categoria_actual:
             categoria_actual = categoria
-            html += f"<h3>🍽 {categoria}</h3>"
+            html += f"<div class='categoria'>🍽 {categoria}</div>"
 
         html += f"""
         <a href="/agregar/{orden_id}/{p[0]}">
