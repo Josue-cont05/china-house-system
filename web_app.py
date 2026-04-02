@@ -11,6 +11,7 @@ def init_db():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # ---------------- PRODUCTOS ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS productos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,12 +19,32 @@ def init_db():
         precio REAL
     )
     """)
-    
+
+    # 🔥 agregar columna categoria_id (seguro)
     try:
         cursor.execute("ALTER TABLE productos ADD COLUMN categoria_id INTEGER")
     except:
-    pass
+        pass
 
+    # ---------------- CATEGORIAS ----------------
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS categorias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT
+    )
+    """)
+
+    # 🔥 insertar categorias iniciales
+    cursor.execute("SELECT COUNT(*) FROM categorias")
+    if cursor.fetchone()[0] == 0:
+        categorias = [
+            ("Arroces",),
+            ("Especiales",),
+            ("Bebidas",)
+        ]
+        cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
+
+    # ---------------- ORDENES ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,23 +57,17 @@ def init_db():
     )
     """)
 
+    # ---------------- ITEMS ----------------
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS categorias (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nombre TEXT
+    CREATE TABLE IF NOT EXISTS orden_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        orden_id INTEGER,
+        producto TEXT,
+        precio REAL
     )
     """)
-    cursor.execute("SELECT COUNT(*) FROM categorias")
-    if cursor.fetchone()[0] == 0:
-        categorias = [
-            ("Arroces",),
-            ("Especiales",),
-            ("Bebidas",)
-        ]
 
-    cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
-
-
+    # ---------------- PAGOS ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS pagos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,17 +78,8 @@ def init_db():
         fecha TEXT
     )
     """)
-    cursor.execute("""
-    
-    CREATE TABLE IF NOT EXISTS orden_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        orden_id INTEGER,
-        producto TEXT,
-        precio REAL
-    )
-    """)
 
-    # 🔥 NUEVA TABLA TASA
+    # ---------------- TASA ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tasa (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,10 +87,20 @@ def init_db():
     )
     """)
 
-    # 🔥 ASEGURAR QUE EXISTA UNA TASA
+    # 🔥 asegurar tasa inicial
     cursor.execute("SELECT COUNT(*) FROM tasa")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO tasa (valor) VALUES (36)")
+
+    # ---------------- INGREDIENTES (BASE FUTURA) ----------------
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ingredientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT,
+        unidad TEXT,
+        stock REAL
+    )
+    """)
 
     conn.commit()
     conn.close()
