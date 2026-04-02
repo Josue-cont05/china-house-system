@@ -283,7 +283,7 @@ def menu():
     return html
 
 # ---------------- Agregar producto ----------------
-@@app.route("/agregar_producto", methods=["POST"])
+@app.route("/agregar_producto", methods=["POST"])
 def agregar_producto():
     nombre = request.form.get("nombre", "").strip()
 
