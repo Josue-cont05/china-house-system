@@ -595,15 +595,15 @@ def orden(orden_id):
         <div class="total"> Bs: {total_bs}</div>
 
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
-            🍳 Enviar a cocina
+             Enviar a cocina
         </a>
 
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
-            💰 Cobrar
+             Cobrar
         </a>
 
         <a href="/" class="btn-accion volver">
-            ⬅ Volver
+             Volver
         </a>
 
     </div>
@@ -703,7 +703,7 @@ def cobrar(orden_id):
     conn.close()
 
     return f"""
-    <h1>💰 Cobro Orden #{orden_id}</h1>
+    <h1> Cobro Orden #{orden_id}</h1>
 
     <h2>Total USD: ${total_usd}</h2>
     <h2>Total Bs: Bs {total_bs}</h2>
@@ -892,11 +892,11 @@ def pantalla_cocina():
     </head>
     <body>
 
-    <h1>🍳 COCINA</h1>
+    <h1> COCINA</h1>
 
     <div class="container">
         <div class="col">
-            <h2>🟡 ESTACIÓN ARROZ</h2>
+            <h2> ESTACIÓN ARROZ</h2>
     """
 
     arroz_html = ""
@@ -933,7 +933,7 @@ def pantalla_cocina():
 
         bloque += f"""
             <a href="/listo/{o[0]}">
-                <button class="btn">✅ LISTO</button>
+                <button class="btn"> LISTO</button>
             </a>
         </div>
         """
@@ -949,7 +949,7 @@ def pantalla_cocina():
     html += """
         </div>
         <div class="col">
-            <h2>🔵 ESTACIÓN CALIENTE</h2>
+            <h2> ESTACIÓN CALIENTE</h2>
     """
 
     html += caliente_html
