@@ -582,7 +582,7 @@ def orden(orden_id):
         <p>Estado: {o[4]}</p>
 
         <div class="lista-items">
-            <h3>🛒 Productos</h3>
+            <h3> Productos</h3>
 """
 
     for i in items:
