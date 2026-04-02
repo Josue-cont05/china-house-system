@@ -19,9 +19,9 @@ def init_db():
     )
     """)
     
-try:
-    cursor.execute("ALTER TABLE productos ADD COLUMN categoria_id INTEGER")
-except:
+    try:
+        cursor.execute("ALTER TABLE productos ADD COLUMN categoria_id INTEGER")
+    except:
     pass
 
     cursor.execute("""
