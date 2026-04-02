@@ -118,12 +118,11 @@ def cargar_productos():
             ("Pollo agridulce", 6),
             ("Pasta china", 5)
         ]
-        cursor.executemany("INSERT INTO productos (nombre, precio) VALUES (?, ?)", productos)
+        cursor.executemany(
+            "INSERT INTO productos (nombre, precio) VALUES (?, ?)",
+            productos
+        )
 
-    cursor.execute("""
-    ALTER TABLE productos ADD COLUMN categoria_id INTEGER
-    """)
-    
     conn.commit()
     conn.close()
 
@@ -284,11 +283,18 @@ def menu():
     return html
 
 # ---------------- Agregar producto ----------------
-@app.route("/agregar_producto", methods=["POST"])
+@@app.route("/agregar_producto", methods=["POST"])
 def agregar_producto():
-    nombre = request.form["nombre"]
-    precio = float(request.form["precio"])
-    categoria_id = int(request.form["categoria_id"])
+    nombre = request.form.get("nombre", "").strip()
+
+    try:
+        precio = float(request.form["precio"])
+        categoria_id = int(request.form["categoria_id"])
+    except:
+        return "Datos inválidos"
+
+    if nombre == "":
+        return "Nombre requerido"
 
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
@@ -314,43 +320,75 @@ def eliminar_producto(id):
     conn.close()
 
     return redirect("/menu")
+    
 # ---------------- EDITAR PRODUCTO ----------------
+
 @app.route("/editar_producto/<int:id>", methods=["GET", "POST"])
 def editar_producto(id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # 🔹 traer categorías
+    cursor.execute("SELECT id, nombre FROM categorias")
+    categorias = cursor.fetchall()
+
     if request.method == "POST":
-        nombre = request.form["nombre"]
-        precio = float(request.form["precio"])
+        nombre = request.form.get("nombre", "").strip()
+
+        try:
+            precio = float(request.form["precio"])
+            categoria_id = int(request.form["categoria_id"])
+        except:
+            return "Datos inválidos"
 
         cursor.execute("""
-        UPDATE productos SET nombre=?, precio=?
+        UPDATE productos 
+        SET nombre=?, precio=?, categoria_id=?
         WHERE id=?
-        """, (nombre, precio, id))
+        """, (nombre, precio, categoria_id, id))
 
         conn.commit()
         conn.close()
 
         return redirect("/menu")
 
-    cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (id,))
+    # 🔹 traer producto actual
+    cursor.execute("""
+    SELECT nombre, precio, categoria_id 
+    FROM productos WHERE id=?
+    """, (id,))
     p = cursor.fetchone()
 
-    conn.close()
+    if not p:
+        conn.close()
+        return "Producto no encontrado"
 
-    return f"""
+    html = f"""
     <h1>Editar producto</h1>
 
     <form method="post">
         Nombre: <input name="nombre" value="{p[0]}"><br><br>
         Precio: <input name="precio" value="{p[1]}"><br><br>
+
+        Categoría:
+        <select name="categoria_id">
+    """
+
+    for c in categorias:
+        selected = "selected" if c[0] == p[2] else ""
+        html += f"<option value='{c[0]}' {selected}>{c[1]}</option>"
+
+    html += """
+        </select><br><br>
+
         <button>Guardar</button>
     </form>
 
     <a href="/menu">Volver</a>
     """
 
+    conn.close()
+    return html
 # ---------------- CREAR ORDEN ----------------
 
 @app.route("/crear_orden", methods=["POST"])
@@ -389,6 +427,9 @@ def orden(orden_id):
     FROM ordenes WHERE id=?
     """, (orden_id,))
     o = cursor.fetchone()
+    if not o:
+        conn.close()
+        return "Orden no encontrada"
 
     # 🔹 Items de la orden
     cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
@@ -776,7 +817,7 @@ def pantalla_cocina():
 
     for o in ordenes:
         fecha_orden = datetime.datetime.strptime(o[4], "%Y-%m-%d %H:%M:%S")
-        minutos = (ahora - fecha_orden).seconds / 60
+        minutos = (ahora - fecha_orden).total_seconds() / 60
 
         if minutos < 5:
             color_class = "green"
