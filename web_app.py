@@ -393,12 +393,12 @@ def editar_producto(id):
 
 @app.route("/crear_orden", methods=["POST"])
 def crear_orden():
-    tipo = request.form["tipo"]
-    referencia = request.form["referencia"]
+    tipo = request.form.get("tipo")
+    referencia = request.form.get("referencia", "")
     cliente = request.form.get("cliente", "")
 
     numero = siguiente_numero()
-    fecha_hora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
@@ -406,13 +406,12 @@ def crear_orden():
     cursor.execute("""
     INSERT INTO ordenes (numero_orden, fecha_hora, tipo, referencia, cliente, estado)
     VALUES (?, ?, ?, ?, ?, ?)
-    """, (numero, fecha_hora, tipo, referencia, cliente, "abierta"))
+    """, (numero, fecha, tipo, referencia, cliente, "abierta"))
 
     conn.commit()
-    orden_id = cursor.lastrowid
     conn.close()
 
-    return redirect(f"/orden/{orden_id}")
+    return redirect("/")
 
 # ---------------- ORDEN ----------------
 
