@@ -591,8 +591,8 @@ def orden(orden_id):
     html += f"""
         </div>
 
-        <div class="total">💵 USD: ${total_usd}</div>
-        <div class="total">💰 Bs: {total_bs}</div>
+        <div class="total"> USD: ${total_usd}</div>
+        <div class="total"> Bs: {total_bs}</div>
 
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
             🍳 Enviar a cocina
