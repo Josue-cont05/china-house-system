@@ -575,7 +575,7 @@ def orden(orden_id):
     html += f"""
     <div class="panel">
 
-        <h2>🧾 Orden #{o[0]}</h2>
+        <h2> Orden #{o[0]}</h2>
         <p><b>{o[1]}</b> - {o[2]}</p>
         <p>Cliente: {o[3] if o[3] else '-'}</p>
         <p>Hora: {o[5]}</p>
