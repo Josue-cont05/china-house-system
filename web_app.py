@@ -459,6 +459,45 @@ def orden(orden_id):
     <html>
     <head>
     <style>
+        body {{ font-family: Arial; display:flex; }}
+        .productos {{ width:60%; }}
+        .panel {{ width:40%; padding:20px; border-left:2px solid #ccc; }}
+        .btn {{ width:100%; padding:20px; margin:5px; font-size:18px; background:#27ae60; color:white; border:none; }}
+
+        /* 🔥 NUEVO */
+        .panel h2 {
+            margin-top:0;
+        }
+
+        .total {
+            font-size:24px;
+            font-weight:bold;
+            margin:10px 0;
+        }
+
+        .btn-accion {
+            display:block;
+            width:100%;
+            padding:15px;
+            margin:10px 0;
+            text-align:center;
+            text-decoration:none;
+            color:white;
+            border-radius:8px;
+            font-size:18px;
+        }
+
+        .cocina { background:#e67e22; }
+        .cobrar { background:#27ae60; }
+        .volver { background:#7f8c8d; }
+
+        .lista-items {
+            background:#f9f9f9;
+            padding:10px;
+            border-radius:8px;
+            margin:10px 0;
+        }
+    <style>
         body {{
             font-family: Arial;
             display:flex;
@@ -536,31 +575,39 @@ def orden(orden_id):
     # 🔹 Panel derecho
     html += f"""
     <div class="panel">
-        <h2>Orden #{o[0]}</h2>
-        <p>{o[1]} - {o[2]}</p>
+
+        <h2>🧾 Orden #{o[0]}</h2>
+        <p><b>{o[1]}</b> - {o[2]}</p>
         <p>Cliente: {o[3] if o[3] else '-'}</p>
         <p>Hora: {o[5]}</p>
         <p>Estado: {o[4]}</p>
 
-        <hr>
-
-        <h3>Productos</h3>
-    """
+        <div class="lista-items">
+            <h3>🛒 Productos</h3>
+"""
 
     for i in items:
-        html += f"{i[0]} - ${i[1]}<br>"
+        html += f"<p>• {i[0]} - ${i[1]}</p>"
 
     html += f"""
-    <h2>Total USD: ${total_usd}</h2>
-    <h2>Total Bs: Bs {total_bs}</h2>
+        </div>
 
-    <a href="/enviar_cocina/{orden_id}">🔥 Enviar a cocina</a><br>
-    <a href="/cobrar/{orden_id}">💰 Cobrar</a><br>
-    <a href="/">⬅ Volver</a>
+        <div class="total">💵 USD: ${total_usd}</div>
+        <div class="total">💰 Bs: {total_bs}</div>
+
+        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
+            🍳 Enviar a cocina
+        </a>
+
+        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
+            💰 Cobrar
+        </a>
+
+        <a href="/" class="btn-accion volver">
+            ⬅ Volver
+        </a>
+
     </div>
-
-    </body>
-    </html>
     """
 
     return html
