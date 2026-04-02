@@ -458,45 +458,6 @@ def orden(orden_id):
     <html>
     <head>
     <style>
-        body {{ font-family: Arial; display:flex; }}
-        .productos {{ width:60%; }}
-        .panel {{ width:40%; padding:20px; border-left:2px solid #ccc; }}
-        .btn {{ width:100%; padding:20px; margin:5px; font-size:18px; background:#27ae60; color:white; border:none; }}
-
-        /* 🔥 NUEVO */
-        .panel h2 {
-            margin-top:0;
-        }
-
-        .total {
-            font-size:24px;
-            font-weight:bold;
-            margin:10px 0;
-        }
-
-        .btn-accion {
-            display:block;
-            width:100%;
-            padding:15px;
-            margin:10px 0;
-            text-align:center;
-            text-decoration:none;
-            color:white;
-            border-radius:8px;
-            font-size:18px;
-        }
-
-        .cocina { background:#e67e22; }
-        .cobrar { background:#27ae60; }
-        .volver { background:#7f8c8d; }
-
-        .lista-items {
-            background:#f9f9f9;
-            padding:10px;
-            border-radius:8px;
-            margin:10px 0;
-        }
-    <style>
         body {{
             font-family: Arial;
             display:flex;
@@ -546,8 +507,47 @@ def orden(orden_id):
             border-radius:5px;
         }}
 
-</style>
-</head>
+        /* 🔥 PANEL DERECHO */
+        .panel h2 {{
+            margin-top:0;
+        }}
+
+        .total {{
+            font-size:24px;
+            font-weight:bold;
+            margin:10px 0;
+        }}
+
+        .btn-accion {{
+            display:block;
+            width:100%;
+            padding:15px;
+            margin:10px 0;
+            text-align:center;
+            text-decoration:none;
+            color:white;
+            border-radius:8px;
+            font-size:18px;
+        }}
+
+        .cocina {{ background:#e67e22; }}
+        .cobrar {{ background:#27ae60; }}
+        .volver {{ background:#7f8c8d; }}
+
+        .lista-items {{
+            background:#f9f9f9;
+            padding:10px;
+            border-radius:8px;
+            margin:10px 0;
+        }}
+    </style>
+    </head>
+
+    <body>
+
+    <div class="productos">
+        <h2>Agregar productos</h2>
+    """
 
     <div class="productos">
         <h2>Agregar productos</h2>
