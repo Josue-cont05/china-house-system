@@ -663,33 +663,44 @@ def cobrar(orden_id):
     total_bs = total_usd * tasa
 
     if request.method == "POST":
-        metodo = request.form["metodo"]
-        monto = float(request.form["monto"])
-        referencia = request.form.get("referencia", "")
+        metodo1 = request.form["metodo1"]
+        monto1 = float(request.form["monto1"] or 0)
+        ref1 = request.form.get("ref1", "")
 
-        # VALIDACIONES
-        if metodo == "usd":
-            if monto < total_usd:
-                return "Pago insuficiente en USD"
+        metodo2 = request.form.get("metodo2")
+        monto2 = float(request.form.get("monto2") or 0)
+        ref2 = request.form.get("ref2", "")
 
-        elif metodo == "bs_efectivo":
-            if monto < total_bs:
-                return "Pago insuficiente en Bs"
-
-        elif metodo == "bs_pago_movil":
-            if monto < total_bs:
-                return "Pago móvil insuficiente"
-            if referencia.strip() == "":
-                return "Debes colocar la referencia del pago móvil"
-                
         fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        cursor.execute("""
-        INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-        VALUES (?, ?, ?, ?, ?)
-        """, (orden_id, metodo, monto, referencia, fecha))
-        
-        # Cerrar orden
+        def convertir(metodo, monto):
+            if metodo == "usd":
+                return monto, monto * tasa
+        else:
+            return monto / tasa, monto
+
+        usd1, bs1 = convertir(metodo1, monto1)
+        usd2, bs2 = convertir(metodo2, monto2) if metodo2 else (0, 0)
+
+        total_pagado_usd = usd1 + usd2
+
+        # VALIDACIÓN
+        if total_pagado_usd < total_usd:
+            return "Pago insuficiente"
+
+        # GUARDAR PAGOS
+        cursor.execute(
+            "INSERT INTO pagos VALUES (NULL, ?, ?, ?, ?, ?)",
+            (orden_id, metodo1, monto1, ref1, fecha)
+        )
+
+        if metodo2:
+            cursor.execute(
+                "INSERT INTO pagos VALUES (NULL, ?, ?, ?, ?, ?)",
+                (orden_id, metodo2, monto2, ref2, fecha)
+            )
+
+        # CERRAR ORDEN
         cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
         conn.commit()
         conn.close()
@@ -705,20 +716,30 @@ def cobrar(orden_id):
     <h2>Total Bs: Bs {total_bs}</h2>
 
     <form method="post">
-        <label>Método de pago:</label><br>
-        <select name="metodo">
-            <option value="usd">$ Efectivo</option>
-            <option value="bs_efectivo">Bs Efectivo</option>
-            <option value="bs_pago_movil">Pago Móvil</option>
-        </select><br><br>
+    
+    <h3>Pago 1</h3>
+    <select name="metodo1">
+        <option value="usd">$</option>
+        <option value="bs_efectivo">Bs efectivo</option>
+        <option value="bs_pago_movil">Pago móvil</option>
+    </select>
 
-        <label>Monto recibido:</label><br>
-        <input name="monto"><br><br>
+    <input name="monto1" placeholder="Monto"><br>
+    <input name="ref1" placeholder="Referencia"><br><br>
 
-        <label>Referencia (solo pago móvil):</label><br>
-        <input name="referencia"><br><br>
+    <h3>Pago 2 (opcional)</h3>
+    <select name="metodo2">
+        <option value="">-- ninguno --</option>
+        <option value="usd">$</option>
+        <option value="bs_efectivo">Bs efectivo</option>
+        <option value="bs_pago_movil">Pago móvil</option>
+    </select>
 
-        <button type="submit">Confirmar pago</button>
+    <input name="monto2" placeholder="Monto"><br>
+    <input name="ref2" placeholder="Referencia"><br><br>
+
+    <button>Confirmar pago</button>
+
     </form>
 
     <a href="/orden/{orden_id}">⬅ Volver</a>
