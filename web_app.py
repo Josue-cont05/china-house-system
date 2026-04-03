@@ -1029,7 +1029,7 @@ def exportar():
     conn.close()
 
     # encabezados
-    csv = "fecha,orden,producto,precio,metodo,monto,referencia\n"
+    csv = "fecha;orden;producto;precio;metodo;monto;referencia\n"
 
     for d in datos:
         fecha = d[0] or ""
@@ -1040,7 +1040,7 @@ def exportar():
         monto = d[5] or ""
         referencia = d[6] or ""
 
-        csv += f"{fecha},{orden},{producto},{precio},{metodo},{monto},{referencia}\n"
+        csv += f"{fecha};{orden};{producto};{precio};{metodo};{monto};{referencia}\n"
 
     return csv, 200, {
         "Content-Type": "text/csv",
