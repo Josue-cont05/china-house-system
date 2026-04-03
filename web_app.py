@@ -27,23 +27,17 @@ def init_db():
         pass
 
     # ---------------- CATEGORIAS ----------------
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS categorias (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT
-    )
-    """)
+ # 🔥 insertar categorias iniciales
+cursor.execute("SELECT COUNT(*) FROM categorias")
+if cursor.fetchone()[0] == 0:
+    categorias = [
+        ("Arroces",),
+        ("Bebida",),
+        ("Delivery",),
+        ("Extras",)
+    ]
 
-    # 🔥 insertar categorias iniciales
-    cursor.execute("SELECT COUNT(*) FROM categorias")
-    if cursor.fetchone()[0] == 0:
-        categorias = [
-            ("Arroces",),
-            ("Especiales",),
-            ("Bebidas",)
-        ]
-        cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
-
+    cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
     # ---------------- ORDENES ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
@@ -111,16 +105,67 @@ def cargar_productos():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # 🔍 Verificar si ya hay productos
     cursor.execute("SELECT COUNT(*) FROM productos")
-    if cursor.fetchone()[0] == 0:
-        productos = [
-            ("Arroz chino", 5),
-            ("Pollo agridulce", 6),
-            ("Pasta china", 5)
-        ]
-        cursor.executemany(
-            "INSERT INTO productos (nombre, precio) VALUES (?, ?)",
-            productos
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return
+
+    # 🔥 CREAR CATEGORÍAS
+    categorias = [
+        ("Arroces",),
+        ("Bebida",),
+        ("Delivery",),
+        ("Extras",)
+    ]
+
+    cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
+
+    # 🔍 Obtener IDs de categorías
+    cursor.execute("SELECT id, nombre FROM categorias")
+    cat_dict = {nombre: id for id, nombre in cursor.fetchall()}
+
+    # 🔥 PRODUCTOS
+    productos = [
+        # Arroces
+        ("Cerdo-Jamon Personal", 5.5, "Arroces"),
+        ("Cerdo-Jamon Mediano", 8.5, "Arroces"),
+        ("Cerdo-Jamon Familiar", 11.5, "Arroces"),
+        ("Pollo-Jamon Personal", 5.5, "Arroces"),
+        ("Pollo-Jamon Mediano", 8.5, "Arroces"),
+        ("Pollo-Jamon Familiar", 11.5, "Arroces"),
+        ("Cerdo-Pollo Personal", 6.5, "Arroces"),
+        ("Cerdo-Pollo Mediano", 9.5, "Arroces"),
+        ("Cerdo-Pollo Familiar", 12.5, "Arroces"),
+        ("Pollo-Camaron Personal", 6.5, "Arroces"),
+        ("Pollo-Camaron Mediano", 9.5, "Arroces"),
+        ("Pollo-Camaron Familiar", 12.5, "Arroces"),
+        ("Especial Personal", 7.5, "Arroces"),
+        ("Especial Mediano", 10.5, "Arroces"),
+        ("Especial Familiar", 15.5, "Arroces"),
+
+        # Bebidas
+        ("Refresco 1 Lt", 1.1, "Bebida"),
+        ("Refresco 1.5 Lt", 0, "Bebida"),
+        ("Refresco 2 Lt", 0, "Bebida"),
+
+        # Delivery
+        ("Delivery 1", 1, "Delivery"),
+        ("Delivery 1.5", 1.5, "Delivery"),
+        ("Delivery 2", 2, "Delivery"),
+        ("Delivery 2.5", 2.5, "Delivery"),
+        ("Delivery 3", 3, "Delivery"),
+
+        # Extras
+        ("Salsa extra", 0.25, "Extras"),
+    ]
+
+    # 🔥 Insertar productos con categoría
+    for nombre, precio, categoria in productos:
+        categoria_id = cat_dict.get(categoria)
+        cursor.execute(
+            "INSERT INTO productos (nombre, precio, categoria_id) VALUES (?, ?, ?)",
+            (nombre, precio, categoria_id)
         )
 
     conn.commit()
