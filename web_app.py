@@ -672,12 +672,15 @@ def cobrar(orden_id):
         ref2 = request.form.get("ref2", "")
 
         fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+        
         def convertir(metodo, monto):
             if metodo == "usd":
                 return monto, monto * tasa
-        else:
-            return monto / tasa, monto
+            elif metodo in ["bs_efectivo", "bs_pago_movil"]:
+                return monto / tasa, monto
+            else:
+                return 0, 0
+
 
         usd1, bs1 = convertir(metodo1, monto1)
         usd2, bs2 = convertir(metodo2, monto2) if metodo2 else (0, 0)
