@@ -491,8 +491,11 @@ def orden(orden_id):
         return "Orden no encontrada"
 
     # 🔹 Items de la orden
-    cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
-    items = cursor.fetchall()
+   cursor.execute(
+        "SELECT producto, precio, id FROM orden_items WHERE orden_id=?",
+        (orden_id,)
+    )
+items = cursor.fetchall()
 
     # 🔹 Productos con categoría
     cursor.execute("""
@@ -642,8 +645,13 @@ def orden(orden_id):
 """
 
     for i in items:
-        html += f"<p>• {i[0]} - ${i[1]}</p>"
-
+        html += f"""
+        <div style='display:flex; justify-content:space-between; margin:5px 0;'>
+            <span>{i[0]} - ${i[1]}</span>
+            <a href="/eliminar_item/{i[2]}/{orden_id}" 
+               style="color:red; text-decoration:none;">❌</a>
+        </div>
+        """
     html += f"""
         </div>
 
@@ -1104,6 +1112,21 @@ def exportar():
         "Content-Type": "text/csv",
         "Content-Disposition": "attachment; filename=ventas_detalladas.csv"
     }
+
+
+
+# ---------------- ELIMINAR PRODUCTOR DE LA ORDEN ----------------
+@app.route("/eliminar_item/<int:item_id>/<int:orden_id>")
+def eliminar_item(item_id, orden_id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM orden_items WHERE id=?", (item_id,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect(f"/orden/{orden_id}")
 
 # ---------------- MAIN ----------------
 
