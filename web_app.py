@@ -549,10 +549,6 @@ def orden(orden_id):
         <h2>Agregar productos</h2>
     """
 
-    <div class="productos">
-        <h2>Agregar productos</h2>
-    """
-
     # 🔥 Agrupar por categorías
     categoria_actual = None
 
