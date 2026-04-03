@@ -26,31 +26,31 @@ def init_db():
     except:
         pass
 
-    # ---------------- CATEGORIAS ----------------
+
 # ------------------ CATEGORIAS ------------------
 
 # Crear tabla categorias
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS categorias (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nombre TEXT
-)
-""")
-
-# Insertar categorias iniciales (solo si está vacía)
-cursor.execute("SELECT COUNT(*) FROM categorias")
-if cursor.fetchone()[0] == 0:
-    categorias = [
-        ("Arroces",),
-        ("Bebida",),
-        ("Delivery",),
-        ("Extras",)
-    ]
-
-    cursor.executemany(
-        "INSERT INTO categorias (nombre) VALUES (?)",
-        categorias
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS categorias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT
     )
+    """)
+
+    # Insertar categorias iniciales (solo si está vacía)
+    cursor.execute("SELECT COUNT(*) FROM categorias")
+    if cursor.fetchone()[0] == 0:
+        categorias = [
+            ("Arroces",),
+            ("Bebida",),
+            ("Delivery",),
+            ("Extras",)
+        ]
+
+        cursor.executemany(
+            "INSERT INTO categorias (nombre) VALUES (?)",
+            categorias
+        )
     # ---------------- ORDENES ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
