@@ -490,12 +490,12 @@ def orden(orden_id):
         conn.close()
         return "Orden no encontrada"
 
-    # 🔹 Items de la orden
-   cursor.execute(
+    # ♦ Items de la orden
+    cursor.execute(
         "SELECT producto, precio, id FROM orden_items WHERE orden_id=?",
         (orden_id,)
     )
-items = cursor.fetchall()
+    items = cursor.fetchall()
 
     # 🔹 Productos con categoría
     cursor.execute("""
