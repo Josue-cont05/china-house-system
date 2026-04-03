@@ -180,6 +180,8 @@ def pos():
 
     <a href="/menu">📋 Administrar menú</a><br><br>
 
+    <a href="/exportar">📥 Exportar ventas</a><br><br>
+
     <h2>Nueva Orden</h2>
     <form action="/crear_orden" method="post">
         Tipo:
@@ -988,7 +990,8 @@ def pantalla_cocina():
 
     conn.close()
     return html
-# ---------------- LISTO ----------------    
+# ---------------- LISTO ---------------- 
+
 @app.route("/listo/<int:orden_id>")
 def marcar_listo(orden_id):
     conn = sqlite3.connect("china_house.db")
@@ -1000,6 +1003,33 @@ def marcar_listo(orden_id):
     conn.close()
 
     return redirect("/cocina")
+
+# ---------------- EXPORTAR ----------------    
+@app.route("/exportar")
+def exportar():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT orden_id, metodo, monto, referencia, fecha
+    FROM pagos
+    ORDER BY fecha DESC
+    """)
+
+    datos = cursor.fetchall()
+    conn.close()
+
+    # encabezados
+    csv = "orden,metodo,monto,referencia,fecha\n"
+
+    for d in datos:
+        csv += f"{d[0]},{d[1]},{d[2]},{d[3]},{d[4]}\n"
+
+    return csv, 200, {
+        "Content-Type": "text/csv",
+        "Content-Disposition": "attachment; filename=ventas.csv"
+    }
+
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
