@@ -27,32 +27,30 @@ def init_db():
         pass
 
     # ---------------- CATEGORIAS ----------------
-def init_db():
-    conn = sqlite3.connect("china_house.db")
-    cursor = conn.cursor()
+# ------------------ CATEGORIAS ------------------
 
-    # TABLA CATEGORIAS
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS categorias (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nombre TEXT
+# Crear tabla categorias
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS categorias (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nombre TEXT
+)
+""")
+
+# Insertar categorias iniciales (solo si está vacía)
+cursor.execute("SELECT COUNT(*) FROM categorias")
+if cursor.fetchone()[0] == 0:
+    categorias = [
+        ("Arroces",),
+        ("Bebida",),
+        ("Delivery",),
+        ("Extras",)
+    ]
+
+    cursor.executemany(
+        "INSERT INTO categorias (nombre) VALUES (?)",
+        categorias
     )
-    """)
-
-    # INSERTAR CATEGORIAS
-    cursor.execute("SELECT COUNT(*) FROM categorias")
-    if cursor.fetchone()[0] == 0:
-        categorias = [
-            ("Arroces",),
-            ("Bebida",),
-            ("Delivery",),
-            ("Extras",)
-        ]
-
-        cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
-
-    conn.commit()
-    conn.close()
     # ---------------- ORDENES ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ordenes (
