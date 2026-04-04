@@ -662,7 +662,10 @@ def orden(orden_id):
         <p>Estado: {o[6]}</p>
 
         <div class="lista-items">
-            <h3>Productos</h3>
+
+        <p><b>Observación:</b> {o[7] if len(o) > 7 and o[7] else '-'}</p>
+
+        <h3>Productos</h3>
     """
 
     for i in items:
