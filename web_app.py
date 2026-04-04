@@ -685,27 +685,27 @@ def orden(orden_id):
         """
 
     html += f"""
-        </div>
+    </div>
 
-        <div class="total">USD: ${total_usd}</div>
-        <div class="total">Bs: {total_bs}</div>
+    <div class="total">USD: ${total_usd}</div>
+    <div class="total">Bs: {total_bs}</div>
 
-        <p>Descuento: Bs {o[8] if len(o) > 8 and o[8] else 0}</p>
+    <p>Descuento: Bs {o[8] if len(o) > 8 and o[8] else 0}</p>
 
-        <div class="total">Total Final Bs: {total_bs_final}</div>
-        """
+    <div class="total">Total Final Bs: {total_bs_final}</div>
 
-        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
-            Enviar a cocina
-        </a>
+    <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
+        Enviar a cocina
+    </a>
 
-        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
-            Cobrar
-        </a>
+    <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
+        Cobrar
+    </a>
 
-        <a href="/" class="btn-accion volver">
-            Volver
-        </a>
+    <a href="/" class="btn-accion volver">
+        Volver
+    </a>
+    """
 
     </div>
 
