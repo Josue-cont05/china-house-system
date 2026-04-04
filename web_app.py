@@ -1080,40 +1080,28 @@ def exportar():
     SELECT 
         o.fecha_hora,
         o.numero_orden,
-        i.producto,
-        i.precio,
-        p.metodo,
-        p.monto,
-        p.referencia
+        o.tipo,
+        o.cliente,
+        SUM(i.precio) as total_usd
     FROM ordenes o
     LEFT JOIN orden_items i ON o.id = i.orden_id
-    LEFT JOIN pagos p ON o.id = p.orden_id
+    WHERE o.estado = 'cerrada'
+    GROUP BY o.id
     ORDER BY o.fecha_hora DESC
     """)
 
     datos = cursor.fetchall()
     conn.close()
 
-    # encabezados
-    csv = "fecha;orden;producto;precio;metodo;monto;referencia\n"
+    csv = "fecha;orden;tipo;cliente;total_usd\n"
 
     for d in datos:
-        fecha = d[0] or ""
-        orden = d[1] or ""
-        producto = d[2] or ""
-        precio = d[3] or ""
-        metodo = d[4] or ""
-        monto = d[5] or ""
-        referencia = d[6] or ""
-
-        csv += f"{fecha};{orden};{producto};{precio};{metodo};{monto};{referencia}\n"
+        csv += f"{d[0]};{d[1]};{d[2]};{d[3] or ''};{round(d[4] or 0, 2)}\n"
 
     return csv, 200, {
         "Content-Type": "text/csv",
-        "Content-Disposition": "attachment; filename=ventas_detalladas.csv"
+        "Content-Disposition": "attachment; filename=ventas_resumen.csv"
     }
-
-
 
 # ---------------- ELIMINAR PRODUCTOR DE LA ORDEN ----------------
 @app.route("/eliminar_item/<int:item_id>/<int:orden_id>")
