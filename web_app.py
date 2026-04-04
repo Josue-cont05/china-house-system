@@ -483,16 +483,20 @@ def crear_orden():
 
 @app.route("/orden/<int:orden_id>")
 def orden(orden_id):
+    import sqlite3
+    from collections import defaultdict
+
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
     # 🔹 Obtener orden
     cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
     o = cursor.fetchone()
+
     if not o:
         return "Orden no encontrada"
 
-    # 🔹 Obtener productos
+    # 🔹 Obtener productos con categoría
     cursor.execute("""
     SELECT p.id, p.nombre, p.precio, c.nombre
     FROM productos p
@@ -500,7 +504,7 @@ def orden(orden_id):
     """)
     productos = cursor.fetchall()
 
-    # 🔹 Obtener items de la orden
+    # 🔹 Obtener items (SIN JOIN ❗)
     cursor.execute("""
     SELECT producto, precio, id
     FROM orden_items
@@ -512,9 +516,10 @@ def orden(orden_id):
 
     # 🔹 Totales
     total_usd = sum(i[1] for i in items)
-    tasa = 36  # puedes luego hacerlo dinámico
+    tasa = 36
     total_bs = total_usd * tasa
 
+    # 🔹 HTML BASE
     html = f"""
     <html>
     <head>
@@ -554,11 +559,10 @@ def orden(orden_id):
         border-radius: 5px;
     }}
 
-   .grid-productos {{
+    .grid-productos {{
         display: grid;
         grid-template-columns: repeat(2, 1fr);
         gap: 10px;
-        grid-auto-flow: column;
     }}
 
     .btn-accion {{
@@ -588,27 +592,42 @@ def orden(orden_id):
     <h2>Agregar productos</h2>
     """
 
-    # 🔥 PRODUCTOS POR CATEGORÍA EN GRID
-    categoria_actual = None
+    # 🔥 AGRUPAR POR CATEGORÍA
+    categorias = defaultdict(list)
 
     for p in productos:
         categoria = p[3] if p[3] else "Sin categoría"
+        categorias[categoria].append(p)
 
-        if categoria != categoria_actual:
-            if categoria_actual is not None:
-                html += "</div>"
+    # 🔥 RENDER POR CATEGORÍA + ORDEN VERTICAL
+    for categoria, lista in categorias.items():
 
-            categoria_actual = categoria
-            html += f"<div class='categoria'>🍽 {categoria}</div>"
-            html += "<div class='grid-productos'>"
+        html += f"<div class='categoria'>🍽 {categoria}</div>"
+        html += "<div class='grid-productos'>"
 
-        html += f"""
-        <a href="/agregar/{orden_id}/{p[0]}">
-            <button class="btn">{p[1]} - ${p[2]}</button>
-        </a>
-        """
+        # 🔥 ORDEN TIPO COLUMNA VERTICAL
+        mitad = (len(lista) + 1) // 2
+        col1 = lista[:mitad]
+        col2 = lista[mitad:]
 
-    html += "</div></div>"
+        ordenados = []
+
+        for i in range(mitad):
+            if i < len(col1):
+                ordenados.append(col1[i])
+            if i < len(col2):
+                ordenados.append(col2[i])
+
+        for p in ordenados:
+            html += f"""
+            <a href="/agregar/{orden_id}/{p[0]}">
+                <button class="btn">{p[1]} - ${p[2]}</button>
+            </a>
+            """
+
+        html += "</div>"
+
+    html += "</div>"
 
     # 🔥 PANEL DERECHO
     html += f"""
@@ -616,12 +635,12 @@ def orden(orden_id):
 
         <div style="display:flex; justify-content:flex-end; gap:10px;">
             <a href="/editar_orden/{orden_id}" 
-               style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
+               style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px;">
                 ✏️
             </a>
 
             <a href="/eliminar_orden/{orden_id}" 
-               style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
+               style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px;">
                 🗑
             </a>
         </div>
@@ -637,17 +656,14 @@ def orden(orden_id):
             <h3>Productos</h3>
     """
 
-    # 🔥 ITEMS
     for i in items:
         html += f"""
         <div style='display:flex; justify-content:space-between; margin:5px 0;'>
             <span>{i[0]} - ${i[1]}</span>
-            <a href="/eliminar_item/{i[2]}/{orden_id}" 
-               style="color:red; text-decoration:none;">❌</a>
+            <a href="/eliminar_item/{i[2]}/{orden_id}" style="color:red;">❌</a>
         </div>
         """
 
-    # 🔥 TOTALES Y BOTONES
     html += f"""
         </div>
 
