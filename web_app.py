@@ -1516,10 +1516,9 @@ def cambiar_tasa():
     cursor = conn.cursor()
 
     if request.method == "POST":
-        nueva_tasa = request.form["tasa"]
+        nueva_tasa = float(request.form["tasa"])
 
-        cursor.execute("DELETE FROM tasa")
-        cursor.execute("INSERT INTO tasa VALUES (?)", (nueva_tasa,))
+        cursor.execute("UPDATE tasa SET valor=?", (nueva_tasa,))
         conn.commit()
 
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
