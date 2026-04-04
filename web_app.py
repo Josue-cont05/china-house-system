@@ -225,78 +225,163 @@ def siguiente_numero():
 # ---------------- POS PRINCIPAL ----------------
 
 @app.route("/")
-def pos():
+def index():
+    import sqlite3
+
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM ordenes WHERE estado != 'cerrada'")
+    # 🔹 Traer órdenes
+    cursor.execute("SELECT * FROM ordenes ORDER BY id DESC")
     ordenes = cursor.fetchall()
 
     conn.close()
 
+    # 🔹 HTML
     html = """
     <html>
     <head>
     <style>
-        body { font-family: Arial; margin:20px; }
-        .orden { border:1px solid #ccc; padding:10px; margin:10px; }
-        input, select { padding:8px; margin:5px; }
-        button { padding:10px; }
+    body {
+        font-family: Arial;
+        margin: 0;
+        background: #f5f6fa;
+    }
+
+    .header {
+        background: #2c3e50;
+        color: white;
+        padding: 15px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .titulo {
+        font-size: 22px;
+        font-weight: bold;
+    }
+
+    .btn-nueva {
+        background: #27ae60;
+        padding: 10px 15px;
+        border-radius: 5px;
+        color: white;
+        text-decoration: none;
+    }
+
+    .contenedor {
+        padding: 20px;
+    }
+
+    .card {
+        background: white;
+        padding: 15px;
+        margin-bottom: 10px;
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .estado {
+        padding: 5px 10px;
+        border-radius: 5px;
+        color: white;
+        font-size: 12px;
+    }
+
+    .btn-ver {
+        background: #3498db;
+        color: white;
+        padding: 8px 12px;
+        border-radius: 5px;
+        text-decoration: none;
+    }
+
+    .btn-cobrar {
+        background: #27ae60;
+        color: white;
+        padding: 8px 12px;
+        border-radius: 5px;
+        text-decoration: none;
+        margin-left: 5px;
+    }
     </style>
     </head>
+
     <body>
 
-    <h1>🍜 China House POS</h1>
+    <div class="header">
+        <div class="titulo">🍜 China House POS</div>
+        <a href="/nueva_orden" class="btn-nueva">+ Nueva Orden</a>
+    </div>
 
-    <a href="/cierre">📊 Ver cierre del día</a><br><br>
-
-    <a href="/tasa">💱 Cambiar tasa</a>
-
-    <a href="/cocina">🍳 Pantalla cocina</a><br><br>
-
-    <a href="/menu">📋 Administrar menú</a><br><br>
-
-    <a href="/exportar">📥 Exportar ventas</a><br><br>
-
-    <h2>Nueva Orden</h2>
-    <form action="/crear_orden" method="post">
-        Tipo:
-        <select name="tipo">
-            <option>Mesa</option>
-            <option>Delivery</option>
-            <option>Pickup</option>
-        </select>
-
-        Referencia:
-        <input name="referencia">
-
-        Cliente:
-        <input name="cliente">
-
-        <button type="submit">Crear</button>
-    </form>
-
-    <hr>
-
+    <div class="contenedor">
     <h2>Órdenes activas</h2>
     """
 
+    # 🔹 Órdenes abiertas primero
     for o in ordenes:
+        if o[6] != "abierta":
+            continue
+
+        color = "#f39c12"
+
         html += f"""
-        <div class="orden">
-            <b>#{o[1]}</b> | {o[3]} - {o[4]}<br>
-            Cliente: {o[5] if o[5] else '-'}<br>
-            Hora: {o[2]}<br>
-            Estado: {o[6]}<br>
-            <a href="/orden/{o[0]}">Abrir</a>
+        <div class="card">
+
+            <div>
+                <b>Orden #{o[1]}</b><br>
+                {o[3]} - {o[4]}<br>
+                👤 {o[5] if o[5] else '-'}
+            </div>
+
+            <div style="text-align:right;">
+                <span class="estado" style="background:{color};">
+                    {o[6]}
+                </span>
+
+                <br><br>
+
+                <a href="/orden/{o[0]}" class="btn-ver">
+                    Ver
+                </a>
+
+                <a href="/cobrar/{o[0]}" class="btn-cobrar">
+                    Cobrar
+                </a>
+            </div>
+
         </div>
         """
 
-    html += "</body></html>"
+    # 🔹 Historial
+    html += "<h2>Historial</h2>"
+
+    for o in ordenes:
+        if o[6] != "cerrada":
+            continue
+
+        html += f"""
+        <div style="
+            background:#ecf0f1;
+            padding:10px;
+            margin-bottom:5px;
+            border-radius:5px;
+        ">
+            ✔ Orden #{o[1]} - {o[5] if o[5] else '-'}
+        </div>
+        """
+
+    html += """
+    </div>
+    </body>
+    </html>
+    """
+
     return html
-
-
-
 # ---------------- MENU ----------------
 @app.route("/menu")
 def menu():
