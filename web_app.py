@@ -1100,32 +1100,6 @@ def cobrar(orden_id):
 
     <a href="/orden/{orden_id}">⬅ Volver</a>
     """
- 
-# ---------------- TASA ----------------
-
-@app.route("/tasa", methods=["GET", "POST"])
-def cambiar_tasa():
-    conn = sqlite3.connect("china_house.db")
-    cursor = conn.cursor()
-
-    if request.method == "POST":
-        nueva = float(request.form["tasa"])
-        cursor.execute("UPDATE tasa SET valor=?", (nueva,))
-        conn.commit()
-
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    tasa = cursor.fetchone()[0]
-
-    conn.close()
-
-    return f"""
-    <h1>💱 Tasa actual: {tasa}</h1>
-    <form method="post">
-        Nueva tasa: <input name="tasa">
-        <button>Guardar</button>
-    </form>
-    <a href="/">Volver</a>
-    """
 
 # ---------------- CIERRE ----------------
 @app.route("/cierre")
