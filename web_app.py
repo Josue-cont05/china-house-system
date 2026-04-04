@@ -576,6 +576,18 @@ def orden(orden_id):
             border-radius:5px;
         }}
 
+        .grid-productos {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 15px;
+            font-size: 16px;
+        }
+
         /* 🔥 PANEL DERECHO */
         .panel h2 {{
             margin-top:0;
@@ -620,7 +632,9 @@ def orden(orden_id):
 
     # 🔥 Agrupar por categorías
     categoria_actual = None
-
+    
+    html += "<div class='grid-productos'>"
+    
     for p in productos:
         categoria = p[3] if p[3] else "Sin categoría"
 
