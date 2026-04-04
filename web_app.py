@@ -521,7 +521,7 @@ def orden(orden_id):
     """)
     productos = cursor.fetchall()
 
-    # 🔹 Obtener items (SIN JOIN ❗)
+    # 🔹 Obtener items
     cursor.execute("""
     SELECT producto, precio, id
     FROM orden_items
@@ -535,6 +535,9 @@ def orden(orden_id):
     total_usd = sum(i[1] for i in items)
     tasa = 36
     total_bs = total_usd * tasa
+
+    descuento = o[8] if len(o) > 8 and o[8] else 0
+    total_bs_final = max(total_bs - descuento, 0)
 
     # 🔹 HTML BASE
     html = f"""
@@ -609,20 +612,19 @@ def orden(orden_id):
     <h2>Agregar productos</h2>
     """
 
-    # 🔥 AGRUPAR POR CATEGORÍA
+    # 🔥 Agrupar por categoría
     categorias = defaultdict(list)
 
     for p in productos:
         categoria = p[3] if p[3] else "Sin categoría"
         categorias[categoria].append(p)
 
-    # 🔥 RENDER POR CATEGORÍA + ORDEN VERTICAL
+    # 🔥 Render productos con orden vertical
     for categoria, lista in categorias.items():
 
         html += f"<div class='categoria'>🍽 {categoria}</div>"
         html += "<div class='grid-productos'>"
 
-        # 🔥 ORDEN TIPO COLUMNA VERTICAL
         mitad = (len(lista) + 1) // 2
         col1 = lista[:mitad]
         col2 = lista[mitad:]
@@ -651,15 +653,8 @@ def orden(orden_id):
     <div class="panel">
 
         <div style="display:flex; justify-content:flex-end; gap:10px;">
-            <a href="/editar_orden/{orden_id}" 
-               style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px;">
-                ✏️
-            </a>
-
-            <a href="/eliminar_orden/{orden_id}" 
-               style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px;">
-                🗑
-            </a>
+            <a href="/editar_orden/{orden_id}" style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px;">✏️</a>
+            <a href="/eliminar_orden/{orden_id}" style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px;">🗑</a>
         </div>
 
         <h2>Orden #{o[1]}</h2>
@@ -668,8 +663,6 @@ def orden(orden_id):
         <p>Cliente: {o[5] if o[5] else '-'}</p>
         <p>Hora: {o[2]}</p>
         <p>Estado: {o[6]}</p>
-
-        <div class="lista-items">
 
         <p><b>Observación:</b> {o[7] if len(o) > 7 and o[7] else '-'}</p>
 
@@ -685,32 +678,30 @@ def orden(orden_id):
         """
 
     html += f"""
+        <div class="total">USD: ${total_usd}</div>
+        <div class="total">Bs: {total_bs}</div>
+
+        <p>Descuento: Bs {descuento}</p>
+
+        <div class="total">Total Final Bs: {total_bs_final}</div>
+
+        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
+            Enviar a cocina
+        </a>
+
+        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
+            Cobrar
+        </a>
+
+        <a href="/" class="btn-accion volver">
+            Volver
+        </a>
+
     </div>
-
-    <div class="total">USD: ${total_usd}</div>
-    <div class="total">Bs: {total_bs}</div>
-
-    <p>Descuento: Bs {o[8] if len(o) > 8 and o[8] else 0}</p>
-
-    <div class="total">Total Final Bs: {total_bs_final}</div>
-
-    <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
-        Enviar a cocina
-    </a>
-
-    <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
-        Cobrar
-    </a>
-    
-    html += f"""
-    <a href="/" class="btn-accion volver">
-        Volver
-    </a>
 
     </body>
     </html>
     """
-    
 
     return html
 # ---------------- AGREGAR ----------------
