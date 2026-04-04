@@ -148,9 +148,9 @@ def cargar_productos():
         ("Pollo-Jamon Personal", 5.5, "Arroces"),
         ("Pollo-Jamon Mediano", 8.5, "Arroces"),
         ("Pollo-Jamon Familiar", 11.5, "Arroces"),
-        ("Cerdo-Pollo Personal", 6.5, "Arroces"),
-        ("Cerdo-Pollo Mediano", 9.5, "Arroces"),
-        ("Cerdo-Pollo Familiar", 12.5, "Arroces"),
+        ("Pollo-Cerdo Personal", 6.5, "Arroces"),
+        ("Pollo-Cerdo Mediano", 9.5, "Arroces"),
+        ("Pollo-Cerdo Familiar", 12.5, "Arroces"),
         ("Pollo-Camaron Personal", 6.5, "Arroces"),
         ("Pollo-Camaron Mediano", 9.5, "Arroces"),
         ("Pollo-Camaron Familiar", 12.5, "Arroces"),
@@ -471,10 +471,13 @@ def crear_orden():
     VALUES (?, ?, ?, ?, ?, ?)
     """, (numero, fecha, tipo, referencia, cliente, "abierta"))
 
+    cursor.execute("SELECT last_insert_rowid()")
+    orden_id = cursor.fetchone()[0]
+
     conn.commit()
     conn.close()
 
-    return redirect("/")
+    return redirect(f"/orden/{orden_id}")
 
 # ---------------- ORDEN ----------------
 
