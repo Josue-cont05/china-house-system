@@ -1134,35 +1134,107 @@ def marcar_listo(orden_id):
 # ---------------- EXPORTAR ----------------    
 @app.route("/exportar")
 def exportar():
+    import sqlite3
+    import pandas as pd
+    from datetime import datetime
+
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT 
-        o.fecha_hora,
-        o.numero_orden,
-        o.tipo,
-        o.cliente,
-        SUM(i.precio) as total_usd
-    FROM ordenes o
-    LEFT JOIN orden_items i ON o.id = i.orden_id
-    WHERE o.estado = 'cerrada'
-    GROUP BY o.id
-    ORDER BY o.fecha_hora DESC
-    """)
+    hoy = datetime.now().strftime("%Y-%m-%d")
 
-    datos = cursor.fetchall()
+    cursor.execute("""
+        SELECT id, numero_orden, fecha_hora, tipo, cliente, descuento
+        FROM ordenes
+        WHERE fecha_hora LIKE ?
+    """, (f"{hoy}%",))
+
+    ordenes = cursor.fetchall()
+
+    data = []
+
+    for o in ordenes:
+        orden_id = o[0]
+
+        # 🔹 PRODUCTOS
+        cursor.execute("""
+            SELECT p.nombre, p.precio
+            FROM orden_items oi
+            JOIN productos p ON oi.producto_id = p.id
+            WHERE oi.orden_id = ?
+        """, (orden_id,))
+        productos = cursor.fetchall()
+
+        # 🔹 PAGOS
+        cursor.execute("""
+            SELECT metodo, monto_bs, monto_usd, referencia
+            FROM pagos
+            WHERE orden_id = ?
+        """, (orden_id,))
+        pagos = cursor.fetchall()
+
+        # 🔹 TOTALES
+        total_usd = sum([p[1] for p in productos])
+
+        cursor.execute("SELECT valor FROM tasa LIMIT 1")
+        tasa_row = cursor.fetchone()
+        tasa = tasa_row[0] if tasa_row else 1
+
+        total_bs = total_usd * tasa
+        descuento = o[5] if o[5] else 0
+        total_bs_final = max(total_bs - descuento, 0)
+
+        # 🔥 LÓGICA PRINCIPAL
+        max_filas = max(len(productos), len(pagos))
+
+        for i in range(max_filas):
+
+            producto_nombre = ""
+            producto_precio = ""
+
+            if i < len(productos):
+                producto_nombre = productos[i][0]
+                producto_precio = productos[i][1]
+
+            metodo = ""
+            monto_bs = 0
+            monto_usd = 0
+            referencia = ""
+
+            if i < len(pagos):
+                metodo = pagos[i][0]
+                monto_bs = pagos[i][1] or 0
+                monto_usd = pagos[i][2] or 0
+                referencia = pagos[i][3] or ""
+
+            data.append({
+                "Orden": o[1],
+                "Fecha": o[2],
+                "Tipo": o[3],
+                "Cliente": o[4],
+
+                "Producto": producto_nombre,
+                "Precio $": producto_precio,
+
+                "Método": metodo,
+                "Monto Bs": monto_bs,
+                "Monto $": monto_usd,
+                "Referencia": referencia,
+
+                "Total Orden $": total_usd if i == 0 else "",
+                "Total Orden Bs": total_bs if i == 0 else "",
+                "Descuento Bs": descuento if i == 0 else "",
+                "Total Final Bs": total_bs_final if i == 0 else ""
+            })
+
     conn.close()
 
-    csv = "fecha;orden;tipo;cliente;total_usd\n"
+    df = pd.DataFrame(data)
 
-    for d in datos:
-        csv += f"{d[0]};{d[1]};{d[2]};{d[3] or ''};{round(d[4] or 0, 2)}\n"
+    archivo = f"ventas_{hoy}.xlsx"
+    df.to_excel(archivo, index=False)
 
-    return csv, 200, {
-        "Content-Type": "text/csv",
-        "Content-Disposition": "attachment; filename=ventas_resumen.csv"
-    }
+    return f"Exportación lista: {archivo}"
 
 # ---------------- ELIMINAR PRODUCTOR DE LA ORDEN ----------------
 @app.route("/eliminar_item/<int:item_id>/<int:orden_id>")
