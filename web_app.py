@@ -668,6 +668,15 @@ def orden(orden_id):
              Enviar a cocina
         </a>
 
+        <a href="/editar_orden/{orden_id}" class="btn-accion">
+             Editar orden
+        </a>
+
+        <a href="/eliminar_orden/{orden_id}" class="btn-accion" 
+           style="background:#e74c3c;">
+             Eliminar orden
+        </a>
+
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
              Cobrar
         </a>
@@ -1122,6 +1131,73 @@ def eliminar_item(item_id, orden_id):
     conn.close()
 
     return redirect(f"/orden/{orden_id}")
+
+
+# ---------------- EDITAR ORDEN ----------------
+@app.route("/editar_orden/<int:orden_id>", methods=["GET", "POST"])
+def editar_orden(orden_id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        tipo = request.form.get("tipo")
+        referencia = request.form.get("referencia")
+        cliente = request.form.get("cliente")
+
+        cursor.execute("""
+        UPDATE ordenes
+        SET tipo=?, referencia=?, cliente=?
+        WHERE id=?
+        """, (tipo, referencia, cliente, orden_id))
+
+        conn.commit()
+        conn.close()
+
+        return redirect(f"/orden/{orden_id}")
+
+    cursor.execute("""
+    SELECT tipo, referencia, cliente FROM ordenes WHERE id=?
+    """, (orden_id,))
+    o = cursor.fetchone()
+
+    conn.close()
+
+    return f"""
+    <h1>Editar Orden</h1>
+
+    <form method="post">
+        Tipo:
+        <select name="tipo">
+            <option {'selected' if o[0]=='Mesa' else ''}>Mesa</option>
+            <option {'selected' if o[0]=='Delivery' else ''}>Delivery</option>
+            <option {'selected' if o[0]=='Pickup' else ''}>Pickup</option>
+        </select><br><br>
+
+        Referencia:
+        <input name="referencia" value="{o[1] or ''}"><br><br>
+
+        Cliente:
+        <input name="cliente" value="{o[2] or ''}"><br><br>
+
+        <button>Guardar</button>
+    </form>
+
+    <a href="/orden/{orden_id}">Volver</a>
+    """
+# ---------------- ELIMINAR ORDEN ----------------
+@app.route("/eliminar_orden/<int:orden_id>")
+def eliminar_orden(orden_id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("DELETE FROM orden_items WHERE orden_id=?", (orden_id,))
+    cursor.execute("DELETE FROM pagos WHERE orden_id=?", (orden_id,))
+    cursor.execute("DELETE FROM ordenes WHERE id=?", (orden_id,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/")
 
 # ---------------- MAIN ----------------
 
