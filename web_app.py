@@ -552,6 +552,86 @@ def editar_producto(id):
 
     conn.close()
     return html
+
+
+# ---------------- NUEVA ORDEN ----------------
+
+@app.route("/nueva_orden")
+def nueva_orden():
+    return """
+    <html>
+    <head>
+    <style>
+    body {
+        font-family: Arial;
+        padding: 20px;
+        background: #f5f6fa;
+    }
+
+    h2 {
+        margin-bottom: 20px;
+    }
+
+    input, select {
+        padding: 10px;
+        margin: 5px 0;
+        width: 250px;
+        border-radius: 5px;
+        border: 1px solid #ccc;
+    }
+
+    button {
+        padding: 12px 20px;
+        background: #27ae60;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        margin-top: 10px;
+        cursor: pointer;
+    }
+
+    button:hover {
+        background: #219150;
+    }
+
+    .volver {
+        display: inline-block;
+        margin-top: 20px;
+        color: #3498db;
+        text-decoration: none;
+    }
+    </style>
+    </head>
+
+    <body>
+
+    <h2>🆕 Nueva Orden</h2>
+
+    <form action="/crear_orden" method="post">
+
+        <label>Tipo:</label><br>
+        <select name="tipo">
+            <option value="Mesa">Mesa</option>
+            <option value="Delivery">Delivery</option>
+            <option value="Para llevar">Para llevar</option>
+        </select><br><br>
+
+        <label>Referencia:</label><br>
+        <input name="referencia" required><br><br>
+
+        <label>Cliente:</label><br>
+        <input name="cliente"><br><br>
+
+        <button type="submit">Crear Orden</button>
+
+    </form>
+
+    <a href="/" class="volver">⬅ Volver</a>
+
+    </body>
+    </html>
+    """
+    
 # ---------------- CREAR ORDEN ----------------
 
 @app.route("/crear_orden", methods=["POST"])
