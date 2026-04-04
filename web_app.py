@@ -493,7 +493,11 @@ def orden(orden_id):
         return "Orden no encontrada"
 
     # 🔹 Obtener productos
-    cursor.execute("SELECT id, nombre, precio, categoria FROM productos")
+    cursor.execute("""
+    SELECT p.id, p.nombre, p.precio, c.nombre
+    FROM productos p
+    LEFT JOIN categorias c ON p.categoria_id = c.id
+    """)
     productos = cursor.fetchall()
 
     # 🔹 Obtener items de la orden
