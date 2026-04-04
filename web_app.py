@@ -11,14 +11,6 @@ app = Flask(__name__)
 def init_db():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
-    # 🔥 Verificar si existe la columna "observacion"
-    cursor.execute("PRAGMA table_info(ordenes)")
-    columnas = [col[1] for col in cursor.fetchall()]
-
-    if "observacion" not in columnas:
-        cursor.execute("ALTER TABLE ordenes ADD COLUMN observacion TEXT")
-        conn.commit()
-    
 
     # ---------------- PRODUCTOS ----------------
     cursor.execute("""
@@ -72,7 +64,16 @@ def init_db():
         estado TEXT
     )
     """)
+    # 🔥 Verificar si existe la columna "observacion"
+    cursor.execute("PRAGMA table_info(ordenes)")
+    columnas = [col[1] for col in cursor.fetchall()]
 
+    if "observacion" not in columnas:
+        cursor.execute("ALTER TABLE ordenes ADD COLUMN observacion TEXT")
+        conn.commit()
+
+
+    
     # ---------------- ITEMS ----------------
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS orden_items (
