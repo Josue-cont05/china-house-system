@@ -1531,6 +1531,54 @@ def eliminar_orden(orden_id):
 
     return redirect("/")
 
+
+# ---------------- CAMBIAR TASA ----------------
+
+@app.route("/cambiar_tasa", methods=["GET", "POST"])
+def cambiar_tasa():
+    import sqlite3
+
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nueva_tasa = request.form["tasa"]
+
+        cursor.execute("DELETE FROM tasa")
+        cursor.execute("INSERT INTO tasa VALUES (?)", (nueva_tasa,))
+        conn.commit()
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+
+    tasa_actual = row[0] if row else 1
+
+    conn.close()
+
+    return f"""
+    <html>
+    <body style="font-family:Arial; padding:40px;">
+
+    <h2>💱 Cambiar tasa</h2>
+
+    <p>Tasa actual: <b>{tasa_actual}</b></p>
+
+    <form method="post">
+        <input name="tasa" placeholder="Nueva tasa" style="padding:10px; width:200px;">
+        <br><br>
+        <button style="padding:10px 20px; background:#27ae60; color:white; border:none;">
+            Guardar
+        </button>
+    </form>
+
+    <br><br>
+
+    <a href="/">⬅ Volver</a>
+
+    </body>
+    </html>
+    """
+
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
