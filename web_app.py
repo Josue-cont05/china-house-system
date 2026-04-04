@@ -486,167 +486,114 @@ def orden(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    # 🔹 Datos de la orden
-    cursor.execute("""
-    SELECT numero_orden, tipo, referencia, cliente, estado, fecha_hora 
-    FROM ordenes WHERE id=?
-    """, (orden_id,))
+    # 🔹 Obtener orden
+    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
     o = cursor.fetchone()
-    if not o:
-        conn.close()
-        return "Orden no encontrada"
 
-    # ♦ Items de la orden
-    cursor.execute(
-        "SELECT producto, precio, id FROM orden_items WHERE orden_id=?",
-        (orden_id,)
-    )
-    items = cursor.fetchall()
-
-    # 🔹 Productos con categoría
-    cursor.execute("""
-    SELECT p.id, p.nombre, p.precio, c.nombre
-    FROM productos p
-    LEFT JOIN categorias c ON p.categoria_id = c.id
-    ORDER BY c.nombre
-    """)
+    # 🔹 Obtener productos
+    cursor.execute("SELECT id, nombre, precio, categoria FROM productos")
     productos = cursor.fetchall()
 
-    # 🔥 Obtener tasa (seguro)
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    row = cursor.fetchone()
-    tasa = row[0] if row else 1
+    # 🔹 Obtener items de la orden
+    cursor.execute("""
+    SELECT p.nombre, p.precio, oi.id
+    FROM orden_items oi
+    JOIN productos p ON oi.producto_id = p.id
+    WHERE oi.orden_id=?
+    """, (orden_id,))
+    items = cursor.fetchall()
 
     conn.close()
 
     # 🔹 Totales
     total_usd = sum(i[1] for i in items)
+    tasa = 36  # puedes luego hacerlo dinámico
     total_bs = total_usd * tasa
 
     html = f"""
     <html>
     <head>
     <style>
-        body {{
-            font-family: Arial;
-            display:flex;
-            margin:0;
-        }}
+    body {{
+        font-family: Arial;
+        display: flex;
+    }}
 
-        .productos {{
-            width:65%;
-            padding:10px;
-            background:#f5f5f5;
-        }}
+    .productos {{
+        width: 60%;
+        padding: 20px;
+    }}
 
-        .panel {{
-            width:35%;
-            padding:20px;
-            background:white;
-            border-left:3px solid #ccc;
-        }}
+    .panel {{
+        width: 40%;
+        padding: 20px;
+        background: #f4f4f4;
+    }}
 
-        .btn {{
-            width:48%;
-            padding:20px;
-            margin:5px 1%;
-            font-size:18px;
-            background:#27ae60;
-            color:white;
-            border:none;
-            border-radius:10px;
-        }}
+    .btn {{
+        width: 100%;
+        padding: 15px;
+        margin: 5px 0;
+        background: #27ae60;
+        color: white;
+        border: none;
+        border-radius: 5px;
+    }}
 
-        .categoria {{
-            background:#333;
-            color:white;
-            padding:8px;
-            margin-top:10px;
-            border-radius:5px;
-        }}
+    .categoria {{
+        font-weight: bold;
+        margin-top: 15px;
+        background: #333;
+        color: white;
+        padding: 5px;
+        border-radius: 5px;
+    }}
 
-        .acciones a {{
-            display:block;
-            margin:10px 0;
-            padding:10px;
-            background:#3498db;
-            color:white;
-            text-align:center;
-            text-decoration:none;
-            border-radius:5px;
-        }}
+    .grid-productos {{
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+    }}
 
-        .grid-productos {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
-        }
+    .btn-accion {{
+        display: block;
+        padding: 12px;
+        margin: 5px 0;
+        text-align: center;
+        color: white;
+        text-decoration: none;
+        border-radius: 5px;
+    }}
 
-        .btn {
-            width: 100%;
-            padding: 15px;
-            font-size: 16px;
-        }
+    .cocina {{ background: #e67e22; }}
+    .cobrar {{ background: #27ae60; }}
+    .volver {{ background: #7f8c8d; }}
 
-        /* 🔥 PANEL DERECHO */
-        .panel h2 {{
-            margin-top:0;
-        }}
-
-        .total {{
-            font-size:24px;
-            font-weight:bold;
-            margin:10px 0;
-        }}
-
-        .btn-accion {{
-            display:block;
-            width:100%;
-            padding:15px;
-            margin:10px 0;
-            text-align:center;
-            text-decoration:none;
-            color:white;
-            border-radius:8px;
-            font-size:18px;
-        }}
-
-        .cocina {{ background:#e67e22; }}
-        .cobrar {{ background:#27ae60; }}
-        .volver {{ background:#7f8c8d; }}
-
-        .lista-items {{
-            background:#f9f9f9;
-            padding:10px;
-            border-radius:8px;
-            margin:10px 0;
-        }}
+    .total {{
+        font-size: 20px;
+        margin-top: 10px;
+    }}
     </style>
     </head>
 
     <body>
 
     <div class="productos">
-        <h2>Agregar productos</h2>
+    <h2>Agregar productos</h2>
     """
 
-    # 🔥 Agrupar por categorías
+    # 🔥 PRODUCTOS POR CATEGORÍA EN GRID
     categoria_actual = None
-    
+
     for p in productos:
         categoria = p[3] if p[3] else "Sin categoría"
 
         if categoria != categoria_actual:
-            # cerrar grid anterior si existe
             if categoria_actual is not None:
                 html += "</div>"
 
             categoria_actual = categoria
-
-            # título de categoría
             html += f"<div class='categoria'>🍽 {categoria}</div>"
-
-            # abrir nuevo grid
             html += "<div class='grid-productos'>"
 
         html += f"""
@@ -655,66 +602,70 @@ def orden(orden_id):
         </a>
         """
 
-# cerrar último grid
-html += "</div>"
+    html += "</div></div>"
 
-    # 🔹 Panel derecho
-html += f"""
+    # 🔥 PANEL DERECHO
+    html += f"""
     <div class="panel">
-    <div style="display:flex; justify-content:flex-end; gap:10px;">
 
-        <a href="/editar_orden/{orden_id}" 
-           style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
-            ✏️
-        </a>
+        <div style="display:flex; justify-content:flex-end; gap:10px;">
+            <a href="/editar_orden/{orden_id}" 
+               style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
+                ✏️
+            </a>
 
-        <a href="/eliminar_orden/{orden_id}" 
-           style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
-        🗑
-        </a>
+            <a href="/eliminar_orden/{orden_id}" 
+               style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
+                🗑
+            </a>
+        </div>
 
-    </div>
-
-        <h2> Orden #{o[0]}</h2>
+        <h2>Orden #{o[0]}</h2>
         <p><b>{o[1]}</b> - {o[2]}</p>
         <p>Cliente: {o[3] if o[3] else '-'}</p>
         <p>Hora: {o[5]}</p>
         <p>Estado: {o[4]}</p>
 
         <div class="lista-items">
-            <h3> Productos</h3>
-"""
-
-for i in items:
-    html += f"""
-    <div style='display:flex; justify-content:space-between; margin:5px 0;'>
-        <span>{i[0]} - ${i[1]}</span>
-        <a href="/eliminar_item/{i[2]}/{orden_id}" 
-           style="color:red; text-decoration:none;">❌</a>
-    </div>
+            <h3>Productos</h3>
     """
+
+    # 🔥 ITEMS
+    for i in items:
+        html += f"""
+        <div style='display:flex; justify-content:space-between; margin:5px 0;'>
+            <span>{i[0]} - ${i[1]}</span>
+            <a href="/eliminar_item/{i[2]}/{orden_id}" 
+               style="color:red; text-decoration:none;">❌</a>
+        </div>
+        """
+
+    # 🔥 TOTALES Y BOTONES
     html += f"""
         </div>
 
-        <div class="total"> USD: ${total_usd}</div>
-        <div class="total"> Bs: {total_bs}</div>
+        <div class="total">USD: ${total_usd}</div>
+        <div class="total">Bs: {total_bs}</div>
 
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
-             Enviar a cocina
+            Enviar a cocina
         </a>
 
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
-             Cobrar
+            Cobrar
         </a>
 
         <a href="/" class="btn-accion volver">
-             Volver
+            Volver
         </a>
 
     </div>
+
+    </body>
+    </html>
     """
 
-        return html
+    return html
 # ---------------- AGREGAR ----------------
 
 @app.route("/agregar/<int:orden_id>/<int:producto_id>")
