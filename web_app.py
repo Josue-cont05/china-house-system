@@ -668,7 +668,7 @@ def orden(orden_id):
              Enviar a cocina
         </a>
 
-        <a href="/editar_orden/{orden_id}" class="btn-accion">
+        <a href="/editar_orden/{orden_id}" class="btn-accion" style="background:#2980b9;">
              Editar orden
         </a>
 
