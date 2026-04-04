@@ -489,6 +489,8 @@ def orden(orden_id):
     # 🔹 Obtener orden
     cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
     o = cursor.fetchone()
+    if not o:
+        return "Orden no encontrada"
 
     # 🔹 Obtener productos
     cursor.execute("SELECT id, nombre, precio, categoria FROM productos")
@@ -623,8 +625,8 @@ def orden(orden_id):
         <h2>Orden #{o[0]}</h2>
         <p><b>{o[1]}</b> - {o[2]}</p>
         <p>Cliente: {o[3] if o[3] else '-'}</p>
-        <p>Hora: {o[5]}</p>
-        <p>Estado: {o[4]}</p>
+        <p>Hora: {o[4] if len(o) > 4 else ''}</p>
+        <p>Estado: {o[3] if len(o) > 3 else ''}</p>
 
         <div class="lista-items">
             <h3>Productos</h3>
