@@ -690,6 +690,11 @@ def orden(orden_id):
         <div class="total">USD: ${total_usd}</div>
         <div class="total">Bs: {total_bs}</div>
 
+        <p>Descuento: Bs {o[8] if len(o) > 8 and o[8] else 0}</p>
+
+        <div class="total">Total Final Bs: {total_bs_final}</div>
+        """
+
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
             Enviar a cocina
         </a>
@@ -764,7 +769,13 @@ def cobrar(orden_id):
     tasa = row[0] if row else 1
 
     total_bs = total_usd * tasa
+    descuento_bs = o[8] if len(o) > 8 and o[8] else 0
+    total_bs_final = total_bs - descuento_bs
 
+    if total_bs_final < 0:
+        total_bs_final = 0
+    
+    
     if request.method == "POST":
         metodo1 = request.form["metodo1"]
         monto1 = float(request.form["monto1"] or 0)
