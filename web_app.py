@@ -685,14 +685,14 @@ html += f"""
             <h3> Productos</h3>
 """
 
-    for i in items:
-        html += f"""
-        <div style='display:flex; justify-content:space-between; margin:5px 0;'>
-            <span>{i[0]} - ${i[1]}</span>
-            <a href="/eliminar_item/{i[2]}/{orden_id}" 
-               style="color:red; text-decoration:none;">❌</a>
-        </div>
-        """
+for i in items:
+    html += f"""
+    <div style='display:flex; justify-content:space-between; margin:5px 0;'>
+        <span>{i[0]} - ${i[1]}</span>
+        <a href="/eliminar_item/{i[2]}/{orden_id}" 
+           style="color:red; text-decoration:none;">❌</a>
+    </div>
+    """
     html += f"""
         </div>
 
