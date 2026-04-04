@@ -714,7 +714,7 @@ for i in items:
     </div>
     """
 
-    return html
+        return html
 # ---------------- AGREGAR ----------------
 
 @app.route("/agregar/<int:orden_id>/<int:producto_id>")
@@ -831,13 +831,13 @@ def cobrar(orden_id):
     <form method="post">
     
     <h3>Pago 1</h3>
-    <select name="metodo1">
-        <option value="usd">$</option>
-        <option value="bs_efectivo">Bs efectivo</option>
-        <option value="bs_pago_movil">Pago móvil</option>
-    </select>
+       <select name="metodo1">
+            <option value="bs_pago_movil" selected>Pago móvil</option>
+            <option value="usd">$</option>
+            <option value="bs_efectivo">Bs efectivo</option>
+        </select>
 
-    <input name="monto1" placeholder="Monto"><br>
+    <input name="monto1" value="{total_bs}"><br>
     <input name="ref1" placeholder="Referencia"><br><br>
 
     <h3>Pago 2 (opcional)</h3>
