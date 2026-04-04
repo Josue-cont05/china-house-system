@@ -639,6 +639,19 @@ def orden(orden_id):
     # 🔹 Panel derecho
     html += f"""
     <div class="panel">
+    <div style="display:flex; justify-content:flex-end; gap:10px;">
+
+        <a href="/editar_orden/{orden_id}" 
+           style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
+            ✏️
+        </a>
+
+        <a href="/eliminar_orden/{orden_id}" 
+           style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px; text-decoration:none;">
+        🗑
+        </a>
+
+    </div>
 
         <h2> Orden #{o[0]}</h2>
         <p><b>{o[1]}</b> - {o[2]}</p>
@@ -666,15 +679,6 @@ def orden(orden_id):
 
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
              Enviar a cocina
-        </a>
-
-        <a href="/editar_orden/{orden_id}" class="btn-accion" style="background:#2980b9;">
-             Editar orden
-        </a>
-
-        <a href="/eliminar_orden/{orden_id}" class="btn-accion" 
-           style="background:#e74c3c;">
-             Eliminar orden
         </a>
 
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
