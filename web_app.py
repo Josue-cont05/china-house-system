@@ -502,10 +502,9 @@ def orden(orden_id):
 
     # 🔹 Obtener items de la orden
     cursor.execute("""
-    SELECT p.nombre, p.precio, oi.id
-    FROM orden_items oi
-    JOIN productos p ON oi.producto_id = p.id
-    WHERE oi.orden_id=?
+    SELECT producto, precio, id
+    FROM orden_items
+    WHERE orden_id=?
     """, (orden_id,))
     items = cursor.fetchall()
 
@@ -626,11 +625,12 @@ def orden(orden_id):
             </a>
         </div>
 
-        <h2>Orden #{o[0]}</h2>
-        <p><b>{o[1]}</b> - {o[2]}</p>
-        <p>Cliente: {o[3] if o[3] else '-'}</p>
-        <p>Hora: {o[4] if len(o) > 4 else ''}</p>
-        <p>Estado: {o[3] if len(o) > 3 else ''}</p>
+        <h2>Orden #{o[1]}</h2>
+        <p>Tipo: {o[3]}</p>
+        <p>Referencia: {o[4]}</p>
+        <p>Cliente: {o[5] if o[5] else '-'}</p>
+        <p>Hora: {o[2]}</p>
+        <p>Estado: {o[6]}</p>
 
         <div class="lista-items">
             <h3>Productos</h3>
