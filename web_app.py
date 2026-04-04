@@ -231,13 +231,11 @@ def index():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    # 🔹 Traer órdenes
     cursor.execute("SELECT * FROM ordenes ORDER BY id DESC")
     ordenes = cursor.fetchall()
 
     conn.close()
 
-    # 🔹 HTML
     html = """
     <html>
     <head>
@@ -262,16 +260,51 @@ def index():
         font-weight: bold;
     }
 
-    .btn-nueva {
-        background: #27ae60;
-        padding: 10px 15px;
-        border-radius: 5px;
+    .menu-top a {
+        margin-left: 10px;
         color: white;
         text-decoration: none;
+        background: #34495e;
+        padding: 8px 10px;
+        border-radius: 5px;
+        font-size: 13px;
     }
 
     .contenedor {
+        display: flex;
         padding: 20px;
+        gap: 20px;
+    }
+
+    .panel-izq {
+        width: 35%;
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+
+    .panel-der {
+        width: 65%;
+    }
+
+    input, select {
+        width: 100%;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+        border: 1px solid #ccc;
+    }
+
+    button {
+        width: 100%;
+        padding: 12px;
+        background: #27ae60;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        margin-top: 10px;
+        font-size: 16px;
     }
 
     .card {
@@ -295,7 +328,7 @@ def index():
     .btn-ver {
         background: #3498db;
         color: white;
-        padding: 8px 12px;
+        padding: 6px 10px;
         border-radius: 5px;
         text-decoration: none;
     }
@@ -303,10 +336,9 @@ def index():
     .btn-cobrar {
         background: #27ae60;
         color: white;
-        padding: 8px 12px;
+        padding: 6px 10px;
         border-radius: 5px;
         text-decoration: none;
-        margin-left: 5px;
     }
     </style>
     </head>
@@ -315,19 +347,53 @@ def index():
 
     <div class="header">
         <div class="titulo">🍜 China House POS</div>
-        <a href="/nueva_orden" class="btn-nueva">+ Nueva Orden</a>
+
+        <div class="menu-top">
+            <a href="/cambiar_tasa">💱 Tasa</a>
+            <a href="/exportar">📦 Exportar</a>
+            <a href="/cierre">📊 Cierre</a>
+            <a href="/menu">📋 Menú</a>
+            <a href="/cocina">🍳 Cocina</a>
+        </div>
     </div>
 
     <div class="contenedor">
-    <h2>Órdenes activas</h2>
+
+        <!-- 🔹 PANEL IZQUIERDO -->
+        <div class="panel-izq">
+
+            <h3>🆕 Nueva Orden</h3>
+
+            <form action="/crear_orden" method="post">
+
+                <label>Tipo</label>
+                <select name="tipo">
+                    <option value="Mesa">Mesa</option>
+                    <option value="Delivery">Delivery</option>
+                    <option value="Para llevar">Pick Up</option>
+                </select>
+
+                <label>Referencia</label>
+                <input name="referencia">
+
+                <label>Cliente</label>
+                <input name="cliente">
+
+                <button type="submit">Crear Orden</button>
+
+            </form>
+
+        </div>
+
+        <!-- 🔹 PANEL DERECHO -->
+        <div class="panel-der">
+
+            <h3>Órdenes activas</h3>
     """
 
-    # 🔹 Órdenes abiertas primero
     for o in ordenes:
         if o[6] != "abierta":
             continue
-
-        color = "#f39c12"
 
         html += f"""
         <div class="card">
@@ -339,44 +405,34 @@ def index():
             </div>
 
             <div style="text-align:right;">
-                <span class="estado" style="background:{color};">
+                <span class="estado" style="background:#f39c12;">
                     {o[6]}
-                </span>
+                </span><br><br>
 
-                <br><br>
-
-                <a href="/orden/{o[0]}" class="btn-ver">
-                    Ver
-                </a>
-
-                <a href="/cobrar/{o[0]}" class="btn-cobrar">
-                    Cobrar
-                </a>
+                <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
+                <a href="/cobrar/{o[0]}" class="btn-cobrar">Cobrar</a>
             </div>
 
         </div>
         """
 
-    # 🔹 Historial
-    html += "<h2>Historial</h2>"
+    html += "<h3>Historial</h3>"
 
     for o in ordenes:
         if o[6] != "cerrada":
             continue
 
         html += f"""
-        <div style="
-            background:#ecf0f1;
-            padding:10px;
-            margin-bottom:5px;
-            border-radius:5px;
-        ">
+        <div style="background:#ecf0f1; padding:10px; margin-bottom:5px; border-radius:5px;">
             ✔ Orden #{o[1]} - {o[5] if o[5] else '-'}
         </div>
         """
 
     html += """
+        </div>
+
     </div>
+
     </body>
     </html>
     """
