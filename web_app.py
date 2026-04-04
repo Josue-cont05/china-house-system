@@ -769,7 +769,8 @@ def cobrar(orden_id):
         metodo1 = request.form["metodo1"]
         monto1 = float(request.form["monto1"] or 0)
         ref1 = request.form.get("ref1", "")
-
+        descuento = float(request.form.get("descuento", 0))
+        
         metodo2 = request.form.get("metodo2")
         monto2 = float(request.form.get("monto2") or 0)
         ref2 = request.form.get("ref2", "")
@@ -792,7 +793,11 @@ def cobrar(orden_id):
         total_pagado_usd = usd1 + usd2
 
         # VALIDACIÓN
-        if total_pagado_usd < total_usd:
+        total_con_descuento = total_usd - descuento
+        if total_con_descuento < 0:
+            total_con_descuento = 0
+
+        if total_pagado_usd < total_con_descuento:
             return "Pago insuficiente"
 
         # GUARDAR PAGOS
@@ -808,7 +813,11 @@ def cobrar(orden_id):
             )
 
         # CERRAR ORDEN
-        cursor.execute("UPDATE ordenes SET estado='cerrada' WHERE id=?", (orden_id,))
+            cursor.execute("""
+            UPDATE ordenes 
+            SET estado='cerrada', descuento=?
+            WHERE id=?
+            """, (descuento, orden_id))
         conn.commit()
         conn.close()
 
