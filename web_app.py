@@ -659,7 +659,7 @@ def orden(orden_id):
 html += "</div>"
 
     # 🔹 Panel derecho
-    html += f"""
+html += f"""
     <div class="panel">
     <div style="display:flex; justify-content:flex-end; gap:10px;">
 
