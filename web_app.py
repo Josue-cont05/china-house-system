@@ -707,8 +707,6 @@ def orden(orden_id):
         Volver
     </a>
 
-    </div>
-
     </body>
     </html>
     """
