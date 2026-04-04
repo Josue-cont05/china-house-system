@@ -707,8 +707,6 @@ def orden(orden_id):
     </a>
     """
 
-    </div>
-
     </body>
     </html>
     """
