@@ -840,7 +840,6 @@ def cobrar(orden_id):
 
         return redirect("/")
 
-    conn.close()
 
     return f"""
     <h1> Cobro Orden #{orden_id}</h1>
@@ -1139,106 +1138,88 @@ def marcar_listo(orden_id):
 @app.route("/exportar")
 def exportar():
     import sqlite3
-    import pandas as pd
-    from datetime import datetime
+    import csv
+    from flask import Response
 
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    hoy = datetime.now().strftime("%Y-%m-%d")
-
-    cursor.execute("""
-        SELECT id, numero_orden, fecha_hora, tipo, cliente, descuento
-        FROM ordenes
-        WHERE fecha_hora LIKE ?
-    """, (f"{hoy}%",))
-
+    # 🔹 Traer órdenes
+    cursor.execute("SELECT * FROM ordenes")
     ordenes = cursor.fetchall()
 
-    data = []
+    filas = []
 
     for o in ordenes:
         orden_id = o[0]
 
-        # 🔹 PRODUCTOS
+        # 🔹 Items
         cursor.execute("""
-            SELECT p.nombre, p.precio
-            FROM orden_items oi
-            JOIN productos p ON oi.producto_id = p.id
-            WHERE oi.orden_id = ?
+        SELECT producto, precio 
+        FROM orden_items 
+        WHERE orden_id=?
         """, (orden_id,))
-        productos = cursor.fetchall()
+        items = cursor.fetchall()
 
-        # 🔹 PAGOS
+        # 🔹 Pagos
         cursor.execute("""
-            SELECT metodo, monto_bs, monto_usd, referencia
-            FROM pagos
-            WHERE orden_id = ?
+        SELECT metodo, monto, referencia 
+        FROM pagos 
+        WHERE orden_id=?
         """, (orden_id,))
         pagos = cursor.fetchall()
 
-        # 🔹 TOTALES
-        total_usd = sum([p[1] for p in productos])
-
-        cursor.execute("SELECT valor FROM tasa LIMIT 1")
-        tasa_row = cursor.fetchone()
-        tasa = tasa_row[0] if tasa_row else 1
-
+        # 🔹 Totales
+        total_usd = sum(i[1] for i in items)
+        tasa = 36
         total_bs = total_usd * tasa
-        descuento = o[5] if o[5] else 0
-        total_bs_final = max(total_bs - descuento, 0)
+        descuento = o[8] if len(o) > 8 and o[8] else 0
+        total_final = max(total_bs - descuento, 0)
 
-        # 🔥 LÓGICA PRINCIPAL
-        max_filas = max(len(productos), len(pagos))
+        # 🔥 LÓGICA INTELIGENTE
+        for idx, item in enumerate(items):
 
-        for i in range(max_filas):
+            producto = item[0]
+            precio = item[1]
 
-            producto_nombre = ""
-            producto_precio = ""
+            # SOLO PRIMER PRODUCTO lleva total
+            total_usd_col = total_usd if idx == 0 else 0
+            total_bs_col = total_final if idx == 0 else 0
 
-            if i < len(productos):
-                producto_nombre = productos[i][0]
-                producto_precio = productos[i][1]
-
+            # ASIGNAR PAGOS POR FILA
             metodo = ""
-            monto_bs = 0
-            monto_usd = 0
+            monto = 0
             referencia = ""
 
-            if i < len(pagos):
-                metodo = pagos[i][0]
-                monto_bs = pagos[i][1] or 0
-                monto_usd = pagos[i][2] or 0
-                referencia = pagos[i][3] or ""
+            if idx < len(pagos):
+                metodo = pagos[idx][0]
+                monto = pagos[idx][1]
+                referencia = pagos[idx][2]
 
-            data.append({
-                "Orden": o[1],
-                "Fecha": o[2],
-                "Tipo": o[3],
-                "Cliente": o[4],
-
-                "Producto": producto_nombre,
-                "Precio $": producto_precio,
-
-                "Método": metodo,
-                "Monto Bs": monto_bs,
-                "Monto $": monto_usd,
-                "Referencia": referencia,
-
-                "Total Orden $": total_usd if i == 0 else "",
-                "Total Orden Bs": total_bs if i == 0 else "",
-                "Descuento Bs": descuento if i == 0 else "",
-                "Total Final Bs": total_bs_final if i == 0 else ""
-            })
+            filas.append([
+                orden_id,
+                o[2],  # fecha
+                o[3],  # tipo
+                o[4],  # referencia orden
+                o[5],  # cliente
+                producto,
+                precio,
+                metodo,
+                monto,
+                referencia,
+                total_usd_col,
+                total_bs_col
+            ])
 
     conn.close()
 
-    df = pd.DataFrame(data)
+    # 🔹 CSV
+    def generate():
+        yield "Orden,Fecha,Tipo,Ref Orden,Cliente,Producto,Precio USD,Metodo,Monto,Referencia Pago,Total USD,Total Bs\n"
+        for f in filas:
+            yield ",".join(str(x) for x in f) + "\n"
 
-    archivo = f"ventas_{hoy}.xlsx"
-    df.to_excel(archivo, index=False)
-
-    return f"Exportación lista: {archivo}"
+    return Response(generate(), mimetype="text/csv")
 
 # ---------------- ELIMINAR PRODUCTOR DE LA ORDEN ----------------
 @app.route("/eliminar_item/<int:item_id>/<int:orden_id>")
