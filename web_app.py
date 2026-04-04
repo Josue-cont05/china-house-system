@@ -532,8 +532,19 @@ def orden(orden_id):
     conn.close()
 
     # 🔹 Totales
-    total_usd = sum(i[1] for i in items)
-    tasa = 36
+    total_usd = sum(float(i[1]) for i in items)
+    
+   # 🔹 Obtener tasa desde DB
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    
+    tasa = row[0] if row else 1
+
+    conn.close()
+
     total_bs = total_usd * tasa
 
     descuento = o[8] if len(o) > 8 and o[8] else 0
