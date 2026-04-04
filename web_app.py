@@ -1,6 +1,7 @@
 from flask import Flask, request, redirect
 import sqlite3
 import datetime
+import pytz
 import os
 
 app = Flask(__name__)
@@ -458,7 +459,7 @@ def crear_orden():
     cliente = request.form.get("cliente", "")
 
     numero = siguiente_numero()
-    import pytz
+    
     venezuela = pytz.timezone("America/Caracas")
     fecha = datetime.datetime.now(venezuela).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -741,7 +742,6 @@ def cobrar(orden_id):
         monto2 = float(request.form.get("monto2") or 0)
         ref2 = request.form.get("ref2", "")
 
-        import pytz
         venezuela = pytz.timezone("America/Caracas")
         fecha = datetime.datetime.now(venezuela).strftime("%Y-%m-%d %H:%M:%S")
         
