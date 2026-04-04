@@ -633,14 +633,21 @@ def orden(orden_id):
     # 🔥 Agrupar por categorías
     categoria_actual = None
     
-    html += "<div class='grid-productos'>"
-    
     for p in productos:
         categoria = p[3] if p[3] else "Sin categoría"
 
         if categoria != categoria_actual:
+            # cerrar grid anterior si existe
+            if categoria_actual is not None:
+                html += "</div>"
+
             categoria_actual = categoria
+
+            # título de categoría
             html += f"<div class='categoria'>🍽 {categoria}</div>"
+
+            # abrir nuevo grid
+            html += "<div class='grid-productos'>"
 
         html += f"""
         <a href="/agregar/{orden_id}/{p[0]}">
@@ -648,7 +655,8 @@ def orden(orden_id):
         </a>
         """
 
-    html += "</div>"
+# cerrar último grid
+html += "</div>"
 
     # 🔹 Panel derecho
     html += f"""
