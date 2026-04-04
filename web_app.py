@@ -701,15 +701,18 @@ def orden(orden_id):
     <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
         Cobrar
     </a>
-
+    
+    html += f"""
     <a href="/" class="btn-accion volver">
         Volver
     </a>
-    """
+
+    </div>
 
     </body>
     </html>
     """
+    
 
     return html
 # ---------------- AGREGAR ----------------
