@@ -11,6 +11,14 @@ app = Flask(__name__)
 def init_db():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
+    # 🔥 Verificar si existe la columna "observacion"
+    cursor.execute("PRAGMA table_info(ordenes)")
+    columnas = [col[1] for col in cursor.fetchall()]
+
+    if "observacion" not in columnas:
+        cursor.execute("ALTER TABLE ordenes ADD COLUMN observacion TEXT")
+        conn.commit()
+    
 
     # ---------------- PRODUCTOS ----------------
     cursor.execute("""
@@ -1136,52 +1144,61 @@ def eliminar_item(item_id, orden_id):
 # ---------------- EDITAR ORDEN ----------------
 @app.route("/editar_orden/<int:orden_id>", methods=["GET", "POST"])
 def editar_orden(orden_id):
+    import sqlite3
+    from flask import request, redirect
+
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # 🔥 SI ES POST → GUARDAR
     if request.method == "POST":
         tipo = request.form.get("tipo")
         referencia = request.form.get("referencia")
         cliente = request.form.get("cliente")
+        observacion = request.form.get("observacion")
 
         cursor.execute("""
         UPDATE ordenes
-        SET tipo=?, referencia=?, cliente=?
+        SET tipo=?, referencia=?, cliente=?, observacion=?
         WHERE id=?
-        """, (tipo, referencia, cliente, orden_id))
+        """, (tipo, referencia, cliente, observacion, orden_id))
 
         conn.commit()
         conn.close()
 
         return redirect(f"/orden/{orden_id}")
 
-    cursor.execute("""
-    SELECT tipo, referencia, cliente FROM ordenes WHERE id=?
-    """, (orden_id,))
+    # 🔥 SI ES GET → MOSTRAR FORMULARIO
+    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
     o = cursor.fetchone()
 
     conn.close()
 
     return f"""
-    <h1>Editar Orden</h1>
+    <h2>Editar Orden #{o[1]}</h2>
 
-    <form method="post">
-        Tipo:
-        <select name="tipo">
-            <option {'selected' if o[0]=='Mesa' else ''}>Mesa</option>
-            <option {'selected' if o[0]=='Delivery' else ''}>Delivery</option>
-            <option {'selected' if o[0]=='Pickup' else ''}>Pickup</option>
-        </select><br><br>
+    <form method="POST">
 
-        Referencia:
-        <input name="referencia" value="{o[1] or ''}"><br><br>
+        <label>Tipo:</label><br>
+        <input name="tipo" value="{o[3]}"><br><br>
 
-        Cliente:
-        <input name="cliente" value="{o[2] or ''}"><br><br>
+        <label>Referencia:</label><br>
+        <input name="referencia" value="{o[4]}"><br><br>
 
-        <button>Guardar</button>
+        <label>Cliente:</label><br>
+        <input name="cliente" value="{o[5] if o[5] else ''}"><br><br>
+
+        <label>Observación:</label><br>
+        <textarea name="observacion" 
+        style="width:100%; height:80px;">
+{o[7] if len(o) > 7 and o[7] else ''}
+        </textarea><br><br>
+
+        <button type="submit">Guardar</button>
+
     </form>
 
+    <br>
     <a href="/orden/{orden_id}">Volver</a>
     """
 # ---------------- ELIMINAR ORDEN ----------------
