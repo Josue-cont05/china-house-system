@@ -64,6 +64,14 @@ def init_db():
         estado TEXT
     )
     """)
+    # 🔥 columna descuento
+    cursor.execute("PRAGMA table_info(ordenes)")
+    columnas = [col[1] for col in cursor.fetchall()]
+
+    if "descuento" not in columnas:
+        cursor.execute("ALTER TABLE ordenes ADD COLUMN descuento REAL DEFAULT 0")
+        conn.commit()
+    
     # 🔥 Verificar si existe la columna "observacion"
     cursor.execute("PRAGMA table_info(ordenes)")
     columnas = [col[1] for col in cursor.fetchall()]
@@ -836,6 +844,9 @@ def cobrar(orden_id):
 
     <input name="monto2" placeholder="Monto"><br>
     <input name="ref2" placeholder="Referencia"><br><br>
+
+    <label>Descuento ($):</label><br>
+    <input name="descuento" type="number" step="0.01" value="0"><br><br>
 
     <button>Confirmar pago</button>
 
