@@ -753,6 +753,10 @@ def cocina(orden_id):
 def cobrar(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
+    
+    # 🔥 AGREGAR ESTO
+    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
+    o = cursor.fetchone()
 
     # Obtener items
     cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
@@ -825,12 +829,12 @@ def cobrar(orden_id):
                 (orden_id, metodo2, monto2, ref2, fecha)
             )
 
-        # CERRAR ORDEN
-            cursor.execute("""
-            UPDATE ordenes 
-            SET estado='cerrada', descuento=?
-            WHERE id=?
-            """, (descuento, orden_id))
+        # 🔥 SIEMPRE cerrar orden
+        cursor.execute("""
+        UPDATE ordenes 
+        SET estado='cerrada', descuento=?
+        WHERE id=?
+        """, (descuento, orden_id))
         conn.commit()
         conn.close()
 
