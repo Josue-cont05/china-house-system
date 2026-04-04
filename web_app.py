@@ -770,6 +770,7 @@ def cobrar(orden_id):
         monto1 = float(request.form["monto1"] or 0)
         ref1 = request.form.get("ref1", "")
         descuento = float(request.form.get("descuento", 0))
+        descuento_usd = descuento / tasa
         
         metodo2 = request.form.get("metodo2")
         monto2 = float(request.form.get("monto2") or 0)
@@ -793,7 +794,7 @@ def cobrar(orden_id):
         total_pagado_usd = usd1 + usd2
 
         # VALIDACIÓN
-        total_con_descuento = total_usd - descuento
+        total_con_descuento = total_usd - descuento_usd
         if total_con_descuento < 0:
             total_con_descuento = 0
 
@@ -854,7 +855,7 @@ def cobrar(orden_id):
     <input name="monto2" placeholder="Monto"><br>
     <input name="ref2" placeholder="Referencia"><br><br>
 
-    <label>Descuento ($):</label><br>
+    <label>Descuento (Bs):</label><br>
     <input name="descuento" type="number" step="0.01" value="0"><br><br>
 
     <button>Confirmar pago</button>
