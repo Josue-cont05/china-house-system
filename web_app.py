@@ -231,7 +231,7 @@ def index():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM ordenes ORDER BY id DESC")
+    cursor.execute("SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes ORDER BY id DESC")
     ordenes = cursor.fetchall()
 
     conn.close()
@@ -728,7 +728,7 @@ def orden(orden_id):
     cursor = conn.cursor()
 
     # 🔹 Obtener orden
-    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute("SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes WHERE id=?", (orden_id,))
     o = cursor.fetchone()
 
     if not o:
@@ -976,7 +976,7 @@ def cobrar(orden_id):
     cursor = conn.cursor()
     
     # 🔥 AGREGAR ESTO
-    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute("SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes WHERE id=?", (orden_id,))
     o = cursor.fetchone()
 
     # Obtener items
@@ -1340,7 +1340,7 @@ def exportar():
     cursor = conn.cursor()
 
     # 🔹 Traer órdenes
-    cursor.execute("SELECT * FROM ordenes")
+    cursor.execute("SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes")
     ordenes = cursor.fetchall()
 
     filas = []
