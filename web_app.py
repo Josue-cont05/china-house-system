@@ -1552,6 +1552,38 @@ def cambiar_tasa():
     </html>
     """
 
+# ---------------- ORDEN - COCINA ----------------
+@app.route("/ordenes_cocina")
+def ordenes_cocina():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT id, numero_orden, tipo, cliente
+    FROM ordenes
+    WHERE estado = 'en cocina'
+    """)
+
+    ordenes = []
+
+    for o in cursor.fetchall():
+        cursor.execute("""
+        SELECT producto FROM orden_items WHERE orden_id=?
+        """, (o[0],))
+
+        items = [i[0] for i in cursor.fetchall()]
+
+        ordenes.append({
+            "id": o[0],
+            "numero": o[1],
+            "tipo": o[2],
+            "cliente": o[3],
+            "items": items
+        })
+
+    conn.close()
+    return ordenes
+
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
