@@ -1553,6 +1553,8 @@ def cambiar_tasa():
     """
 
 # ---------------- ORDEN - COCINA ----------------
+from flask import jsonify
+
 @app.route("/ordenes_cocina")
 def ordenes_cocina():
     conn = sqlite3.connect("china_house.db")
@@ -1582,7 +1584,7 @@ def ordenes_cocina():
         })
 
     conn.close()
-    return ordenes
+    return jsonify(ordenes)
 
 # ---------------- MAIN ----------------
 
