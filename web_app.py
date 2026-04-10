@@ -392,7 +392,7 @@ def index():
     """
 
     for o in ordenes:
-        if o[6] not in ["abierta", "en cocina"]:
+        if o[6] not in "abierta":
             continue
 
         html += f"""
