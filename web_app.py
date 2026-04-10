@@ -947,7 +947,7 @@ def orden(orden_id):
             Enviar a cocina
         </a>
 
-        <a href="/factura/{orden_id}" target="_blank" class="btn-accion" style="background:#8e44ad;">
+        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">
             🧾 Facturar
         </a>
         
@@ -1726,7 +1726,58 @@ def factura(orden_id):
     """
 
     return html
+# ---------------- FACTURA PENDIENTE ----------------
+@app.route("/facturas_pendientes")
+def facturas_pendientes():
+    import sqlite3
 
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    SELECT id, numero_orden, tipo, cliente 
+    FROM ordenes 
+    WHERE estado='facturar'
+    """)
+    ordenes = cursor.fetchall()
+
+    resultado = []
+
+    for o in ordenes:
+        cursor.execute("""
+        SELECT producto, precio 
+        FROM orden_items WHERE orden_id=?
+        """, (o[0],))
+        items = cursor.fetchall()
+
+        resultado.append({
+            "id": o[0],
+            "numero": o[1],
+            "tipo": o[2],
+            "cliente": o[3],
+            "items": [f"{i[0]} - ${i[1]}" for i in items],
+            "total": sum(i[1] for i in items)
+        })
+
+    conn.close()
+    return resultado
+
+# ---------------- ACTIVAR FACTURA ----------------
+@app.route("/activar_factura/<int:orden_id>")
+def activar_factura(orden_id):
+    import sqlite3
+
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    UPDATE ordenes SET estado='facturar' WHERE id=?
+    """, (orden_id,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect(f"/orden/{orden_id}")
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
