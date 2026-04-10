@@ -1616,6 +1616,117 @@ def ordenes_cocina():
     conn.close()
     return jsonify(ordenes)
 
+# ---------------- FACTURA ----------------
+
+@app.route("/factura/<int:orden_id>")
+def factura(orden_id):
+    import sqlite3
+
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    # 🔹 Datos de la orden
+    cursor.execute("""
+    SELECT numero_orden, tipo, referencia, cliente 
+    FROM ordenes WHERE id=?
+    """, (orden_id,))
+    o = cursor.fetchone()
+
+    # 🔹 Items
+    cursor.execute("""
+    SELECT producto, precio 
+    FROM orden_items WHERE orden_id=?
+    """, (orden_id,))
+    items = cursor.fetchall()
+
+    conn.close()
+
+    total = sum(i[1] for i in items)
+
+    html = f"""
+    <html>
+    <head>
+    <style>
+    body {{
+        font-family: Arial;
+        padding: 20px;
+        max-width: 400px;
+        margin: auto;
+    }}
+
+    .titulo {{
+        text-align: center;
+        font-size: 22px;
+        font-weight: bold;
+    }}
+
+    .numero {{
+        text-align: right;
+        font-size: 20px;
+        font-weight: bold;
+    }}
+
+    .sep {{
+        border-top: 1px dashed black;
+        margin: 10px 0;
+    }}
+
+    .item {{
+        display: flex;
+        justify-content: space-between;
+        margin: 5px 0;
+    }}
+
+    .total {{
+        font-size: 18px;
+        font-weight: bold;
+        text-align: right;
+    }}
+    </style>
+    </head>
+
+    <body>
+
+    <div class="titulo">
+        CHINA HOUSE
+    </div>
+
+    <div class="numero">
+        Orden #{o[0]}
+    </div>
+
+    <div class="sep"></div>
+
+    <div>
+        <b>Tipo:</b> {o[1]}<br>
+        <b>Cliente:</b> {o[3] if o[3] else '-'}<br>
+        <b>Referencia:</b> {o[2]}
+    </div>
+
+    <div class="sep"></div>
+    """
+
+    for i in items:
+        html += f"""
+        <div class="item">
+            <span>{i[0]}</span>
+            <span>${i[1]}</span>
+        </div>
+        """
+
+    html += f"""
+    <div class="sep"></div>
+
+    <div class="total">
+        TOTAL: ${total}
+    </div>
+
+    </body>
+    </html>
+    """
+
+    return html
+
 # ---------------- MAIN ----------------
 
 if __name__ == "__main__":
