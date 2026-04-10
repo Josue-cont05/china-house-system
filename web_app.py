@@ -408,7 +408,32 @@ def index():
 
         </div>
         """
+    html += "<h3>En cocina</h3>"
 
+for o in ordenes:
+    if o[6] != "en cocina":
+        continue
+
+    html += f"""
+    <div class="card" style="background:#fff3cd;">
+
+        <div>
+            <b>Orden #{o[1]}</b><br>
+            {o[3]} - {o[4]}<br>
+            👤 {o[5] if o[5] else '-'}
+        </div>
+
+        <div style="text-align:right;">
+            <span class="estado" style="background:#e67e22;">
+                {o[6]}
+            </span><br><br>
+
+            <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
+        </div>
+
+    </div>
+    """
+    
     html += "<h3>Historial</h3>"
 
     for o in ordenes:
