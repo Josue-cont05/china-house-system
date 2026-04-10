@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 import sqlite3
 
-def agregar_columna_facturar():
+def asegurar_columna_facturar():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
