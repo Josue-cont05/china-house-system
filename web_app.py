@@ -1107,7 +1107,7 @@ def cobrar(orden_id):
         conn.close()
 
         return redirect("/")
------------------------------
+        
     return f"""
     <html>
     <head>
@@ -1838,37 +1838,42 @@ def factura(orden_id):
 def facturas_pendientes():
     import sqlite3
 
-    conn = sqlite3.connect("china_house.db")
-    cursor = conn.cursor()
+    try:
+        conn = sqlite3.connect("china_house.db")
+        cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT id, numero_orden, tipo, cliente, referencia
-    FROM ordenes
-    WHERE facturar = 1
-    """)
-    ordenes = cursor.fetchall()
-
-    resultado = []
-
-    for o in ordenes:
         cursor.execute("""
-        SELECT producto, precio 
-        FROM orden_items WHERE orden_id=?
-        """, (o[0],))
-        items = cursor.fetchall()
+        SELECT id, numero_orden, tipo, cliente, referencia
+        FROM ordenes
+        WHERE facturar = 1
+        """)
+        ordenes = cursor.fetchall()
 
-        resultado.append({
-            "id": o[0],
-            "numero": o[1],
-            "tipo": o[2],
-            "cliente": o[3],
-            "referencia": o[4],
-            "items": [f"{i[0]} - ${i[1]}" for i in items],
-            "total": sum(i[1] for i in items)
-        })
+        resultado = []
 
-    conn.close()
-    return resultado
+        for o in ordenes:
+            cursor.execute("""
+            SELECT producto, precio 
+            FROM orden_items WHERE orden_id=?
+            """, (o[0],))
+            items = cursor.fetchall()
+
+            resultado.append({
+                "id": o[0],
+                "numero": o[1],
+                "tipo": o[2],
+                "cliente": o[3],
+                "referencia": o[4],
+                "items": [f"{i[0]} - ${i[1]}" for i in items],
+                "total": sum(i[1] for i in items)
+            })
+
+        conn.close()
+        return resultado
+
+    except Exception as e:
+        print("❌ ERROR EN FACTURAS:", e)
+        return []
 
 # ---------------- ACTIVAR FACTURA ----------------
 @app.route("/activar_factura/<int:orden_id>")
