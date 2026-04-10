@@ -1107,45 +1107,135 @@ def cobrar(orden_id):
         conn.close()
 
         return redirect("/")
-
-
+-----------------------------
     return f"""
-    <h1> Cobro Orden #{orden_id}</h1>
+    <html>
+    <head>
+    <style>
+    body {{
+        font-family: Arial;
+        margin: 0;
+        background: #f5f6fa;
+    }}
 
-    <h2>Total USD: ${total_usd}</h2>
-    <h2>Total Bs: Bs {total_bs}</h2>
+    .contenedor {{
+        max-width: 500px;
+        margin: 30px auto;
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }}
 
+    .titulo {{
+        text-align: center;
+        font-size: 22px;
+        font-weight: bold;
+    }}
+
+    .numero {{
+        text-align: right;
+        font-size: 18px;
+        margin-bottom: 10px;
+    }}
+
+    .sep {{
+        border-top: 1px dashed #ccc;
+        margin: 15px 0;
+    }}
+
+    .total {{
+        font-size: 20px;
+        font-weight: bold;
+        text-align: right;
+    }}
+
+    input, select {{
+        width: 100%;
+        padding: 10px;
+        margin: 5px 0;
+        border-radius: 5px;
+        border: 1px solid #ccc;
+    }}
+
+    .btn {{
+        width: 100%;
+        padding: 12px;
+        margin-top: 10px;
+        border: none;
+        border-radius: 5px;
+        font-size: 16px;
+        cursor: pointer;
+    }}
+    
+    .confirmar {{ background: #27ae60; color: white; }}
+    .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:12px; border-radius:5px; }}
+    </style>
+    </head>
+    
+    <body>
+    
+    <div class="contenedor">
+    
+    <div class="titulo">💳 COBRAR</div>
+    
+    <div class="numero">Orden #{o[1]}</div>
+    
+    <div>
+    <b>Cliente:</b> {o[5] if o[5] else '-'}<br>
+    <b>Tipo:</b> {o[3]}
+    </div>
+    
+    <div class="sep"></div>
+    
+    <div class="total">USD: ${total_usd}</div>
+    <div class="total">Bs: {total_bs}</div>
+    
+    <div class="sep"></div>
+    
     <form method="post">
     
     <h3>Pago 1</h3>
-       <select name="metodo1">
-            <option value="bs_pago_movil" selected>Pago móvil</option>
-            <option value="usd">$</option>
-            <option value="bs_efectivo">Bs efectivo</option>
-        </select>
-
-    <input name="monto1" value="{total_bs}"><br>
-    <input name="ref1" placeholder="Referencia"><br><br>
-
+    
+    <select name="metodo1">
+        <option value="bs_pago_movil">📱 Pago móvil</option>
+        <option value="usd">💵 USD</option>
+        <option value="bs_efectivo">💰 Bs efectivo</option>
+    </select>
+    
+    <input name="monto1" value="{total_bs}" placeholder="Monto">
+    
+    <input name="ref1" placeholder="Referencia">
+    
+    <div class="sep"></div>
+    
     <h3>Pago 2 (opcional)</h3>
+    
     <select name="metodo2">
         <option value="">-- ninguno --</option>
-        <option value="usd">$</option>
-        <option value="bs_efectivo">Bs efectivo</option>
-        <option value="bs_pago_movil">Pago móvil</option>
+        <option value="usd">💵 USD</option>
+        <option value="bs_efectivo">💰 Bs efectivo</option>
+        <option value="bs_pago_movil">📱 Pago móvil</option>
     </select>
-
-    <input name="monto2" placeholder="Monto"><br>
-    <input name="ref2" placeholder="Referencia"><br><br>
-
-    <label>Descuento (Bs):</label><br>
-    <input name="descuento" type="number" step="0.01" value="0"><br><br>
-
-    <button>Confirmar pago</button>
-
+    
+    <input name="monto2" placeholder="Monto">
+    <input name="ref2" placeholder="Referencia">
+    
+    <div class="sep"></div>
+    
+    <label>Descuento (Bs)</label>
+    <input name="descuento" type="number" step="0.01" value="0">
+    
+    <button class="btn confirmar">✅ Confirmar pago</button>
+    
     </form>
-
-    <a href="/orden/{orden_id}">⬅ Volver</a>
+    
+    <a href="/orden/{orden_id}" class="volver">⬅ Volver</a>
+    
+    </div>
+    
+    </body>
+    </html>
     """
 
 # ---------------- CIERRE ----------------
