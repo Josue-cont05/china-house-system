@@ -205,17 +205,10 @@ def cargar_productos():
 # ---------------- CONSECUTIVO ----------------
 
 def siguiente_numero():
-    hoy = datetime.date.today().isoformat()
-
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("""
-    SELECT MAX(numero_orden)
-    FROM ordenes
-    WHERE fecha_hora LIKE ?
-    """, (hoy + "%",))
-
+    cursor.execute("SELECT MAX(numero_orden) FROM ordenes")
     ultimo = cursor.fetchone()[0]
 
     conn.close()
