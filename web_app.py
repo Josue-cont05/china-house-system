@@ -72,8 +72,11 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM categorias")
     if cursor.fetchone()[0] == 0:
         categorias = [
-            ("Arroces",),
-            ("Bebida",),
+            ("Solo para ti",),
+            ("Para compartir",),
+            ("Banquete imperial",),
+            ("Platos adicionales",),
+            ("Bebidas",),
             ("Delivery",),
             ("Extras",)
         ]
@@ -188,37 +191,49 @@ def cargar_productos():
 
     # 🔥 PRODUCTOS
     productos = [
-        # Arroces
-        ("Cerdo-Jamon Personal", 5.5, "Arroces"),
-        ("Cerdo-Jamon Mediano", 8.5, "Arroces"),
-        ("Cerdo-Jamon Familiar", 11.5, "Arroces"),
-        ("Pollo-Jamon Personal", 5.5, "Arroces"),
-        ("Pollo-Jamon Mediano", 8.5, "Arroces"),
-        ("Pollo-Jamon Familiar", 11.5, "Arroces"),
-        ("Pollo-Cerdo Personal", 6.5, "Arroces"),
-        ("Pollo-Cerdo Mediano", 9.5, "Arroces"),
-        ("Pollo-Cerdo Familiar", 12.5, "Arroces"),
-        ("Pollo-Camaron Personal", 6.5, "Arroces"),
-        ("Pollo-Camaron Mediano", 9.5, "Arroces"),
-        ("Pollo-Camaron Familiar", 12.5, "Arroces"),
-        ("Especial Personal", 7.5, "Arroces"),
-        ("Especial Mediano", 10.5, "Arroces"),
-        ("Especial Familiar", 15.5, "Arroces"),
 
-        # Bebidas
-        ("Refresco 1 Lt", 1.1, "Bebida"),
-        ("Refresco 1.5 Lt", 0, "Bebida"),
-        ("Refresco 2 Lt", 0, "Bebida"),
-
-        # Delivery
-        ("Delivery 1", 1, "Delivery"),
+        # 🍱 SOLO PARA TI
+        ("Solo para ti Cerdo", 4.5, "Solo para ti"),
+        ("Solo para ti Pollo", 4.5, "Solo para ti"),
+        ("Solo para ti Cerdo-Pollo", 5.0, "Solo para ti"),
+        ("Solo para ti Pollo-Camaron", 5.0, "Solo para ti"),
+        ("Solo para ti Premium", 6.0, "Solo para ti"),
+    
+        # 👥 PARA COMPARTIR
+        ("Para compartir Cerdo", 4.5, "Para compartir"),
+        ("Para compartir Pollo", 4.5, "Para compartir"),
+        ("Para compartir Cerdo-Pollo", 5.0, "Para compartir"),
+        ("Para compartir Pollo-Camaron", 5.0, "Para compartir"),
+        ("Para compartir Premium", 6.0, "Para compartir"),
+    
+        # 👑 BANQUETE IMPERIAL
+        ("Banquete Imperial Cerdo", 4.5, "Banquete imperial"),
+        ("Banquete Imperial Pollo", 4.5, "Banquete imperial"),
+        ("Banquete Imperial Cerdo-Pollo", 5.0, "Banquete imperial"),
+        ("Banquete Imperial Pollo-Camaron", 5.0, "Banquete imperial"),
+        ("Banquete Imperial Premium", 6.0, "Banquete imperial"),
+    
+        # 🍗 PLATOS ADICIONALES
+        ("Racion de Lumpias", 4.0, "Platos adicionales"),
+        ("Media racion de Lumpias", 2.5, "Platos adicionales"),
+        ("Shop Suey", 4.0, "Platos adicionales"),
+        ("Pollo Agridulce", 5.0, "Platos adicionales"),
+        ("Racion de Pollo Agridulce", 5.0, "Platos adicionales"),
+    
+        # 🥤 BEBIDAS
+        ("Refresco 1 Lt", 1.0, "Bebidas"),
+        ("Refresco 1.5 Lt", 1.5, "Bebidas"),
+    
+        # 🛵 DELIVERY
+        ("Delivery 1", 1.0, "Delivery"),
         ("Delivery 1.5", 1.5, "Delivery"),
-        ("Delivery 2", 2, "Delivery"),
+        ("Delivery 2", 2.0, "Delivery"),
         ("Delivery 2.5", 2.5, "Delivery"),
-        ("Delivery 3", 3, "Delivery"),
-
-        # Extras
-        ("Salsa extra", 0.25, "Extras"),
+        ("Delivery 3", 3.0, "Delivery"),
+        ("Delivery 3.5", 3.5, "Delivery"),
+    
+        # ➕ EXTRAS
+        ("Extra de Salsa", 0.25, "Extras"),
     ]
 
     # 🔥 Insertar productos con categoría
