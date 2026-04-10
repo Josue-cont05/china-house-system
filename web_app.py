@@ -1097,7 +1097,7 @@ def cobrar(orden_id):
                 (orden_id, metodo2, monto2, ref2, fecha)
             )
 
-        # 🔥 SIEMPRE cerrar orden
+        #  SIEMPRE cerrar orden
         cursor.execute("""
         UPDATE ordenes 
         SET estado='cerrada', descuento=?
