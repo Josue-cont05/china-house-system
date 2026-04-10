@@ -947,10 +947,6 @@ def orden(orden_id):
             Enviar a cocina
         </a>
 
-        <a href="/imprimir/{orden_id}" target="_blank" class="btn-accion" style="background:#2c3e50;">
-            🖨 Imprimir
-        </a>
-
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
             Cobrar
         </a>
@@ -1615,102 +1611,6 @@ def ordenes_cocina():
 
     conn.close()
     return jsonify(ordenes)
-
-
-# ---------------- IMPRIMIR ----------------
-
-@app.route("/imprimir/<int:orden_id>")
-def imprimir(orden_id):
-    import sqlite3
-
-    conn = sqlite3.connect("china_house.db")
-    cursor = conn.cursor()
-
-    cursor.execute("""
-    SELECT numero_orden, tipo, referencia, cliente 
-    FROM ordenes WHERE id=?
-    """, (orden_id,))
-    o = cursor.fetchone()
-
-    cursor.execute("""
-    SELECT producto FROM orden_items 
-    WHERE orden_id=?
-    """, (orden_id,))
-    items = cursor.fetchall()
-
-    conn.close()
-
-    html = f"""
-    <html>
-    <head>
-    <style>
-    body {{
-        font-family: monospace;
-        font-size: 16px;
-        width: 280px;
-    }}
-
-    .titulo {{
-        text-align: center;
-        font-size: 18px;
-        font-weight: bold;
-    }}
-
-    .numero {{
-        text-align: right;
-        font-size: 32px;
-        font-weight: bold;
-        margin-top: 10px;
-    }}
-
-    .sep {{
-        border-top: 1px dashed black;
-        margin: 10px 0;
-    }}
-
-    .item {{
-        font-size: 16px;
-        margin: 3px 0;
-    }}
-    </style>
-    </head>
-
-    <body onload="window.print()">
-
-    <div class="titulo">
-        CHINA HOUSE
-    </div>
-
-    <div class="sep"></div>
-
-    <div class="numero">
-        Orden #{o[0]}
-    </div>
-
-    <div>
-        Tipo: {o[1]}<br>
-        Cliente: {o[3] if o[3] else '-'}<br>
-        Ref: {o[2]}
-    </div>
-
-    <div class="sep"></div>
-    """
-
-    for i in items:
-        html += f"<div class='item'>• {i[0]}</div>"
-
-    html += """
-    <div class="sep"></div>
-
-    ========================
-       NUEVA ORDEN
-    ========================
-
-    </body>
-    </html>
-    """
-
-    return html
 
 # ---------------- MAIN ----------------
 
