@@ -213,8 +213,8 @@ def siguiente_numero():
     cursor.execute("""
     SELECT MAX(numero_orden)
     FROM ordenes
-    WHERE date(fecha_hora) = ?
-    """, (hoy,))
+    WHERE fecha_hora LIKE ?
+    """, (hoy + "%",))
 
     ultimo = cursor.fetchone()[0]
 
