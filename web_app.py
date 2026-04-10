@@ -217,7 +217,6 @@ def cargar_productos():
         ("Racion de Lumpias", 4.0, "Platos adicionales"),
         ("Media racion de Lumpias", 2.5, "Platos adicionales"),
         ("Shop Suey", 4.0, "Platos adicionales"),
-        ("Pollo Agridulce", 5.0, "Platos adicionales"),
         ("Racion de Pollo Agridulce", 5.0, "Platos adicionales"),
     
         # 🥤 BEBIDAS
