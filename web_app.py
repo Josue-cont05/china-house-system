@@ -1754,7 +1754,7 @@ def facturas_pendientes():
     cursor.execute("""
     SELECT id, numero_orden, tipo, cliente, referencia
     FROM ordenes
-    WHERE estado='facturar'
+    WHERE facturar = 1
     """)
     ordenes = cursor.fetchall()
 
