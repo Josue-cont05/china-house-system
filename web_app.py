@@ -385,7 +385,7 @@ def index():
     """
 
     for o in ordenes:
-        if o[6] not in "abierta":
+        if o[6] != "abierta":
             continue
 
         html += f"""
