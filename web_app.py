@@ -6,6 +6,23 @@ import os
 
 app = Flask(__name__)
 
+import sqlite3
+
+def agregar_columna_facturar():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("ALTER TABLE ordenes ADD COLUMN facturar INTEGER DEFAULT 0")
+        conn.commit()
+        print("✅ Columna 'facturar' creada")
+    except:
+        print("ℹ️ Columna 'facturar' ya existe")
+
+    conn.close()
+
+agregar_columna_facturar()
+
 # ---------------- DB ----------------
 
 def init_db():
@@ -1772,7 +1789,7 @@ def activar_factura(orden_id):
     cursor = conn.cursor()
 
     cursor.execute("""
-    UPDATE ordenes SET estado='facturar' WHERE id=?
+    UPDATE ordenes SET facturar=1 WHERE id=?
     """, (orden_id,))
 
     conn.commit()
