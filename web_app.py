@@ -12,12 +12,26 @@ def agregar_columna_facturar():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    try:
+    # 🔍 Ver columnas
+    cursor.execute("PRAGMA table_info(ordenes)")
+    columnas = cursor.fetchall()
+    nombres = [col[1] for col in columnas]
+
+    print("🧪 Columnas:", nombres)
+
+    # 🔥 Crear columna si no existe
+    if "facturar" not in nombres:
         cursor.execute("ALTER TABLE ordenes ADD COLUMN facturar INTEGER DEFAULT 0")
         conn.commit()
-        print("✅ Columna 'facturar' creada")
-    except Exception as e:
-        print("ℹ️ Ya existe o error:", e)
+        print("✅ Columna creada")
+    else:
+        print("✔️ Columna ya existe")
+
+    # 🔥 CORREGIR NULL (CLAVE)
+    cursor.execute("UPDATE ordenes SET facturar=0 WHERE facturar IS NULL")
+    conn.commit()
+
+    print("🔥 NULL corregidos")
 
     conn.close()
 
@@ -1878,18 +1892,18 @@ def facturas_pendientes():
 # ---------------- ACTIVAR FACTURA ----------------
 @app.route("/activar_factura/<int:orden_id>")
 def activar_factura(orden_id):
-    import sqlite3
-    from flask import redirect
-
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    try:
-        cursor.execute("UPDATE ordenes SET facturar=1 WHERE id=?", (orden_id,))
-    except:
-        print("⚠️ Columna facturar no existe aún")
-
+    cursor.execute("UPDATE ordenes SET facturar=1 WHERE id=?", (orden_id,))
     conn.commit()
+
+    print("🔥 FACTURAR ACTIVADO PARA ORDEN:", orden_id)
+
+    # 🔍 DEBUG
+    cursor.execute("SELECT id, facturar FROM ordenes WHERE id=?", (orden_id,))
+    print("🧪 RESULTADO DB:", cursor.fetchone())
+
     conn.close()
 
     return redirect(f"/orden/{orden_id}")
@@ -1920,22 +1934,3 @@ def desactivar_factura(orden_id):
 
 # ----------------  ----------------
 import sqlite3
-
-def asegurar_columna_facturar():
-    conn = sqlite3.connect("china_house.db")
-    cursor = conn.cursor()
-
-    # 🔍 Verificar columnas existentes
-    cursor.execute("PRAGMA table_info(ordenes)")
-    columnas = [col[1] for col in cursor.fetchall()]
-
-    if "facturar" not in columnas:
-        cursor.execute("ALTER TABLE ordenes ADD COLUMN facturar INTEGER DEFAULT 0")
-        conn.commit()
-        print("✅ Columna 'facturar' creada correctamente")
-    else:
-        print("✔️ Columna 'facturar' ya existe")
-
-    conn.close()
-
-asegurar_columna_facturar()
