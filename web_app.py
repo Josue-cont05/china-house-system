@@ -200,18 +200,18 @@ def cargar_productos():
         ("Solo para ti Premium", 6.0, "Solo para ti"),
     
         # 👥 PARA COMPARTIR
-        ("Para compartir Cerdo", 4.5, "Para compartir"),
-        ("Para compartir Pollo", 4.5, "Para compartir"),
-        ("Para compartir Cerdo-Pollo", 5.0, "Para compartir"),
-        ("Para compartir Pollo-Camaron", 5.0, "Para compartir"),
-        ("Para compartir Premium", 6.0, "Para compartir"),
+        ("Para compartir Cerdo", 7.0, "Para compartir"),
+        ("Para compartir Pollo", 7.0, "Para compartir"),
+        ("Para compartir Cerdo-Pollo", 8.0, "Para compartir"),
+        ("Para compartir Pollo-Camaron", 8.0, "Para compartir"),
+        ("Para compartir Premium", 9.0, "Para compartir"),
     
         # 👑 BANQUETE IMPERIAL
-        ("Banquete Imperial Cerdo", 4.5, "Banquete imperial"),
-        ("Banquete Imperial Pollo", 4.5, "Banquete imperial"),
-        ("Banquete Imperial Cerdo-Pollo", 5.0, "Banquete imperial"),
-        ("Banquete Imperial Pollo-Camaron", 5.0, "Banquete imperial"),
-        ("Banquete Imperial Premium", 6.0, "Banquete imperial"),
+        ("Banquete Imperial Cerdo", 10.0, "Banquete imperial"),
+        ("Banquete Imperial Pollo", 10.0, "Banquete imperial"),
+        ("Banquete Imperial Cerdo-Pollo", 11.0, "Banquete imperial"),
+        ("Banquete Imperial Pollo-Camaron", 11.0, "Banquete imperial"),
+        ("Banquete Imperial Premium", 13.0, "Banquete imperial"),
     
         # 🍗 PLATOS ADICIONALES
         ("Racion de Lumpias", 4.0, "Platos adicionales"),
