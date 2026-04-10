@@ -35,7 +35,6 @@ def agregar_columna_facturar():
 
     conn.close()
 
-agregar_columna_facturar()
 
 # ---------------- DB ----------------
 
@@ -1912,11 +1911,10 @@ def activar_factura(orden_id):
 if __name__ == "__main__":
     init_db()
     cargar_productos()
+    asegurar_columna_facturar()  # 🔥 AQUÍ ES DONDE VA
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
 
 
 # ---------------- DESACTIVAR ----------------
