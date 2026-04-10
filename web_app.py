@@ -1784,13 +1784,15 @@ def facturas_pendientes():
 @app.route("/activar_factura/<int:orden_id>")
 def activar_factura(orden_id):
     import sqlite3
+    from flask import redirect
 
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    cursor.execute("""
-    UPDATE ordenes SET facturar=1 WHERE id=?
-    """, (orden_id,))
+    try:
+        cursor.execute("UPDATE ordenes SET facturar=1 WHERE id=?", (orden_id,))
+    except:
+        print("⚠️ Columna facturar no existe aún")
 
     conn.commit()
     conn.close()
@@ -1804,3 +1806,27 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
+
+
+# ----------------  ----------------
+import sqlite3
+
+def asegurar_columna_facturar():
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    # 🔍 Verificar columnas existentes
+    cursor.execute("PRAGMA table_info(ordenes)")
+    columnas = [col[1] for col in cursor.fetchall()]
+
+    if "facturar" not in columnas:
+        cursor.execute("ALTER TABLE ordenes ADD COLUMN facturar INTEGER DEFAULT 0")
+        conn.commit()
+        print("✅ Columna 'facturar' creada correctamente")
+    else:
+        print("✔️ Columna 'facturar' ya existe")
+
+    conn.close()
+
+asegurar_columna_facturar()
