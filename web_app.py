@@ -1735,8 +1735,8 @@ def facturas_pendientes():
     cursor = conn.cursor()
 
     cursor.execute("""
-    SELECT id, numero_orden, tipo, cliente 
-    FROM ordenes 
+    SELECT id, numero_orden, tipo, cliente, referencia
+    FROM ordenes
     WHERE estado='facturar'
     """)
     ordenes = cursor.fetchall()
@@ -1755,6 +1755,7 @@ def facturas_pendientes():
             "numero": o[1],
             "tipo": o[2],
             "cliente": o[3],
+            "referencia": o[4],
             "items": [f"{i[0]} - ${i[1]}" for i in items],
             "total": sum(i[1] for i in items)
         })
