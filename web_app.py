@@ -16,8 +16,8 @@ def agregar_columna_facturar():
         cursor.execute("ALTER TABLE ordenes ADD COLUMN facturar INTEGER DEFAULT 0")
         conn.commit()
         print("✅ Columna 'facturar' creada")
-    except:
-        print("ℹ️ Columna 'facturar' ya existe")
+    except Exception as e:
+        print("ℹ️ Ya existe o error:", e)
 
     conn.close()
 
