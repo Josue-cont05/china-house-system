@@ -947,6 +947,10 @@ def orden(orden_id):
             Enviar a cocina
         </a>
 
+        <a href="/factura/{orden_id}" target="_blank" class="btn-accion" style="background:#8e44ad;">
+            🧾 Facturar
+        </a>
+        
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
             Cobrar
         </a>
