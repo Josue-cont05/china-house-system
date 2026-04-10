@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect
+from flask import Flask, request, redirect, jsonify
 import sqlite3
 import datetime
 import pytz
@@ -1869,7 +1869,7 @@ def facturas_pendientes():
             })
 
         conn.close()
-        return resultado
+        return jsonify(resultado)
 
     except Exception as e:
         print("❌ ERROR EN FACTURAS:", e)
@@ -1903,6 +1903,20 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port)
 
 
+
+
+# ---------------- DESACTIVAR ----------------
+@app.route("/desactivar_factura/<int:orden_id>")
+def desactivar_factura(orden_id):
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    cursor.execute("UPDATE ordenes SET facturar=0 WHERE id=?", (orden_id,))
+
+    conn.commit()
+    conn.close()
+
+    return "ok"
 
 # ----------------  ----------------
 import sqlite3
