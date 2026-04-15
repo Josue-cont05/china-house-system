@@ -1743,8 +1743,7 @@ def ordenes_cocina():
             "id": o[0],
             "numero": o[1],
             "tipo": o[2],
-            "cliente": o[3],
-            "referencia": o[4],  
+            "cliente": o[3], 
             "items": items
         })
 
