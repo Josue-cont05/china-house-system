@@ -280,6 +280,7 @@ def index():
     html = """
     <html>
     <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     body {
         font-family: Arial;
@@ -380,6 +381,54 @@ def index():
         padding: 6px 10px;
         border-radius: 5px;
         text-decoration: none;
+    }
+    
+    @media (max-width: 768px) {
+
+    .contenedor {
+        flex-direction: column;
+        padding: 10px;
+    }
+
+    .panel-izq, .panel-der {
+        width: 100%;
+    }
+
+    .panel-izq {
+        margin-bottom: 15px;
+    }
+
+    .card {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+    }
+
+    .btn-ver, .btn-cobrar {
+        display: inline-block;
+        width: 100%;
+        text-align: center;
+    }
+
+    input, select {
+        font-size: 16px;
+    }
+
+    button {
+        font-size: 18px;
+        padding: 16px;
+    }
+
+    .card div:last-child {
+        width: 100%;
+    }
+
+    .btn-ver, .btn-cobrar {
+        margin-bottom: 5px;
+    }
+
+    .card {
+        font-size: 18px;
     }
     </style>
     </head>
