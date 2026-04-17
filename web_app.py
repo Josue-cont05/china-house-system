@@ -430,6 +430,32 @@ def index():
     .card {
         font-size: 18px;
     }
+
+    .menu-top {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    }
+    
+    .menu-top a {
+        flex: 1 1 45%;
+        text-align: center;
+        font-size: 12px;
+        padding: 10px;
+    }
+    
+    .card div:last-child {
+        width: 100%;
+    }
+    
+    .btn-ver, .btn-cobrar {
+        margin-bottom: 5px;
+    }
+    
+    button {
+        padding: 16px;
+    } 
+    
     </style>
     </head>
 
@@ -573,8 +599,39 @@ def menu():
 
     conn.close()
 
-    html = """
+   html = """
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    <style>
+    body {
+        font-family: Arial;
+        padding: 10px;
+    }
+    
+    input, select {
+        width: 100%;
+        padding: 12px;
+        margin: 5px 0;
+    }
+    
+    button {
+        width: 100%;
+        padding: 12px;
+        font-size: 16px;
+    }
+    
+    div {
+        margin-bottom: 10px;
+    }
+    </style>
+    </head>
+    
+    <body>
+    
     <h1>📋 Menú</h1>
+    """
 
     <a href="/">⬅ Volver</a><br><br>
 
@@ -1098,11 +1155,9 @@ def cobrar(orden_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
     
-    # 🔥 AGREGAR ESTO
     cursor.execute("SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes WHERE id=?", (orden_id,))
     o = cursor.fetchone()
 
-    # Obtener items
     cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
 
@@ -1112,7 +1167,6 @@ def cobrar(orden_id):
 
     total_usd = sum(i[0] for i in items)
 
-    # Obtener tasa
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
     row = cursor.fetchone()
     tasa = row[0] if row else 1
@@ -1123,8 +1177,7 @@ def cobrar(orden_id):
 
     if total_bs_final < 0:
         total_bs_final = 0
-    
-    
+
     if request.method == "POST":
         metodo1 = request.form["metodo1"]
         monto1 = float(request.form["monto1"] or 0)
@@ -1147,13 +1200,11 @@ def cobrar(orden_id):
             else:
                 return 0, 0
 
-
         usd1, bs1 = convertir(metodo1, monto1)
         usd2, bs2 = convertir(metodo2, monto2) if metodo2 else (0, 0)
 
         total_pagado_usd = usd1 + usd2
 
-        # VALIDACIÓN
         total_con_descuento = total_usd - descuento_usd
         if total_con_descuento < 0:
             total_con_descuento = 0
@@ -1161,7 +1212,6 @@ def cobrar(orden_id):
         if total_pagado_usd < total_con_descuento:
             return "Pago insuficiente"
 
-        # GUARDAR PAGOS
         cursor.execute(
             "INSERT INTO pagos VALUES (NULL, ?, ?, ?, ?, ?)",
             (orden_id, metodo1, monto1, ref1, fecha)
@@ -1173,20 +1223,22 @@ def cobrar(orden_id):
                 (orden_id, metodo2, monto2, ref2, fecha)
             )
 
-        #  SIEMPRE cerrar orden
         cursor.execute("""
         UPDATE ordenes 
         SET estado='cerrada', descuento=?
         WHERE id=?
         """, (descuento, orden_id))
+
         conn.commit()
         conn.close()
 
         return redirect("/")
-        
+
     return f"""
     <html>
     <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <style>
     body {{
         font-family: Arial;
@@ -1195,10 +1247,10 @@ def cobrar(orden_id):
     }}
 
     .contenedor {{
-        max-width: 500px;
-        margin: 30px auto;
+        width: 95%;
+        margin: 10px auto;
         background: white;
-        padding: 20px;
+        padding: 15px;
         border-radius: 10px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }}
@@ -1228,24 +1280,31 @@ def cobrar(orden_id):
 
     input, select {{
         width: 100%;
-        padding: 10px;
+        padding: 12px;
         margin: 5px 0;
         border-radius: 5px;
         border: 1px solid #ccc;
+        font-size: 16px;
     }}
 
     .btn {{
         width: 100%;
-        padding: 12px;
+        padding: 15px;
         margin-top: 10px;
         border: none;
         border-radius: 5px;
-        font-size: 16px;
+        font-size: 18px;
         cursor: pointer;
     }}
     
     .confirmar {{ background: #27ae60; color: white; }}
-    .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:12px; border-radius:5px; }}
+    .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:15px; border-radius:5px; }}
+
+    @media (max-width: 768px) {{
+        .total {{
+            font-size: 22px;
+        }}
+    }}
     </style>
     </head>
     
@@ -1265,7 +1324,7 @@ def cobrar(orden_id):
     <div class="sep"></div>
     
     <div class="total">USD: ${total_usd}</div>
-    <div class="total">Bs: {total_bs}</div>
+    <div class="total">Bs: {round(total_bs,2)}</div>
     
     <div class="sep"></div>
     
@@ -1273,13 +1332,13 @@ def cobrar(orden_id):
     
     <h3>Pago 1</h3>
     
-    <select name="metodo1">
+    <select name="metodo1" id="metodo1">
         <option value="bs_pago_movil">📱 Pago móvil</option>
         <option value="usd">💵 USD</option>
         <option value="bs_efectivo">💰 Bs efectivo</option>
     </select>
     
-    <input name="monto1" value="{total_bs}" placeholder="Monto">
+    <input name="monto1" id="monto1" value="{round(total_bs,2)}" placeholder="Monto">
     
     <input name="ref1" placeholder="Referencia">
     
@@ -1309,7 +1368,23 @@ def cobrar(orden_id):
     <a href="/orden/{orden_id}" class="volver">⬅ Volver</a>
     
     </div>
-    
+
+    <script>
+    const metodo1 = document.getElementById("metodo1");
+    const monto1 = document.getElementById("monto1");
+
+    const totalUSD = {round(total_usd,2)};
+    const totalBS = {round(total_bs,2)};
+
+    metodo1.addEventListener("change", function() {{
+        if (metodo1.value === "usd") {{
+            monto1.value = totalUSD.toFixed(2);
+        }} else {{
+            monto1.value = totalBS.toFixed(2);
+        }}
+    }});
+    </script>
+
     </body>
     </html>
     """
@@ -1320,7 +1395,8 @@ def cierre():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    hoy = datetime.date.today().isoformat()
+    venezuela = pytz.timezone("America/Caracas")
+    hoy = datetime.datetime.now(venezuela).strftime("%Y-%m-%d")
 
     # Total órdenes
     cursor.execute("""
