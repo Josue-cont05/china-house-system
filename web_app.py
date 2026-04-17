@@ -301,51 +301,56 @@ def index():
         font-weight: bold;
     }
 
+    .menu-top {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+    }
+
     .menu-top a {
-        margin-left: 10px;
         color: white;
         text-decoration: none;
         background: #34495e;
-        padding: 8px 10px;
+        padding: 10px;
         border-radius: 5px;
         font-size: 13px;
+        flex: 1 1 45%;
+        text-align: center;
     }
 
     .contenedor {
         display: flex;
-        padding: 20px;
-        gap: 20px;
+        padding: 10px;
+        gap: 10px;
+        flex-direction: column;
     }
 
-    .panel-izq {
-        width: 35%;
+    .panel-izq, .panel-der {
+        width: 100%;
         background: white;
-        padding: 20px;
+        padding: 15px;
         border-radius: 10px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }
 
-    .panel-der {
-        width: 65%;
-    }
-
     input, select {
         width: 100%;
-        padding: 10px;
+        padding: 12px;
         margin: 5px 0;
         border-radius: 5px;
         border: 1px solid #ccc;
+        font-size: 16px;
     }
 
     button {
         width: 100%;
-        padding: 12px;
+        padding: 16px;
         background: #27ae60;
         color: white;
         border: none;
         border-radius: 5px;
         margin-top: 10px;
-        font-size: 16px;
+        font-size: 18px;
     }
 
     .card {
@@ -355,8 +360,9 @@ def index():
         border-radius: 10px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
         display: flex;
-        justify-content: space-between;
-        align-items: center;
+        flex-direction: column;
+        gap: 10px;
+        font-size: 18px;
     }
 
     .estado {
@@ -364,97 +370,21 @@ def index():
         border-radius: 5px;
         color: white;
         font-size: 12px;
-    }
-
-    .btn-ver {
-        background: #3498db;
-        color: white;
-        padding: 6px 10px;
-        border-radius: 5px;
-        text-decoration: none;
-    }
-
-    .btn-cobrar {
-        background: #27ae60;
-        color: white;
-        padding: 6px 10px;
-        border-radius: 5px;
-        text-decoration: none;
-    }
-    
-    @media (max-width: 768px) {
-
-    .contenedor {
-        flex-direction: column;
-        padding: 10px;
-    }
-
-    .panel-izq, .panel-der {
-        width: 100%;
-    }
-
-    .panel-izq {
-        margin-bottom: 15px;
-    }
-
-    .card {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 10px;
-    }
-
-    .btn-ver, .btn-cobrar {
         display: inline-block;
-        width: 100%;
-        text-align: center;
-    }
-
-    input, select {
-        font-size: 16px;
-    }
-
-    button {
-        font-size: 18px;
-        padding: 16px;
-    }
-
-    .card div:last-child {
-        width: 100%;
     }
 
     .btn-ver, .btn-cobrar {
-        margin-bottom: 5px;
-    }
-
-    .card {
-        font-size: 18px;
-    }
-
-    .menu-top {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-    }
-    
-    .menu-top a {
-        flex: 1 1 45%;
+        display: block;
+        width: 100%;
         text-align: center;
-        font-size: 12px;
         padding: 10px;
-    }
-    
-    .card div:last-child {
-        width: 100%;
-    }
-    
-    .btn-ver, .btn-cobrar {
+        border-radius: 5px;
+        text-decoration: none;
         margin-bottom: 5px;
     }
-    
-    button {
-        padding: 16px;
-    } 
-    
+
+    .btn-ver { background: #3498db; color: white; }
+    .btn-cobrar { background: #27ae60; color: white; }
     </style>
     </head>
 
@@ -474,7 +404,6 @@ def index():
 
     <div class="contenedor">
 
-        <!-- 🔹 PANEL IZQUIERDO -->
         <div class="panel-izq">
 
             <h3>🆕 Nueva Orden</h3>
@@ -500,7 +429,6 @@ def index():
 
         </div>
 
-        <!-- 🔹 PANEL DERECHO -->
         <div class="panel-der">
     """
 
@@ -509,26 +437,21 @@ def index():
 
     for o in ordenes:
         if o[6] != "abierta":
-        continue
+            continue
 
         html += f"""
         <div class="card">
-
             <div>
                 <b>Orden #{o[1]}</b><br>
                 {o[3]} - {o[4]}<br>
                 👤 {o[5] if o[5] else '-'}
             </div>
 
-            <div style="text-align:right;">
-                <span class="estado" style="background:#f39c12;">
-                    {o[6]}
-                </span><br><br>
-
+            <div>
+                <span class="estado" style="background:#e74c3c;">ABIERTA</span>
                 <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
                 <a href="/cobrar/{o[0]}" class="btn-cobrar">Cobrar</a>
             </div>
-
         </div>
         """
 
@@ -541,48 +464,51 @@ def index():
 
         html += f"""
         <div class="card" style="background:#fff3cd;">
-
             <div>
                 <b>Orden #{o[1]}</b><br>
                 {o[3]} - {o[4]}<br>
                 👤 {o[5] if o[5] else '-'}
             </div>
 
-            <div style="text-align:right;">
-                <span class="estado" style="background:#e67e22;">
-                    {o[6]}
-                </span><br><br>
-
+            <div>
+                <span class="estado" style="background:#e67e22;">EN COCINA</span>
                 <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
             </div>
-
         </div>
         """
 
     # 🔹 HISTORIAL
     html += "<h3>📊 Historial</h3>"
-    
+
     for o in ordenes:
         if o[6] != "cerrada":
             continue
-    
+
         html += f"""
         <div style="background:#ecf0f1; padding:10px; margin-bottom:8px; border-radius:5px;">
-            
             <div style="font-weight:bold;">
                 ✔ Orden #{o[1]} - {o[5] if o[5] else '-'}
             </div>
-    
+
             <div style="margin-top:5px;">
                 <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">
                     🔍 Ver detalle
                 </a>
             </div>
-    
         </div>
         """
+
+    html += """
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
     conn.close()
-# ---------------- MENU ----------------
+    return html
+    
+#---------------- MENU ----------------
 
 @app.route("/menu", methods=["GET", "POST"])
 def menu():
