@@ -1445,34 +1445,37 @@ def cierre():
     cursor = conn.cursor()
 
     venezuela = pytz.timezone("America/Caracas")
-    hoy = datetime.datetime.now(venezuela).strftime("%Y-%m-%d")
+    ahora = datetime.datetime.now(venezuela)
+
+    inicio = ahora.strftime("%Y-%m-%d") + " 00:00:00"
+    fin = ahora.strftime("%Y-%m-%d") + " 23:59:59"
 
     # Total órdenes
     cursor.execute("""
     SELECT COUNT(*) FROM ordenes
-    WHERE date(fecha_hora) = ? AND estado = 'cerrada'
-    """, (hoy,))
+    WHERE fecha_hora BETWEEN ? AND ? AND estado = 'cerrada'
+    """, (inicio, fin))
     total_ordenes = cursor.fetchone()[0]
 
     # Total USD
     cursor.execute("""
     SELECT SUM(monto) FROM pagos
-    WHERE metodo = 'usd' AND date(fecha) = ?
-    """, (hoy,))
+    WHERE metodo = 'usd' AND fecha BETWEEN ? AND ?
+    """, (inicio, fin))
     total_usd = cursor.fetchone()[0] or 0
 
     # Total Bs efectivo
     cursor.execute("""
     SELECT SUM(monto) FROM pagos
-    WHERE metodo = 'bs_efectivo' AND date(fecha) = ?
-    """, (hoy,))
+    WHERE metodo = 'bs_efectivo' AND fecha BETWEEN ? AND ?
+    """, (inicio, fin))
     total_bs_efectivo = cursor.fetchone()[0] or 0
 
     # Total Pago Móvil
     cursor.execute("""
     SELECT SUM(monto) FROM pagos
-    WHERE metodo = 'bs_pago_movil' AND date(fecha) = ?
-    """, (hoy,))
+    WHERE metodo = 'bs_pago_movil' AND fecha BETWEEN ? AND ?
+    """, (inicio, fin))
     total_pago_movil = cursor.fetchone()[0] or 0
 
     # Total general en USD (referencial)
@@ -1899,7 +1902,7 @@ def ordenes_cocina():
     cursor = conn.cursor()
 
     cursor.execute("""
-    SELECT id, numero_orden, tipo, cliente
+    SELECT id, numero_orden, tipo, cliente, referencia
     FROM ordenes
     WHERE estado = 'en cocina'
     """)
