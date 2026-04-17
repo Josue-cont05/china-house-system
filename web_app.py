@@ -584,99 +584,147 @@ def index():
 
     return html
 # ---------------- MENU ----------------
-@app.route("/menu")
+
+@app.route("/menu", methods=["GET", "POST"])
 def menu():
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
-    # Productos
-    cursor.execute("SELECT id, nombre, precio FROM productos")
-    productos = cursor.fetchall()
+    # 📦 Guardar producto
+    if request.method == "POST":
+        nombre = request.form["nombre"]
+        precio = float(request.form["precio"])
+        categoria_id = request.form["categoria"]
 
-    # Categorías
+        cursor.execute(
+            "INSERT INTO productos VALUES (NULL, ?, ?, ?)",
+            (nombre, precio, categoria_id)
+        )
+
+        conn.commit()
+
+    # 📋 Categorías
     cursor.execute("SELECT id, nombre FROM categorias")
     categorias = cursor.fetchall()
 
+    # 📋 Productos
+    cursor.execute("""
+        SELECT p.id, p.nombre, p.precio, c.nombre 
+        FROM productos p
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+    """)
+    productos = cursor.fetchall()
+
     conn.close()
 
-   html = """
+    html = """
     <html>
     <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    
+
     <style>
     body {
         font-family: Arial;
         padding: 10px;
+        background: #f5f6fa;
     }
-    
+
+    h1 {
+        text-align: center;
+    }
+
+    .card {
+        background: white;
+        padding: 15px;
+        margin-bottom: 10px;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+
     input, select {
         width: 100%;
         padding: 12px;
         margin: 5px 0;
-    }
-    
-    button {
-        width: 100%;
-        padding: 12px;
+        border-radius: 5px;
+        border: 1px solid #ccc;
         font-size: 16px;
     }
-    
-    div {
-        margin-bottom: 10px;
+
+    button {
+        width: 100%;
+        padding: 14px;
+        font-size: 16px;
+        border: none;
+        border-radius: 5px;
+        background: #27ae60;
+        color: white;
+        cursor: pointer;
+    }
+
+    .producto {
+        background: white;
+        padding: 10px;
+        margin-bottom: 8px;
+        border-radius: 5px;
+        font-size: 16px;
+    }
+
+    .volver {
+        display: block;
+        text-align: center;
+        margin-top: 15px;
+        padding: 12px;
+        background: #7f8c8d;
+        color: white;
+        text-decoration: none;
+        border-radius: 5px;
     }
     </style>
     </head>
-    
+
     <body>
-    
+
     <h1>📋 Menú</h1>
+
+    <div class="card">
+        <form method="post">
+
+            <input name="nombre" placeholder="Nombre del producto" required>
+
+            <input name="precio" type="number" step="0.01" placeholder="Precio USD" required>
+
+            <select name="categoria">
     """
 
-    <a href="/">⬅ Volver</a><br><br>
-
-    <h2>Agregar producto</h2>
-    """
-
-    # 🔥 FORMULARIO
-    html += """
-    <form action="/agregar_producto" method="post">
-        Nombre: <input name="nombre"><br><br>
-        Precio: <input name="precio"><br><br>
-
-        Categoría:
-        <select name="categoria_id">
-    """
-
-    # 🔥 OPCIONES DINÁMICAS
     for c in categorias:
         html += f"<option value='{c[0]}'>{c[1]}</option>"
 
-    # 🔥 CIERRE FORM
     html += """
-        </select><br><br>
+            </select>
 
-        <button>Agregar</button>
-    </form>
+            <button>➕ Agregar producto</button>
 
-    <hr>
+        </form>
+    </div>
 
-    <h2>Productos actuales</h2>
+    <h2>📦 Productos</h2>
     """
 
-    # 🔥 LISTADO
     for p in productos:
         html += f"""
-        <div>
-            {p[1]} - ${p[2]}
-
-            <a href="/editar_producto/{p[0]}">✏️ Editar</a>
-            <a href="/eliminar_producto/{p[0]}">❌ Eliminar</a>
+        <div class="producto">
+            {p[1]} - ${p[2]} <br>
+            <small>{p[3] if p[3] else ''}</small>
         </div>
         """
 
-    return html
+    html += """
+    <a href="/" class="volver">⬅ Volver</a>
+    </body>
+    </html>
+    """
 
+    return html
 # ---------------- Agregar producto ----------------
 @app.route("/agregar_producto", methods=["POST"])
 def agregar_producto():
