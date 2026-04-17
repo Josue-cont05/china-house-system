@@ -276,8 +276,6 @@ def index():
     """)
     ordenes = cursor.fetchall()
 
-    conn.close()
-
     html = """
     <html>
     <head>
@@ -511,7 +509,7 @@ def index():
 
     for o in ordenes:
         if o[6] != "abierta":
-            continue
+        continue
 
         html += f"""
         <div class="card">
@@ -562,28 +560,28 @@ def index():
         """
 
     # 🔹 HISTORIAL
-    html += "<h3>Historial</h3>"
-
+    html += "<h3>📊 Historial</h3>"
+    
     for o in ordenes:
         if o[6] != "cerrada":
             continue
-
+    
         html += f"""
-        <div style="background:#ecf0f1; padding:10px; margin-bottom:5px; border-radius:5px;">
-            ✔ Orden #{o[1]} - {o[5] if o[5] else '-'}
+        <div style="background:#ecf0f1; padding:10px; margin-bottom:8px; border-radius:5px;">
+            
+            <div style="font-weight:bold;">
+                ✔ Orden #{o[1]} - {o[5] if o[5] else '-'}
+            </div>
+    
+            <div style="margin-top:5px;">
+                <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">
+                    🔍 Ver detalle
+                </a>
+            </div>
+    
         </div>
         """
-
-    html += """
-        </div>
-
-    </div>
-
-    </body>
-    </html>
-    """
-
-    return html
+    conn.close()
 # ---------------- MENU ----------------
 
 @app.route("/menu", methods=["GET", "POST"])
