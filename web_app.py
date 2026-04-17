@@ -224,6 +224,7 @@ def cargar_productos():
         ("Refresco 1.5 Lt", 1.5, "Bebidas"),
     
         # 🛵 DELIVERY
+        ("Delivery 0.5", 0.5, "Delivery"),
         ("Delivery 1", 1.0, "Delivery"),
         ("Delivery 1.5", 1.5, "Delivery"),
         ("Delivery 2", 2.0, "Delivery"),
