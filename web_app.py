@@ -1040,11 +1040,30 @@ def agregar(orden_id, producto_id):
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # 🔍 Verificar estado de la orden
+    cursor.execute("SELECT estado FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado = row[0]
+
+    # 🔴 BLOQUEAR SI ESTÁ CERRADA
+    if estado == "cerrada":
+        conn.close()
+        return "❌ No puedes agregar productos a una orden cerrada"
+
+    # 🔹 Obtener producto
     cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (producto_id,))
     p = cursor.fetchone()
 
-    cursor.execute("INSERT INTO orden_items (orden_id, producto, precio) VALUES (?, ?, ?)",
-                   (orden_id, p[0], p[1]))
+    # 🔹 Insertar item
+    cursor.execute("""
+    INSERT INTO orden_items (orden_id, producto, precio) 
+    VALUES (?, ?, ?)
+    """, (orden_id, p[0], p[1]))
 
     conn.commit()
     conn.close()
