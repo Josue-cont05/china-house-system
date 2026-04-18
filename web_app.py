@@ -4,6 +4,8 @@ import datetime
 import pytz
 import os
 
+CLAVE_SUPERVISOR = "0102"
+
 app = Flask(__name__)
 
 import sqlite3
@@ -877,13 +879,18 @@ def orden(orden_id):
     cursor = conn.cursor()
 
     # 🔹 Obtener orden
-    cursor.execute("SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute("""
+    SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento 
+    FROM ordenes WHERE id=?
+    """, (orden_id,))
     o = cursor.fetchone()
 
     if not o:
         return "Orden no encontrada"
 
-    # 🔹 Obtener productos con categoría
+    estado = o[6]
+
+    # 🔹 Productos
     cursor.execute("""
     SELECT p.id, p.nombre, p.precio, c.nombre
     FROM productos p
@@ -891,7 +898,7 @@ def orden(orden_id):
     """)
     productos = cursor.fetchall()
 
-    # 🔹 Obtener items
+    # 🔹 Items
     cursor.execute("""
     SELECT producto, precio, id
     FROM orden_items
@@ -903,16 +910,12 @@ def orden(orden_id):
 
     # 🔹 Totales
     total_usd = sum(float(i[1]) for i in items)
-    
-   # 🔹 Obtener tasa desde DB
+
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
-
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
     row = cursor.fetchone()
-    
     tasa = row[0] if row else 1
-
     conn.close()
 
     total_bs = total_usd * tasa
@@ -925,65 +928,17 @@ def orden(orden_id):
     <html>
     <head>
     <style>
-    body {{
-        font-family: Arial;
-        display: flex;
-    }}
-
-    .productos {{
-        width: 60%;
-        padding: 20px;
-    }}
-
-    .panel {{
-        width: 40%;
-        padding: 20px;
-        background: #f4f4f4;
-    }}
-
-    .btn {{
-        width: 100%;
-        padding: 15px;
-        margin: 5px 0;
-        background: #27ae60;
-        color: white;
-        border: none;
-        border-radius: 5px;
-    }}
-
-    .categoria {{
-        font-weight: bold;
-        margin-top: 15px;
-        background: #333;
-        color: white;
-        padding: 5px;
-        border-radius: 5px;
-    }}
-
-    .grid-productos {{
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 10px;
-    }}
-
-    .btn-accion {{
-        display: block;
-        padding: 12px;
-        margin: 5px 0;
-        text-align: center;
-        color: white;
-        text-decoration: none;
-        border-radius: 5px;
-    }}
-
+    body {{ font-family: Arial; display: flex; }}
+    .productos {{ width: 60%; padding: 20px; }}
+    .panel {{ width: 40%; padding: 20px; background: #f4f4f4; }}
+    .btn {{ width: 100%; padding: 15px; margin: 5px 0; background: #27ae60; color: white; border: none; border-radius: 5px; }}
+    .categoria {{ font-weight: bold; margin-top: 15px; background: #333; color: white; padding: 5px; border-radius: 5px; }}
+    .grid-productos {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }}
+    .btn-accion {{ display: block; padding: 12px; margin: 5px 0; text-align: center; color: white; text-decoration: none; border-radius: 5px; }}
     .cocina {{ background: #e67e22; }}
     .cobrar {{ background: #27ae60; }}
     .volver {{ background: #7f8c8d; }}
-
-    .total {{
-        font-size: 20px;
-        margin-top: 10px;
-    }}
+    .total {{ font-size: 20px; margin-top: 10px; }}
     </style>
     </head>
 
@@ -993,16 +948,13 @@ def orden(orden_id):
     <h2>Agregar productos</h2>
     """
 
-    # 🔥 Agrupar por categoría
+    # 🔹 Agrupar por categoría
     categorias = defaultdict(list)
-
     for p in productos:
         categoria = p[3] if p[3] else "Sin categoría"
         categorias[categoria].append(p)
 
-    # 🔥 Render productos con orden vertical
     for categoria, lista in categorias.items():
-
         html += f"<div class='categoria'>🍽 {categoria}</div>"
         html += "<div class='grid-productos'>"
 
@@ -1011,7 +963,6 @@ def orden(orden_id):
         col2 = lista[mitad:]
 
         ordenados = []
-
         for i in range(mitad):
             if i < len(col1):
                 ordenados.append(col1[i])
@@ -1029,58 +980,51 @@ def orden(orden_id):
 
     html += "</div>"
 
-    # 🔥 PANEL DERECHO
+    # 🔹 PANEL DERECHO
     html += f"""
     <div class="panel">
-
-        <div style="display:flex; justify-content:flex-end; gap:10px;">
-            <a href="/editar_orden/{orden_id}" style="background:#2980b9; color:white; padding:8px 12px; border-radius:5px;">✏️</a>
-            <a href="/eliminar_orden/{orden_id}" style="background:#e74c3c; color:white; padding:8px 12px; border-radius:5px;">🗑</a>
-        </div>
 
         <h2>Orden #{o[1]}</h2>
         <p>Tipo: {o[3]}</p>
         <p>Referencia: {o[4]}</p>
         <p>Cliente: {o[5] if o[5] else '-'}</p>
-        <p>Hora: {o[2]}</p>
-        <p>Estado: {o[6]}</p>
-
-        <p><b>Observación:</b> {o[7] if len(o) > 7 and o[7] else '-'}</p>
+        <p>Estado: {estado}</p>
 
         <h3>Productos</h3>
     """
 
+    # 🔥 ITEMS + CONTROL DE ELIMINACIÓN
     for i in items:
+
+        # 🔴 SI ESTÁ CERRADA → NO MOSTRAR BOTÓN
+        if estado == "cerrada":
+            boton_eliminar = ""
+
+        else:
+            boton_eliminar = f"""
+            <form method="post" action="/eliminar_item/{i[2]}/{orden_id}" style="display:flex; gap:5px;">
+                <input type="password" name="clave" placeholder="Clave" style="width:70px;">
+                <button type="submit" style="background:red; color:white;">❌</button>
+            </form>
+            """
+
         html += f"""
         <div style='display:flex; justify-content:space-between; margin:5px 0;'>
             <span>{i[0]} - ${i[1]}</span>
-            <a href="/eliminar_item/{i[2]}/{orden_id}" style="color:red;">❌</a>
+            {boton_eliminar}
         </div>
         """
 
     html += f"""
         <div class="total">USD: ${total_usd}</div>
-        <div class="total">Bs: {total_bs}</div>
-
+        <div class="total">Bs: {round(total_bs,2)}</div>
         <p>Descuento: Bs {descuento}</p>
+        <div class="total">Total Final Bs: {round(total_bs_final,2)}</div>
 
-        <div class="total">Total Final Bs: {total_bs_final}</div>
-
-        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">
-            Enviar a cocina
-        </a>
-
-        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">
-            🧾 Facturar
-        </a>
-        
-        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">
-            Cobrar
-        </a>
-
-        <a href="/" class="btn-accion volver">
-            Volver
-        </a>
+        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">Enviar a cocina</a>
+        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
+        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">Cobrar</a>
+        <a href="/" class="btn-accion volver">Volver</a>
 
     </div>
 
@@ -1682,11 +1626,38 @@ def exportar():
     return Response(generate(), mimetype="text/csv")
 
 # ---------------- ELIMINAR PRODUCTOR DE LA ORDEN ----------------
-@app.route("/eliminar_item/<int:item_id>/<int:orden_id>")
+@app.route("/eliminar_item/<int:item_id>/<int:orden_id>", methods=["POST"])
 def eliminar_item(item_id, orden_id):
+    import sqlite3
+    from flask import request, redirect
+
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
+    # 🔍 Buscar estado de la orden
+    cursor.execute("SELECT estado FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado = row[0]
+
+    # 🔴 BLOQUEO TOTAL SI ESTÁ CERRADA
+    if estado == "cerrada":
+        conn.close()
+        return "❌ Orden cerrada, no se puede modificar"
+
+    # 🔐 SI ESTÁ EN COCINA → PEDIR CLAVE
+    if estado == "en cocina":
+        clave = request.form.get("clave")
+
+        if clave != CLAVE_SUPERVISOR:
+            conn.close()
+            return "🔒 Clave incorrecta"
+
+    # ✅ ELIMINAR PRODUCTO
     cursor.execute("DELETE FROM orden_items WHERE id=?", (item_id,))
 
     conn.commit()
