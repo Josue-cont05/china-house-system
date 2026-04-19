@@ -1815,17 +1815,19 @@ def facturas_pendientes():
     try:
         conn = get_connection()
         cursor = conn.cursor()
+
         cursor.execute(
             """
             SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
             FROM ordenes o
-            LEFT JOIN usuarios u ON o.usuario_id = u.id
+            JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
             """
         )
         ordenes = cursor.fetchall()
 
         resultado = []
+
         for o in ordenes:
             cursor.execute(
                 """
@@ -1836,6 +1838,7 @@ def facturas_pendientes():
                 (o[0],),
             )
             items = cursor.fetchall()
+
             resultado.append(
                 {
                     "id": o[0],
@@ -1843,7 +1846,7 @@ def facturas_pendientes():
                     "tipo": o[2],
                     "cliente": o[3],
                     "referencia": o[4],
-                    "mesonera": o[5],
+                    "usuario": o[5],
                     "items": [f"{i[0]} - ${i[1]}" for i in items],
                     "total": sum(i[1] for i in items),
                 }
@@ -1851,9 +1854,11 @@ def facturas_pendientes():
 
         conn.close()
         return jsonify(resultado)
+
     except Exception as e:
         print("❌ ERROR EN FACTURAS:", e)
         return jsonify([])
+
 
 
 @app.route("/activar_factura/<int:orden_id>")
