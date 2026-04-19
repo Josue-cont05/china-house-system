@@ -3,7 +3,7 @@ import datetime
 import os
 import sqlite3
 
-from flask import Flask, Response, jsonify, redirect, request
+from flask import Flask, Response, jsonify, redirect, request, session
 import pytz
 
 
@@ -12,6 +12,7 @@ DB_PATH = "china_house.db"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "china-house-pos-secret")
 
 
 def get_connection():
@@ -43,6 +44,65 @@ def asegurar_columna_facturar():
     cursor.execute("UPDATE ordenes SET facturar=0 WHERE facturar IS NULL")
     conn.commit()
     conn.close()
+
+
+def crear_usuarios_iniciales():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    usuarios = [
+        ("Gaby", "2807"),
+        ("Julissa", "2002"),
+        ("Monica", "1310"),
+        ("Josue", "0510"),
+        ("Fabian", "2107"),
+        ("Oscar", "1810"),
+    ]
+
+    for nombre, pin in usuarios:
+        cursor.execute("SELECT id FROM usuarios WHERE nombre=?", (nombre,))
+        existe = cursor.fetchone()
+
+        if existe:
+            cursor.execute("UPDATE usuarios SET pin=? WHERE id=?", (pin, existe[0]))
+        else:
+            cursor.execute(
+                "INSERT INTO usuarios (nombre, pin) VALUES (?, ?)",
+                (nombre, pin),
+            )
+
+    conn.commit()
+    conn.close()
+
+
+def usuario_activo():
+    return session.get("usuario_nombre", "")
+
+
+def barra_superior(extra_links=""):
+    return f"""
+    <div class="header">
+        <div class="titulo">🍜 China House POS</div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
+            <div style="font-size:14px;">👩 Usuario: <b>{usuario_activo()}</b></div>
+            <div class="menu-top">
+                {extra_links}
+                <a href="/logout">🚪 Cerrar sesión</a>
+            </div>
+        </div>
+    </div>
+    """
+
+
+@app.before_request
+def proteger_sistema():
+    rutas_publicas = {"login", "static"}
+
+    if request.endpoint in rutas_publicas:
+        return
+
+    if not session.get("usuario_id"):
+        return redirect("/login")
 
 
 def init_db():
@@ -81,6 +141,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS categorias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT,
+            pin TEXT
         )
         """
     )
@@ -166,7 +236,9 @@ def init_db():
     asegurar_columna("productos", "categoria_id", "INTEGER")
     asegurar_columna("ordenes", "descuento", "REAL DEFAULT 0")
     asegurar_columna("ordenes", "observacion", "TEXT")
+    asegurar_columna("ordenes", "usuario_id", "INTEGER")
     asegurar_columna_facturar()
+    crear_usuarios_iniciales()
 
 
 def cargar_productos():
@@ -233,15 +305,96 @@ def siguiente_numero():
     return 1 if ultimo is None else ultimo + 1
 
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, nombre FROM usuarios ORDER BY nombre")
+    usuarios = cursor.fetchall()
+
+    error = ""
+
+    if request.method == "POST":
+        usuario_id = request.form.get("usuario_id")
+        pin = request.form.get("pin", "").strip()
+
+        cursor.execute(
+            "SELECT id, nombre FROM usuarios WHERE id=? AND pin=?",
+            (usuario_id, pin),
+        )
+        usuario = cursor.fetchone()
+
+        if usuario:
+            session["usuario_id"] = usuario[0]
+            session["usuario_nombre"] = usuario[1]
+            conn.close()
+            return redirect("/")
+
+        error = "Usuario o PIN incorrecto"
+
+    conn.close()
+
+    html = """
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    body { font-family: Arial; margin: 0; background: #f5f6fa; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .login-box { background: white; width: 92%; max-width: 380px; padding: 25px; border-radius: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.12); }
+    h1 { text-align: center; margin-top: 0; }
+    input, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 6px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
+    button { width: 100%; padding: 14px; background: #27ae60; color: white; border: none; border-radius: 6px; font-size: 17px; margin-top: 10px; }
+    .error { background: #fdecea; color: #c0392b; padding: 10px; border-radius: 6px; margin-bottom: 10px; text-align: center; }
+    </style>
+    </head>
+    <body>
+    <div class="login-box">
+        <h1>🔐 Login Mesonera</h1>
+    """
+
+    if error:
+        html += f"<div class='error'>{error}</div>"
+
+    html += """
+        <form method="post">
+            <label>Usuario</label>
+            <select name="usuario_id" required>
+    """
+
+    for usuario in usuarios:
+        html += f"<option value='{usuario[0]}'>{usuario[1]}</option>"
+
+    html += """
+            </select>
+            <label>PIN</label>
+            <input type="password" name="pin" required placeholder="Ingrese PIN">
+            <button type="submit">Entrar</button>
+        </form>
+    </div>
+    </body>
+    </html>
+    """
+
+    return html
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
+
 @app.route("/")
 def index():
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento
-        FROM ordenes
-        ORDER BY id DESC
+        SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
+               o.estado, o.observacion, o.descuento, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        ORDER BY o.id DESC
         """
     )
     ordenes = cursor.fetchall()
@@ -253,32 +406,36 @@ def index():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     body { font-family: Arial; margin: 0; background: #f5f6fa; }
-    .header { background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; }
+    .header { background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
     .titulo { font-size: 22px; font-weight: bold; }
-    .menu-top { display: flex; flex-wrap: wrap; gap: 5px; }
+    .menu-top { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
     .menu-top a { color: white; text-decoration: none; background: #34495e; padding: 10px; border-radius: 5px; font-size: 13px; flex: 1 1 45%; text-align: center; }
     .contenedor { display: flex; padding: 10px; gap: 10px; flex-direction: column; }
     .panel-izq, .panel-der { width: 100%; background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; }
+    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
     button { width: 100%; padding: 16px; background: #27ae60; color: white; border: none; border-radius: 5px; margin-top: 10px; font-size: 18px; }
     .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; flex-direction: column; gap: 10px; font-size: 18px; }
     .estado { padding: 5px 10px; border-radius: 5px; color: white; font-size: 12px; display: inline-block; }
     .btn-ver, .btn-cobrar { display: block; width: 100%; text-align: center; padding: 10px; border-radius: 5px; text-decoration: none; margin-bottom: 5px; }
     .btn-ver { background: #3498db; color: white; }
     .btn-cobrar { background: #27ae60; color: white; }
+    .mesonera { font-size: 14px; color: #555; margin-top: 4px; }
     </style>
     </head>
     <body>
-    <div class="header">
-        <div class="titulo">🍜 China House POS</div>
-        <div class="menu-top">
-            <a href="/cambiar_tasa">💱 Tasa</a>
-            <a href="/exportar">📦 Exportar</a>
-            <a href="/cierre">📊 Cierre</a>
-            <a href="/menu">📋 Menú</a>
-            <a href="/cocina">🍳 Cocina</a>
-        </div>
-    </div>
+    """
+
+    html += barra_superior(
+        """
+        <a href="/cambiar_tasa">💱 Tasa</a>
+        <a href="/exportar">📦 Exportar</a>
+        <a href="/cierre">📊 Cierre</a>
+        <a href="/menu">📋 Menú</a>
+        <a href="/cocina">🍳 Cocina</a>
+        """
+    )
+
+    html += """
     <div class="contenedor">
         <div class="panel-izq">
             <h3>🆕 Nueva Orden</h3>
@@ -309,6 +466,7 @@ def index():
                 <b>Orden #{o[1]}</b><br>
                 {o[3]} - {o[4]}<br>
                 👤 {o[5] if o[5] else '-'}
+                <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
             </div>
             <div>
                 <span class="estado" style="background:#e74c3c;">ABIERTA</span>
@@ -328,6 +486,7 @@ def index():
                 <b>Orden #{o[1]}</b><br>
                 {o[3]} - {o[4]}<br>
                 👤 {o[5] if o[5] else '-'}
+                <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
             </div>
             <div>
                 <span class="estado" style="background:#e67e22;">EN COCINA</span>
@@ -345,6 +504,7 @@ def index():
             <div style="font-weight:bold;">
                 ✔ Orden #{o[1]} - {o[5] if o[5] else '-'}
             </div>
+            <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
             <div style="margin-top:5px;">
                 <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">
                     🔍 Ver detalle
@@ -395,10 +555,15 @@ def menu():
     <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body { font-family: Arial; padding: 10px; background: #f5f6fa; }
+    body { font-family: Arial; margin: 0; background: #f5f6fa; }
+    .header { background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .titulo { font-size: 22px; font-weight: bold; }
+    .menu-top { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
+    .menu-top a { color: white; text-decoration: none; background: #34495e; padding: 10px; border-radius: 5px; font-size: 13px; flex: 1 1 45%; text-align: center; }
+    .contenido { padding: 10px; }
     h1 { text-align: center; }
     .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; }
+    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
     button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 5px; background: #27ae60; color: white; cursor: pointer; }
     .producto { background: white; padding: 10px; margin-bottom: 8px; border-radius: 5px; font-size: 16px; }
     .acciones { margin-top: 8px; display: flex; gap: 10px; }
@@ -409,6 +574,11 @@ def menu():
     </style>
     </head>
     <body>
+    """
+
+    html += barra_superior('<a href="/">🏠 Inicio</a>')
+    html += """
+    <div class="contenido">
     <h1>📋 Menú</h1>
     <div class="card">
         <form method="post">
@@ -442,6 +612,7 @@ def menu():
 
     html += """
     <a href="/" class="volver">⬅ Volver</a>
+    </div>
     </body>
     </html>
     """
@@ -528,6 +699,18 @@ def editar_producto(id):
         return "Producto no encontrado"
 
     html = f"""
+    <html>
+    <head>
+    <style>
+    body {{ font-family: Arial; padding: 20px; background: #f5f6fa; }}
+    .card {{ background: white; padding: 20px; max-width: 500px; margin: auto; border-radius: 10px; }}
+    input, select {{ width: 100%; padding: 12px; margin: 5px 0; box-sizing: border-box; }}
+    button {{ padding: 12px 20px; background: #27ae60; color: white; border: none; border-radius: 5px; }}
+    a {{ display: inline-block; margin-top: 10px; }}
+    </style>
+    </head>
+    <body>
+    <div class="card">
     <h1>Editar producto</h1>
     <form method="post">
         Nombre: <input name="nombre" value="{p[0]}"><br><br>
@@ -545,43 +728,16 @@ def editar_producto(id):
         <button>Guardar</button>
     </form>
     <a href="/menu">Volver</a>
+    </div>
+    </body>
+    </html>
     """
     return html
 
 
 @app.route("/nueva_orden")
 def nueva_orden():
-    return """
-    <html>
-    <head>
-    <style>
-    body { font-family: Arial; padding: 20px; background: #f5f6fa; }
-    h2 { margin-bottom: 20px; }
-    input, select { padding: 10px; margin: 5px 0; width: 250px; border-radius: 5px; border: 1px solid #ccc; }
-    button { padding: 12px 20px; background: #27ae60; color: white; border: none; border-radius: 5px; margin-top: 10px; cursor: pointer; }
-    button:hover { background: #219150; }
-    .volver { display: inline-block; margin-top: 20px; color: #3498db; text-decoration: none; }
-    </style>
-    </head>
-    <body>
-    <h2>🆕 Nueva Orden</h2>
-    <form action="/crear_orden" method="post">
-        <label>Tipo:</label><br>
-        <select name="tipo">
-            <option value="Mesa">Mesa</option>
-            <option value="Delivery">Delivery</option>
-            <option value="Para llevar">Para llevar</option>
-        </select><br><br>
-        <label>Referencia:</label><br>
-        <input name="referencia" required><br><br>
-        <label>Cliente:</label><br>
-        <input name="cliente"><br><br>
-        <button type="submit">Crear Orden</button>
-    </form>
-    <a href="/" class="volver">⬅ Volver</a>
-    </body>
-    </html>
-    """
+    return redirect("/")
 
 
 @app.route("/crear_orden", methods=["POST"])
@@ -591,15 +747,16 @@ def crear_orden():
     cliente = request.form.get("cliente", "")
     numero = siguiente_numero()
     fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    usuario_id = session.get("usuario_id")
 
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO ordenes (numero_orden, fecha_hora, tipo, referencia, cliente, estado)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO ordenes (numero_orden, fecha_hora, tipo, referencia, cliente, estado, usuario_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (numero, fecha, tipo, referencia, cliente, "abierta"),
+        (numero, fecha, tipo, referencia, cliente, "abierta", usuario_id),
     )
     cursor.execute("SELECT last_insert_rowid()")
     orden_id = cursor.fetchone()[0]
@@ -615,9 +772,11 @@ def orden(orden_id):
 
     cursor.execute(
         """
-        SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento
-        FROM ordenes
-        WHERE id=?
+        SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
+               o.estado, o.observacion, o.descuento, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=?
         """,
         (orden_id,),
     )
@@ -660,10 +819,16 @@ def orden(orden_id):
     html = f"""
     <html>
     <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body {{ font-family: Arial; display: flex; }}
+    body {{ font-family: Arial; margin: 0; background: #f5f6fa; }}
+    .header {{ background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }}
+    .titulo {{ font-size: 22px; font-weight: bold; }}
+    .menu-top {{ display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }}
+    .menu-top a {{ color: white; text-decoration: none; background: #34495e; padding: 10px; border-radius: 5px; font-size: 13px; flex: 1 1 45%; text-align: center; }}
+    .contenedor {{ display: flex; gap: 0; }}
     .productos {{ width: 60%; padding: 20px; }}
-    .panel {{ width: 40%; padding: 20px; background: #f4f4f4; }}
+    .panel {{ width: 40%; padding: 20px; background: #f4f4f4; min-height: calc(100vh - 84px); box-sizing: border-box; }}
     .btn {{ width: 100%; padding: 15px; margin: 5px 0; background: #27ae60; color: white; border: none; border-radius: 5px; }}
     .categoria {{ font-weight: bold; margin-top: 15px; background: #333; color: white; padding: 5px; border-radius: 5px; }}
     .grid-productos {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }}
@@ -675,9 +840,19 @@ def orden(orden_id):
     .eliminar {{ background: #c0392b; }}
     .volver {{ background: #7f8c8d; }}
     .total {{ font-size: 20px; margin-top: 10px; }}
+    @media (max-width: 768px) {{
+        .contenedor {{ flex-direction: column; }}
+        .productos, .panel {{ width: 100%; min-height: auto; }}
+    }}
     </style>
     </head>
     <body>
+    """
+
+    html += barra_superior('<a href="/">🏠 Inicio</a>')
+
+    html += """
+    <div class="contenedor">
     <div class="productos">
     <h2>Agregar productos</h2>
     """
@@ -722,6 +897,7 @@ def orden(orden_id):
         <p>Tipo: {o[3]}</p>
         <p>Referencia: {o[4]}</p>
         <p>Cliente: {o[5] if o[5] else '-'}</p>
+        <p>Mesonera: <b>{o[9] if o[9] else '-'}</b></p>
         <p>Estado: {estado}</p>
         <p>Observación: {o[7] if o[7] else '-'}</p>
         <h3>Productos</h3>
@@ -755,6 +931,7 @@ def orden(orden_id):
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">Cobrar</a>
         <a href="/factura/{orden_id}" class="btn-accion" style="background:#16a085;">Ver factura</a>
         <a href="/" class="btn-accion volver">Volver</a>
+    </div>
     </div>
     </body>
     </html>
@@ -812,13 +989,24 @@ def cobrar(orden_id):
 
     cursor.execute(
         """
-        SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento
-        FROM ordenes
-        WHERE id=?
+        SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
+               o.estado, o.observacion, o.descuento, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=?
         """,
         (orden_id,),
     )
     o = cursor.fetchone()
+
+    if not o:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado = o[6]
+    if estado != "listo":
+        conn.close()
+        return "La orden debe estar LISTA antes de cobrar"
 
     cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
@@ -898,11 +1086,10 @@ def cobrar(orden_id):
     .numero {{ text-align: right; font-size: 18px; margin-bottom: 10px; }}
     .sep {{ border-top: 1px dashed #ccc; margin: 15px 0; }}
     .total {{ font-size: 20px; font-weight: bold; text-align: right; }}
-    input, select {{ width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; }}
+    input, select {{ width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }}
     .btn {{ width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 5px; font-size: 18px; cursor: pointer; }}
     .confirmar {{ background: #27ae60; color: white; }}
     .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:15px; border-radius:5px; }}
-    @media (max-width: 768px) {{ .total {{ font-size: 22px; }} }}
     </style>
     </head>
     <body>
@@ -911,7 +1098,8 @@ def cobrar(orden_id):
     <div class="numero">Orden #{o[1]}</div>
     <div>
     <b>Cliente:</b> {o[5] if o[5] else '-'}<br>
-    <b>Tipo:</b> {o[3]}
+    <b>Tipo:</b> {o[3]}<br>
+    <b>Mesonera:</b> {o[9] if o[9] else '-'}
     </div>
     <div class="sep"></div>
     <div class="total">USD: ${round(total_usd, 2)}</div>
@@ -1046,10 +1234,11 @@ def pantalla_cocina():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, numero_orden, tipo, referencia, fecha_hora
-        FROM ordenes
-        WHERE estado = 'en cocina'
-        ORDER BY fecha_hora ASC
+        SELECT o.id, o.numero_orden, o.tipo, o.referencia, o.fecha_hora, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.estado = 'en cocina'
+        ORDER BY o.fecha_hora ASC
         """
     )
     ordenes = cursor.fetchall()
@@ -1063,16 +1252,21 @@ def pantalla_cocina():
     <html>
     <head>
     <meta http-equiv="refresh" content="5">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: Arial; background:black; color:white; font-size:22px; }
+        body { font-family: Arial; background:black; color:white; font-size:22px; margin:0; }
+        .topbar { padding:12px 16px; background:#111; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+        .topbar a { color:white; text-decoration:none; background:#2c3e50; padding:10px 12px; border-radius:5px; }
         .container { display:flex; }
-        .col { width:50%; padding:10px; }
+        .col { width:50%; padding:10px; box-sizing:border-box; }
         .orden { border:4px solid white; margin:10px; padding:15px; border-radius:10px; }
         .green { border-color: green; }
         .orange { border-color: orange; }
         .red { border-color: red; }
         .btn { padding:10px; background:green; color:white; border:none; font-size:18px; }
+        .mesonera { color:#f1c40f; font-weight:bold; }
         h1 { text-align:center; }
+        @media (max-width: 768px) { .container { flex-direction: column; } .col { width:100%; } }
     </style>
     <script>
         let lastCount = 0;
@@ -1086,6 +1280,13 @@ def pantalla_cocina():
     </script>
     </head>
     <body>
+    <div class="topbar">
+        <div>👩 Usuario: <b>""" + usuario_activo() + """</b></div>
+        <div style="display:flex; gap:8px;">
+            <a href="/">Inicio</a>
+            <a href="/logout">Cerrar sesión</a>
+        </div>
+    </div>
     <h1> COCINA</h1>
     <div class="container">
         <div class="col">
@@ -1112,6 +1313,7 @@ def pantalla_cocina():
         <div class="orden {color_class}">
             <h2>Orden #{o[1]}</h2>
             <p>{o[2]} - {o[3]}</p>
+            <p class="mesonera">Mesonera: {(o[5] or '-').upper()}</p>
             <p>⏱ {int(minutos)} min</p>
         """
 
@@ -1165,7 +1367,12 @@ def exportar():
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes"
+        """
+        SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
+               o.estado, o.observacion, o.descuento, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        """
     )
     ordenes = cursor.fetchall()
     filas = []
@@ -1216,6 +1423,7 @@ def exportar():
                     o[3],
                     o[4],
                     o[5],
+                    o[9] if o[9] else "",
                     item[0],
                     item[1],
                     metodo,
@@ -1229,7 +1437,7 @@ def exportar():
     conn.close()
 
     def generate():
-        yield "Orden,Fecha,Tipo,Ref Orden,Cliente,Producto,Precio USD,Metodo,Monto,Referencia Pago,Total USD,Total Bs\n"
+        yield "Orden,Fecha,Tipo,Ref Orden,Cliente,Mesonera,Producto,Precio USD,Metodo,Monto,Referencia Pago,Total USD,Total Bs\n"
         for f in filas:
             yield ",".join(str(x) for x in f) + "\n"
 
@@ -1286,7 +1494,15 @@ def editar_orden(orden_id):
         conn.close()
         return redirect(f"/orden/{orden_id}")
 
-    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute(
+        """
+        SELECT o.*, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=?
+        """,
+        (orden_id,),
+    )
     o = cursor.fetchone()
     conn.close()
 
@@ -1294,7 +1510,20 @@ def editar_orden(orden_id):
         return "Orden no encontrada"
 
     return f"""
+    <html>
+    <head>
+    <style>
+    body {{ font-family: Arial; padding: 20px; background: #f5f6fa; }}
+    .card {{ background: white; max-width: 520px; margin: auto; padding: 20px; border-radius: 10px; }}
+    input, textarea {{ width: 100%; padding: 12px; margin: 5px 0; box-sizing: border-box; }}
+    button {{ padding: 12px 20px; background: #27ae60; color: white; border: none; border-radius: 5px; }}
+    a {{ display: inline-block; margin-top: 10px; }}
+    </style>
+    </head>
+    <body>
+    <div class="card">
     <h2>Editar Orden #{o[1]}</h2>
+    <p><b>Mesonera:</b> {o[10] if len(o) > 10 and o[10] else '-'}</p>
     <form method="POST">
         <label>Mesa / tipo:</label><br>
         <input name="tipo" value="{o[3]}"><br><br>
@@ -1303,11 +1532,14 @@ def editar_orden(orden_id):
         <label>Nombre:</label><br>
         <input name="cliente" value="{o[5] if o[5] else ''}"><br><br>
         <label>Observación:</label><br>
-        <textarea name="observacion" style="width:100%; height:80px;">{o[8] if len(o) > 8 and o[8] else ''}</textarea><br><br>
+        <textarea name="observacion" style="height:80px;">{o[8] if len(o) > 8 and o[8] else ''}</textarea><br><br>
         <button type="submit">Guardar</button>
     </form>
     <br>
     <a href="/orden/{orden_id}">Volver</a>
+    </div>
+    </body>
+    </html>
     """
 
 
@@ -1339,15 +1571,49 @@ def eliminar_orden(orden_id):
     return redirect("/")
 
 
+@app.route("/cambiar_tasa", methods=["GET", "POST"])
+def cambiar_tasa():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nueva_tasa = float(request.form["tasa"])
+        cursor.execute("UPDATE tasa SET valor=?", (nueva_tasa,))
+        conn.commit()
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa_actual = row[0] if row else 1
+    conn.close()
+
+    return f"""
+    <html>
+    <body style="font-family:Arial; padding:40px;">
+    <div style="margin-bottom:20px;">👩 Usuario: <b>{usuario_activo()}</b> | <a href="/logout">Cerrar sesión</a></div>
+    <h2>💱 Cambiar tasa</h2>
+    <p>Tasa actual: <b>{tasa_actual}</b></p>
+    <form method="post">
+        <input name="tasa" placeholder="Nueva tasa" style="padding:10px; width:200px;">
+        <br><br>
+        <button style="padding:10px 20px; background:#27ae60; color:white; border:none;">Guardar</button>
+    </form>
+    <br><br>
+    <a href="/">⬅ Volver</a>
+    </body>
+    </html>
+    """
+
+
 @app.route("/ordenes_cocina")
 def ordenes_cocina():
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, numero_orden, tipo, cliente, referencia
-        FROM ordenes
-        WHERE estado = 'en cocina'
+        SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.estado = 'en cocina'
         """
     )
 
@@ -1362,6 +1628,7 @@ def ordenes_cocina():
                 "tipo": o[2],
                 "cliente": o[3],
                 "referencia": o[4],
+                "mesonera": o[5],
                 "items": items,
             }
         )
@@ -1376,9 +1643,10 @@ def factura(orden_id):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT numero_orden, tipo, referencia, cliente
-        FROM ordenes
-        WHERE id=?
+        SELECT o.numero_orden, o.tipo, o.referencia, o.cliente, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=?
         """,
         (orden_id,),
     )
@@ -1418,7 +1686,8 @@ def factura(orden_id):
     <div>
         <b>Tipo:</b> {o[1]}<br>
         <b>Cliente:</b> {o[3] if o[3] else '-'}<br>
-        <b>Referencia:</b> {o[2]}
+        <b>Referencia:</b> {o[2]}<br>
+        <b>Mesonera:</b> {o[4] if o[4] else '-'}
     </div>
     <div class="sep"></div>
     """
@@ -1542,9 +1811,10 @@ def facturas_pendientes():
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, numero_orden, tipo, cliente, referencia
-            FROM ordenes
-            WHERE facturar = 1
+            SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
+            FROM ordenes o
+            LEFT JOIN usuarios u ON o.usuario_id = u.id
+            WHERE o.facturar = 1
             """
         )
         ordenes = cursor.fetchall()
@@ -1567,6 +1837,7 @@ def facturas_pendientes():
                     "tipo": o[2],
                     "cliente": o[3],
                     "referencia": o[4],
+                    "mesonera": o[5],
                     "items": [f"{i[0]} - ${i[1]}" for i in items],
                     "total": sum(i[1] for i in items),
                 }
