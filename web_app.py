@@ -59,6 +59,21 @@ def init_db():
     except:
         pass
 
+  # ---------------- Cierre ----------------
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS cierres (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha_inicio TEXT,
+        fecha_fin TEXT,
+        total_ordenes INTEGER,
+        total_ventas_usd REAL,
+        total_ventas_bs REAL,
+        total_pagado_usd REAL,
+        total_pagado_bs REAL,
+        diferencia REAL,
+        fecha_cierre TEXT
+    )
+    """)
 
 # ------------------ CATEGORIAS ------------------
 
@@ -1328,6 +1343,10 @@ def cobrar(orden_id):
 # ---------------- CIERRE ----------------
 @app.route("/cierre")
 def cierre():
+    import sqlite3
+    import datetime
+    import pytz
+
     conn = sqlite3.connect("china_house.db")
     cursor = conn.cursor()
 
@@ -1337,60 +1356,83 @@ def cierre():
     inicio = ahora.strftime("%Y-%m-%d") + " 00:00:00"
     fin = ahora.strftime("%Y-%m-%d") + " 23:59:59"
 
-    # Total órdenes
-    cursor.execute("""
-    SELECT COUNT(*) FROM ordenes
-    WHERE fecha_hora BETWEEN ? AND ? AND estado = 'cerrada'
-    """, (inicio, fin))
-    total_ordenes = cursor.fetchone()[0]
-
-    # Total USD
-    cursor.execute("""
-    SELECT SUM(monto) FROM pagos
-    WHERE metodo = 'usd' AND fecha BETWEEN ? AND ?
-    """, (inicio, fin))
-    total_usd = cursor.fetchone()[0] or 0
-
-    # Total Bs efectivo
-    cursor.execute("""
-    SELECT SUM(monto) FROM pagos
-    WHERE metodo = 'bs_efectivo' AND fecha BETWEEN ? AND ?
-    """, (inicio, fin))
-    total_bs_efectivo = cursor.fetchone()[0] or 0
-
-    # Total Pago Móvil
-    cursor.execute("""
-    SELECT SUM(monto) FROM pagos
-    WHERE metodo = 'bs_pago_movil' AND fecha BETWEEN ? AND ?
-    """, (inicio, fin))
-    total_pago_movil = cursor.fetchone()[0] or 0
-
-    # Total general en USD (referencial)
+    # 🔹 TASA
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
     tasa = cursor.fetchone()[0]
 
+    # 🔹 VENTAS (LO QUE SE VENDIÓ)
+    cursor.execute("""
+    SELECT SUM(i.precio)
+    FROM orden_items i
+    JOIN ordenes o ON i.orden_id = o.id
+    WHERE o.estado = 'cerrada'
+    AND o.fecha_hora BETWEEN ? AND ?
+    """, (inicio, fin))
+    total_ventas_usd = cursor.fetchone()[0] or 0
+    total_ventas_bs = total_ventas_usd * tasa
+
+    # 🔹 PAGOS (LO QUE SE COBRÓ)
+    cursor.execute("""
+    SELECT metodo, SUM(monto)
+    FROM pagos
+    WHERE fecha BETWEEN ? AND ?
+    GROUP BY metodo
+    """, (inicio, fin))
+
+    total_usd = 0
+    total_bs_efectivo = 0
+    total_pago_movil = 0
+
+    for metodo, monto in cursor.fetchall():
+        if metodo == "usd":
+            total_usd += monto
+        elif metodo == "bs_efectivo":
+            total_bs_efectivo += monto
+        elif metodo == "bs_pago_movil":
+            total_pago_movil += monto
+
     total_bs = total_bs_efectivo + total_pago_movil
-    total_general_usd = total_usd + (total_bs / tasa)
+    total_pagado_usd = total_usd + (total_bs / tasa)
+
+    # 🔥 DIFERENCIA
+    diferencia = total_pagado_usd - total_ventas_usd
 
     conn.close()
 
+    # 🔴 ALERTA VISUAL
+    alerta = ""
+    if abs(diferencia) > 0.01:
+        alerta = f"<h2 style='color:red;'>⚠️ DESCADRE: {round(diferencia,2)} USD</h2>"
+    else:
+        alerta = f"<h2 style='color:green;'>✔ Caja Cuadrada</h2>"
+
     return f"""
-    <h1>📊 Cierre del día</h1>
+    <h1>📊 Cierre del Día</h1>
 
-    <h2>Órdenes cerradas: {total_ordenes}</h2>
+    {alerta}
 
-    <h3>💵 USD: ${total_usd}</h3>
-    <h3>💰 Bs efectivo: Bs {total_bs_efectivo}</h3>
-    <h3>📱 Pago móvil: Bs {total_pago_movil}</h3>
+    <h2>🧾 VENTAS</h2>
+    <p>USD: ${round(total_ventas_usd,2)}</p>
+    <p>Bs: {round(total_ventas_bs,2)}</p>
 
-    <hr>
+    <h2>💰 PAGOS</h2>
+    <p>USD: ${round(total_usd,2)}</p>
+    <p>Bs efectivo: {round(total_bs_efectivo,2)}</p>
+    <p>Pago móvil: {round(total_pago_movil,2)}</p>
 
-    <h2>Total Bs: Bs {total_bs}</h2>
-    <h2>Total general (USD ref): ${round(total_general_usd, 2)}</h2>
+    <h2>📌 RESUMEN</h2>
+    <p>Total cobrado (USD): ${round(total_pagado_usd,2)}</p>
+    <p>Diferencia: ${round(diferencia,2)}</p>
 
+    <br><br>
+    <a href="/cerrar_dia">🔒 Confirmar cierre</a>
+    <br><br>
     <a href="/">⬅ Volver</a>
+    
     """
+    
 # ---------------- COCINA ----------------
+
 @app.route("/cocina")
 def pantalla_cocina():
     conn = sqlite3.connect("china_house.db")
@@ -1953,6 +1995,113 @@ def factura(orden_id):
     """
 
     return html
+# ---------------- CIERRE DEL DIA ----------------
+@app.route("/cerrar_dia")
+def cerrar_dia():
+    import sqlite3
+    import datetime
+    import pytz
+
+    conn = sqlite3.connect("china_house.db")
+    cursor = conn.cursor()
+
+    venezuela = pytz.timezone("America/Caracas")
+    ahora = datetime.datetime.now(venezuela)
+
+    inicio = ahora.strftime("%Y-%m-%d") + " 00:00:00"
+    fin = ahora.strftime("%Y-%m-%d") + " 23:59:59"
+
+    # 🔹 Órdenes pagadas
+    cursor.execute("""
+    SELECT COUNT(*) FROM ordenes
+    WHERE estado = 'cerrada'
+    AND fecha_hora BETWEEN ? AND ?
+    """, (inicio, fin))
+    total_ordenes = cursor.fetchone()[0]
+
+    # 🔹 TOTAL VENTAS (LO QUE SE VENDIÓ)
+    cursor.execute("""
+    SELECT SUM(i.precio)
+    FROM orden_items i
+    JOIN ordenes o ON i.orden_id = o.id
+    WHERE o.estado = 'cerrada'
+    AND o.fecha_hora BETWEEN ? AND ?
+    """, (inicio, fin))
+    total_ventas_usd = cursor.fetchone()[0] or 0
+
+    # 🔹 TASA
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    tasa = cursor.fetchone()[0]
+
+    total_ventas_bs = total_ventas_usd * tasa
+
+    # 🔹 PAGOS
+    cursor.execute("""
+    SELECT metodo, SUM(monto)
+    FROM pagos
+    WHERE fecha BETWEEN ? AND ?
+    GROUP BY metodo
+    """, (inicio, fin))
+
+    total_pagado_usd = 0
+    total_pagado_bs = 0
+
+    for metodo, monto in cursor.fetchall():
+        if metodo == "usd":
+            total_pagado_usd += monto
+        else:
+            total_pagado_bs += monto
+
+    total_pagado_usd += total_pagado_bs / tasa
+
+    # 🔥 DIFERENCIA (CLAVE)
+    diferencia = total_pagado_usd - total_ventas_usd
+
+    # 🔹 GUARDAR CIERRE
+    fecha_cierre = ahora.strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute("""
+    INSERT INTO cierres (
+        fecha_inicio, fecha_fin,
+        total_ordenes,
+        total_ventas_usd, total_ventas_bs,
+        total_pagado_usd, total_pagado_bs,
+        diferencia,
+        fecha_cierre
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        inicio, fin,
+        total_ordenes,
+        total_ventas_usd, total_ventas_bs,
+        total_pagado_usd, total_pagado_bs,
+        diferencia,
+        fecha_cierre
+    ))
+
+    conn.commit()
+    conn.close()
+
+    # 🔥 ALERTA SI NO CUADRA
+    alerta = ""
+    if abs(diferencia) > 0.01:
+        alerta = f"<h2 style='color:red;'>⚠️ DESCADRE: {round(diferencia,2)} USD</h2>"
+
+    return f"""
+    <h1>✅ CIERRE REALIZADO</h1>
+
+    {alerta}
+
+    <p>Órdenes: {total_ordenes}</p>
+    <p>Ventas USD: ${round(total_ventas_usd,2)}</p>
+    <p>Pagado USD: ${round(total_pagado_usd,2)}</p>
+
+    <a href="/">⬅ Volver</a>
+    """
+
+
+
+
 # ---------------- FACTURA PENDIENTE ----------------
 @app.route("/facturas_pendientes")
 def facturas_pendientes():
