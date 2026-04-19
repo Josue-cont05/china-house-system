@@ -1004,17 +1004,20 @@ def cobrar(orden_id):
         return "Orden no encontrada"
 
     estado = o[6]
-    if estado != "listo":
+
+    if estado == "cerrada":
         conn.close()
-        return "La orden debe estar LISTA antes de cobrar"
+        return "Esta orden ya está cerrada"
 
     cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
+
     if len(items) == 0:
         conn.close()
         return "No puedes cobrar una orden vacía"
 
     total_usd = sum(i[0] for i in items)
+
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
     row = cursor.fetchone()
     tasa = row[0] if row else 1
@@ -1042,6 +1045,7 @@ def cobrar(orden_id):
 
         usd1, _ = convertir(metodo1, monto1)
         usd2, _ = convertir(metodo2, monto2) if metodo2 else (0, 0)
+
         total_pagado_usd = usd1 + usd2
         descuento_usd = descuento / tasa if tasa else 0
         total_con_descuento = max(total_usd - descuento_usd, 0)
@@ -1075,6 +1079,7 @@ def cobrar(orden_id):
         return redirect("/")
 
     conn.close()
+
     return f"""
     <html>
     <head>
@@ -1149,7 +1154,6 @@ def cobrar(orden_id):
     </body>
     </html>
     """
-
 
 @app.route("/cierre")
 def cierre():
