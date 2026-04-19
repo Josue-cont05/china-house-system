@@ -1315,44 +1315,28 @@ def editar_orden(orden_id):
 def eliminar_orden(orden_id):
     conn = get_connection()
     cursor = conn.cursor()
+
+    cursor.execute("SELECT estado FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado = row[0]
+
+    if estado != "abierta":
+        conn.close()
+        return "No se puede eliminar esta orden"
+
     cursor.execute("DELETE FROM orden_items WHERE orden_id=?", (orden_id,))
     cursor.execute("DELETE FROM pagos WHERE orden_id=?", (orden_id,))
     cursor.execute("DELETE FROM ordenes WHERE id=?", (orden_id,))
+
     conn.commit()
     conn.close()
+
     return redirect("/")
-
-
-@app.route("/cambiar_tasa", methods=["GET", "POST"])
-def cambiar_tasa():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    if request.method == "POST":
-        nueva_tasa = float(request.form["tasa"])
-        cursor.execute("UPDATE tasa SET valor=?", (nueva_tasa,))
-        conn.commit()
-
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    row = cursor.fetchone()
-    tasa_actual = row[0] if row else 1
-    conn.close()
-
-    return f"""
-    <html>
-    <body style="font-family:Arial; padding:40px;">
-    <h2>💱 Cambiar tasa</h2>
-    <p>Tasa actual: <b>{tasa_actual}</b></p>
-    <form method="post">
-        <input name="tasa" placeholder="Nueva tasa" style="padding:10px; width:200px;">
-        <br><br>
-        <button style="padding:10px 20px; background:#27ae60; color:white; border:none;">Guardar</button>
-    </form>
-    <br><br>
-    <a href="/">⬅ Volver</a>
-    </body>
-    </html>
-    """
 
 
 @app.route("/ordenes_cocina")
