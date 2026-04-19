@@ -1,3 +1,1458 @@
+from collections import defaultdict
+import datetime
+import os
+import sqlite3
+
+from flask import Flask, Response, jsonify, redirect, request
+import pytz
+
+
+CLAVE_SUPERVISOR = "0102"
+DB_PATH = "china_house.db"
+VENEZUELA_TZ = pytz.timezone("America/Caracas")
+
+app = Flask(__name__)
+
+
+def get_connection():
+    return sqlite3.connect(DB_PATH)
+
+
+def ahora_venezuela():
+    return datetime.datetime.now(VENEZUELA_TZ)
+
+
+def asegurar_columna(tabla, columna, definicion):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({tabla})")
+    columnas = [col[1] for col in cursor.fetchall()]
+
+    if columna not in columnas:
+        cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {definicion}")
+        conn.commit()
+
+    conn.close()
+
+
+def asegurar_columna_facturar():
+    asegurar_columna("ordenes", "facturar", "INTEGER DEFAULT 0")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE ordenes SET facturar=0 WHERE facturar IS NULL")
+    conn.commit()
+    conn.close()
+
+
+def init_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS productos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT,
+            precio REAL
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cierres (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha_inicio TEXT,
+            fecha_fin TEXT,
+            total_ordenes INTEGER,
+            total_ventas_usd REAL,
+            total_ventas_bs REAL,
+            total_pagado_usd REAL,
+            total_pagado_bs REAL,
+            diferencia REAL,
+            fecha_cierre TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS categorias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT
+        )
+        """
+    )
+
+    cursor.execute("SELECT COUNT(*) FROM categorias")
+    if cursor.fetchone()[0] == 0:
+        categorias = [
+            ("Solo para ti",),
+            ("Para compartir",),
+            ("Banquete imperial",),
+            ("Platos adicionales",),
+            ("Bebidas",),
+            ("Delivery",),
+            ("Extras",),
+        ]
+        cursor.executemany("INSERT INTO categorias (nombre) VALUES (?)", categorias)
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ordenes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero_orden INTEGER,
+            fecha_hora TEXT,
+            tipo TEXT,
+            referencia TEXT,
+            cliente TEXT,
+            estado TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orden_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER,
+            producto TEXT,
+            precio REAL
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pagos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER,
+            metodo TEXT,
+            monto REAL,
+            referencia TEXT,
+            fecha TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tasa (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            valor REAL
+        )
+        """
+    )
+
+    cursor.execute("SELECT COUNT(*) FROM tasa")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO tasa (valor) VALUES (36)")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ingredientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT,
+            unidad TEXT,
+            stock REAL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+    asegurar_columna("productos", "categoria_id", "INTEGER")
+    asegurar_columna("ordenes", "descuento", "REAL DEFAULT 0")
+    asegurar_columna("ordenes", "observacion", "TEXT")
+    asegurar_columna_facturar()
+
+
+def cargar_productos():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM productos")
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return
+
+    cursor.execute("SELECT id, nombre FROM categorias")
+    cat_dict = {nombre: id for id, nombre in cursor.fetchall()}
+
+    productos = [
+        ("Solo para ti Cerdo", 4.5, "Solo para ti"),
+        ("Solo para ti Pollo", 4.5, "Solo para ti"),
+        ("Solo para ti Cerdo-Pollo", 5.0, "Solo para ti"),
+        ("Solo para ti Pollo-Camaron", 5.0, "Solo para ti"),
+        ("Solo para ti Premium", 6.0, "Solo para ti"),
+        ("Para compartir Cerdo", 7.0, "Para compartir"),
+        ("Para compartir Pollo", 7.0, "Para compartir"),
+        ("Para compartir Cerdo-Pollo", 8.0, "Para compartir"),
+        ("Para compartir Pollo-Camaron", 8.0, "Para compartir"),
+        ("Para compartir Premium", 9.0, "Para compartir"),
+        ("Banquete Imperial Cerdo", 10.0, "Banquete imperial"),
+        ("Banquete Imperial Pollo", 10.0, "Banquete imperial"),
+        ("Banquete Imperial Cerdo-Pollo", 11.0, "Banquete imperial"),
+        ("Banquete Imperial Pollo-Camaron", 11.0, "Banquete imperial"),
+        ("Banquete Imperial Premium", 13.0, "Banquete imperial"),
+        ("Racion de Lumpias", 4.0, "Platos adicionales"),
+        ("Media racion de Lumpias", 2.5, "Platos adicionales"),
+        ("Shop Suey", 4.0, "Platos adicionales"),
+        ("Racion de Pollo Agridulce", 5.0, "Platos adicionales"),
+        ("Refresco 1 Lt", 1.0, "Bebidas"),
+        ("Refresco 1.5 Lt", 1.5, "Bebidas"),
+        ("Delivery 0.5", 0.5, "Delivery"),
+        ("Delivery 1", 1.0, "Delivery"),
+        ("Delivery 1.5", 1.5, "Delivery"),
+        ("Delivery 2", 2.0, "Delivery"),
+        ("Delivery 2.5", 2.5, "Delivery"),
+        ("Delivery 3", 3.0, "Delivery"),
+        ("Delivery 3.5", 3.5, "Delivery"),
+        ("Extra de Salsa", 0.25, "Extras"),
+    ]
+
+    for nombre, precio, categoria in productos:
+        categoria_id = cat_dict.get(categoria)
+        cursor.execute(
+            "INSERT INTO productos (nombre, precio, categoria_id) VALUES (?, ?, ?)",
+            (nombre, precio, categoria_id),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def siguiente_numero():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT MAX(numero_orden) FROM ordenes")
+    ultimo = cursor.fetchone()[0]
+    conn.close()
+    return 1 if ultimo is None else ultimo + 1
+
+
+@app.route("/")
+def index():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento
+        FROM ordenes
+        ORDER BY id DESC
+        """
+    )
+    ordenes = cursor.fetchall()
+    conn.close()
+
+    html = """
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    body { font-family: Arial; margin: 0; background: #f5f6fa; }
+    .header { background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; }
+    .titulo { font-size: 22px; font-weight: bold; }
+    .menu-top { display: flex; flex-wrap: wrap; gap: 5px; }
+    .menu-top a { color: white; text-decoration: none; background: #34495e; padding: 10px; border-radius: 5px; font-size: 13px; flex: 1 1 45%; text-align: center; }
+    .contenedor { display: flex; padding: 10px; gap: 10px; flex-direction: column; }
+    .panel-izq, .panel-der { width: 100%; background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; }
+    button { width: 100%; padding: 16px; background: #27ae60; color: white; border: none; border-radius: 5px; margin-top: 10px; font-size: 18px; }
+    .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; flex-direction: column; gap: 10px; font-size: 18px; }
+    .estado { padding: 5px 10px; border-radius: 5px; color: white; font-size: 12px; display: inline-block; }
+    .btn-ver, .btn-cobrar { display: block; width: 100%; text-align: center; padding: 10px; border-radius: 5px; text-decoration: none; margin-bottom: 5px; }
+    .btn-ver { background: #3498db; color: white; }
+    .btn-cobrar { background: #27ae60; color: white; }
+    </style>
+    </head>
+    <body>
+    <div class="header">
+        <div class="titulo">🍜 China House POS</div>
+        <div class="menu-top">
+            <a href="/cambiar_tasa">💱 Tasa</a>
+            <a href="/exportar">📦 Exportar</a>
+            <a href="/cierre">📊 Cierre</a>
+            <a href="/menu">📋 Menú</a>
+            <a href="/cocina">🍳 Cocina</a>
+        </div>
+    </div>
+    <div class="contenedor">
+        <div class="panel-izq">
+            <h3>🆕 Nueva Orden</h3>
+            <form action="/crear_orden" method="post">
+                <label>Tipo</label>
+                <select name="tipo">
+                    <option value="Mesa">Mesa</option>
+                    <option value="Delivery">Delivery</option>
+                    <option value="Para llevar">Pick Up</option>
+                </select>
+                <label>Referencia</label>
+                <input name="referencia">
+                <label>Cliente</label>
+                <input name="cliente">
+                <button type="submit">Crear Orden</button>
+            </form>
+        </div>
+        <div class="panel-der">
+    """
+
+    html += "<h3>Órdenes activas</h3>"
+    for o in ordenes:
+        if o[6] != "abierta":
+            continue
+        html += f"""
+        <div class="card">
+            <div>
+                <b>Orden #{o[1]}</b><br>
+                {o[3]} - {o[4]}<br>
+                👤 {o[5] if o[5] else '-'}
+            </div>
+            <div>
+                <span class="estado" style="background:#e74c3c;">ABIERTA</span>
+                <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
+                <a href="/cobrar/{o[0]}" class="btn-cobrar">Cobrar</a>
+            </div>
+        </div>
+        """
+
+    html += "<h3>En cocina</h3>"
+    for o in ordenes:
+        if o[6] != "en cocina":
+            continue
+        html += f"""
+        <div class="card" style="background:#fff3cd;">
+            <div>
+                <b>Orden #{o[1]}</b><br>
+                {o[3]} - {o[4]}<br>
+                👤 {o[5] if o[5] else '-'}
+            </div>
+            <div>
+                <span class="estado" style="background:#e67e22;">EN COCINA</span>
+                <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
+            </div>
+        </div>
+        """
+
+    html += "<h3>📊 Historial</h3>"
+    for o in ordenes:
+        if o[6] != "cerrada":
+            continue
+        html += f"""
+        <div style="background:#ecf0f1; padding:10px; margin-bottom:8px; border-radius:5px;">
+            <div style="font-weight:bold;">
+                ✔ Orden #{o[1]} - {o[5] if o[5] else '-'}
+            </div>
+            <div style="margin-top:5px;">
+                <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">
+                    🔍 Ver detalle
+                </a>
+            </div>
+        </div>
+        """
+
+    html += """
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route("/menu", methods=["GET", "POST"])
+def menu():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nombre = request.form["nombre"]
+        precio = float(request.form["precio"])
+        categoria_id = request.form["categoria"]
+        cursor.execute(
+            "INSERT INTO productos (nombre, precio, categoria_id) VALUES (?, ?, ?)",
+            (nombre, precio, categoria_id),
+        )
+        conn.commit()
+
+    cursor.execute("SELECT id, nombre FROM categorias")
+    categorias = cursor.fetchall()
+
+    cursor.execute(
+        """
+        SELECT p.id, p.nombre, p.precio, c.nombre
+        FROM productos p
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        """
+    )
+    productos = cursor.fetchall()
+    conn.close()
+
+    html = """
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    body { font-family: Arial; padding: 10px; background: #f5f6fa; }
+    h1 { text-align: center; }
+    .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; }
+    button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 5px; background: #27ae60; color: white; cursor: pointer; }
+    .producto { background: white; padding: 10px; margin-bottom: 8px; border-radius: 5px; font-size: 16px; }
+    .acciones { margin-top: 8px; display: flex; gap: 10px; }
+    .acciones a { text-decoration: none; color: white; padding: 8px 10px; border-radius: 5px; font-size: 14px; }
+    .editar { background: #2980b9; }
+    .eliminar { background: #c0392b; }
+    .volver { display: block; text-align: center; margin-top: 15px; padding: 12px; background: #7f8c8d; color: white; text-decoration: none; border-radius: 5px; }
+    </style>
+    </head>
+    <body>
+    <h1>📋 Menú</h1>
+    <div class="card">
+        <form method="post">
+            <input name="nombre" placeholder="Nombre del producto" required>
+            <input name="precio" type="number" step="0.01" placeholder="Precio USD" required>
+            <select name="categoria">
+    """
+
+    for c in categorias:
+        html += f"<option value='{c[0]}'>{c[1]}</option>"
+
+    html += """
+            </select>
+            <button>➕ Agregar producto</button>
+        </form>
+    </div>
+    <h2>📦 Productos</h2>
+    """
+
+    for p in productos:
+        html += f"""
+        <div class="producto">
+            {p[1]} - ${p[2]} <br>
+            <small>{p[3] if p[3] else ''}</small>
+            <div class="acciones">
+                <a class="editar" href="/editar_producto/{p[0]}">Editar</a>
+                <a class="eliminar" href="/eliminar_producto/{p[0]}">Eliminar</a>
+            </div>
+        </div>
+        """
+
+    html += """
+    <a href="/" class="volver">⬅ Volver</a>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route("/agregar_producto", methods=["POST"])
+def agregar_producto():
+    nombre = request.form.get("nombre", "").strip()
+
+    try:
+        precio = float(request.form["precio"])
+        categoria_id = int(request.form["categoria_id"])
+    except Exception:
+        return "Datos inválidos"
+
+    if nombre == "":
+        return "Nombre requerido"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO productos (nombre, precio, categoria_id)
+        VALUES (?, ?, ?)
+        """,
+        (nombre, precio, categoria_id),
+    )
+    conn.commit()
+    conn.close()
+    return redirect("/menu")
+
+
+@app.route("/eliminar_producto/<int:id>")
+def eliminar_producto(id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM productos WHERE id=?", (id,))
+    conn.commit()
+    conn.close()
+    return redirect("/menu")
+
+
+@app.route("/editar_producto/<int:id>", methods=["GET", "POST"])
+def editar_producto(id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, nombre FROM categorias")
+    categorias = cursor.fetchall()
+
+    if request.method == "POST":
+        nombre = request.form.get("nombre", "").strip()
+        try:
+            precio = float(request.form["precio"])
+            categoria_id = int(request.form["categoria_id"])
+        except Exception:
+            conn.close()
+            return "Datos inválidos"
+
+        cursor.execute(
+            """
+            UPDATE productos
+            SET nombre=?, precio=?, categoria_id=?
+            WHERE id=?
+            """,
+            (nombre, precio, categoria_id, id),
+        )
+        conn.commit()
+        conn.close()
+        return redirect("/menu")
+
+    cursor.execute(
+        """
+        SELECT nombre, precio, categoria_id
+        FROM productos
+        WHERE id=?
+        """,
+        (id,),
+    )
+    p = cursor.fetchone()
+    conn.close()
+
+    if not p:
+        return "Producto no encontrado"
+
+    html = f"""
+    <h1>Editar producto</h1>
+    <form method="post">
+        Nombre: <input name="nombre" value="{p[0]}"><br><br>
+        Precio: <input name="precio" value="{p[1]}"><br><br>
+        Categoría:
+        <select name="categoria_id">
+    """
+
+    for c in categorias:
+        selected = "selected" if c[0] == p[2] else ""
+        html += f"<option value='{c[0]}' {selected}>{c[1]}</option>"
+
+    html += """
+        </select><br><br>
+        <button>Guardar</button>
+    </form>
+    <a href="/menu">Volver</a>
+    """
+    return html
+
+
+@app.route("/nueva_orden")
+def nueva_orden():
+    return """
+    <html>
+    <head>
+    <style>
+    body { font-family: Arial; padding: 20px; background: #f5f6fa; }
+    h2 { margin-bottom: 20px; }
+    input, select { padding: 10px; margin: 5px 0; width: 250px; border-radius: 5px; border: 1px solid #ccc; }
+    button { padding: 12px 20px; background: #27ae60; color: white; border: none; border-radius: 5px; margin-top: 10px; cursor: pointer; }
+    button:hover { background: #219150; }
+    .volver { display: inline-block; margin-top: 20px; color: #3498db; text-decoration: none; }
+    </style>
+    </head>
+    <body>
+    <h2>🆕 Nueva Orden</h2>
+    <form action="/crear_orden" method="post">
+        <label>Tipo:</label><br>
+        <select name="tipo">
+            <option value="Mesa">Mesa</option>
+            <option value="Delivery">Delivery</option>
+            <option value="Para llevar">Para llevar</option>
+        </select><br><br>
+        <label>Referencia:</label><br>
+        <input name="referencia" required><br><br>
+        <label>Cliente:</label><br>
+        <input name="cliente"><br><br>
+        <button type="submit">Crear Orden</button>
+    </form>
+    <a href="/" class="volver">⬅ Volver</a>
+    </body>
+    </html>
+    """
+
+
+@app.route("/crear_orden", methods=["POST"])
+def crear_orden():
+    tipo = request.form.get("tipo")
+    referencia = request.form.get("referencia", "")
+    cliente = request.form.get("cliente", "")
+    numero = siguiente_numero()
+    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO ordenes (numero_orden, fecha_hora, tipo, referencia, cliente, estado)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (numero, fecha, tipo, referencia, cliente, "abierta"),
+    )
+    cursor.execute("SELECT last_insert_rowid()")
+    orden_id = cursor.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/orden/<int:orden_id>")
+def orden(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    o = cursor.fetchone()
+    if not o:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado = o[6]
+
+    cursor.execute(
+        """
+        SELECT p.id, p.nombre, p.precio, c.nombre
+        FROM productos p
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        """
+    )
+    productos = cursor.fetchall()
+
+    cursor.execute(
+        """
+        SELECT producto, precio, id
+        FROM orden_items
+        WHERE orden_id=?
+        """,
+        (orden_id,),
+    )
+    items = cursor.fetchall()
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa = row[0] if row else 1
+    conn.close()
+
+    total_usd = sum(float(i[1]) for i in items)
+    total_bs = total_usd * tasa
+    descuento = o[8] if o[8] else 0
+    total_bs_final = max(total_bs - descuento, 0)
+
+    html = f"""
+    <html>
+    <head>
+    <style>
+    body {{ font-family: Arial; display: flex; }}
+    .productos {{ width: 60%; padding: 20px; }}
+    .panel {{ width: 40%; padding: 20px; background: #f4f4f4; }}
+    .btn {{ width: 100%; padding: 15px; margin: 5px 0; background: #27ae60; color: white; border: none; border-radius: 5px; }}
+    .categoria {{ font-weight: bold; margin-top: 15px; background: #333; color: white; padding: 5px; border-radius: 5px; }}
+    .grid-productos {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }}
+    .acciones-superiores {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }}
+    .btn-accion {{ display: block; padding: 12px; margin: 5px 0; text-align: center; color: white; text-decoration: none; border-radius: 5px; }}
+    .cocina {{ background: #e67e22; }}
+    .cobrar {{ background: #27ae60; }}
+    .editar {{ background: #2980b9; }}
+    .eliminar {{ background: #c0392b; }}
+    .volver {{ background: #7f8c8d; }}
+    .total {{ font-size: 20px; margin-top: 10px; }}
+    </style>
+    </head>
+    <body>
+    <div class="productos">
+    <h2>Agregar productos</h2>
+    """
+
+    categorias = defaultdict(list)
+    for p in productos:
+        categoria = p[3] if p[3] else "Sin categoría"
+        categorias[categoria].append(p)
+
+    for categoria, lista in categorias.items():
+        html += f"<div class='categoria'>🍽 {categoria}</div>"
+        html += "<div class='grid-productos'>"
+
+        mitad = (len(lista) + 1) // 2
+        col1 = lista[:mitad]
+        col2 = lista[mitad:]
+        ordenados = []
+
+        for i in range(mitad):
+            if i < len(col1):
+                ordenados.append(col1[i])
+            if i < len(col2):
+                ordenados.append(col2[i])
+
+        for p in ordenados:
+            html += f"""
+            <a href="/agregar/{orden_id}/{p[0]}">
+                <button class="btn">{p[1]} - ${p[2]}</button>
+            </a>
+            """
+
+        html += "</div>"
+
+    html += "</div>"
+    html += f"""
+    <div class="panel">
+        <h2>Orden #{o[1]}</h2>
+        <div class="acciones-superiores">
+            <a href="/editar_orden/{orden_id}" class="btn-accion editar">Editar orden</a>
+            <a href="/eliminar_orden/{orden_id}" class="btn-accion eliminar" onclick="return confirm('¿Eliminar esta orden completa?')">Eliminar orden</a>
+        </div>
+        <p>Tipo: {o[3]}</p>
+        <p>Referencia: {o[4]}</p>
+        <p>Cliente: {o[5] if o[5] else '-'}</p>
+        <p>Estado: {estado}</p>
+        <p>Observación: {o[7] if o[7] else '-'}</p>
+        <h3>Productos</h3>
+    """
+
+    for i in items:
+        if estado == "cerrada":
+            boton_eliminar = ""
+        else:
+            boton_eliminar = f"""
+            <form method="post" action="/eliminar_item/{i[2]}/{orden_id}" style="display:flex; gap:5px;">
+                <input type="password" name="clave" placeholder="Clave" style="width:70px;">
+                <button type="submit" style="background:red; color:white;">❌</button>
+            </form>
+            """
+
+        html += f"""
+        <div style='display:flex; justify-content:space-between; margin:5px 0; gap:10px;'>
+            <span>{i[0]} - ${i[1]}</span>
+            {boton_eliminar}
+        </div>
+        """
+
+    html += f"""
+        <div class="total">USD: ${round(total_usd, 2)}</div>
+        <div class="total">Bs: {round(total_bs, 2)}</div>
+        <p>Descuento: Bs {round(descuento, 2)}</p>
+        <div class="total">Total Final Bs: {round(total_bs_final, 2)}</div>
+        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">Enviar a cocina</a>
+        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
+        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">Cobrar</a>
+        <a href="/factura/{orden_id}" class="btn-accion" style="background:#16a085;">Ver factura</a>
+        <a href="/" class="btn-accion volver">Volver</a>
+    </div>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route("/agregar/<int:orden_id>/<int:producto_id>")
+def agregar(orden_id, producto_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT estado FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    if row[0] == "cerrada":
+        conn.close()
+        return "❌ No puedes agregar productos a una orden cerrada"
+
+    cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (producto_id,))
+    p = cursor.fetchone()
+    if not p:
+        conn.close()
+        return "Producto no encontrado"
+
+    cursor.execute(
+        """
+        INSERT INTO orden_items (orden_id, producto, precio)
+        VALUES (?, ?, ?)
+        """,
+        (orden_id, p[0], p[1]),
+    )
+    conn.commit()
+    conn.close()
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/enviar_cocina/<int:orden_id>")
+def cocina(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE ordenes SET estado='en cocina' WHERE id=?", (orden_id,))
+    conn.commit()
+    conn.close()
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/cobrar/<int:orden_id>", methods=["GET", "POST"])
+def cobrar(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    o = cursor.fetchone()
+
+    cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
+    items = cursor.fetchall()
+    if len(items) == 0:
+        conn.close()
+        return "No puedes cobrar una orden vacía"
+
+    total_usd = sum(i[0] for i in items)
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa = row[0] if row else 1
+
+    total_bs = total_usd * tasa
+    descuento_bs = o[8] if o[8] else 0
+    total_bs_final = max(total_bs - descuento_bs, 0)
+
+    if request.method == "POST":
+        metodo1 = request.form["metodo1"]
+        monto1 = float(request.form["monto1"] or 0)
+        ref1 = request.form.get("ref1", "")
+        descuento = float(request.form.get("descuento", 0) or 0)
+        metodo2 = request.form.get("metodo2")
+        monto2 = float(request.form.get("monto2") or 0)
+        ref2 = request.form.get("ref2", "")
+        fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+
+        def convertir(metodo, monto):
+            if metodo == "usd":
+                return monto, monto * tasa
+            if metodo in ["bs_efectivo", "bs_pago_movil"]:
+                return monto / tasa, monto
+            return 0, 0
+
+        usd1, _ = convertir(metodo1, monto1)
+        usd2, _ = convertir(metodo2, monto2) if metodo2 else (0, 0)
+        total_pagado_usd = usd1 + usd2
+        descuento_usd = descuento / tasa if tasa else 0
+        total_con_descuento = max(total_usd - descuento_usd, 0)
+
+        if total_pagado_usd < total_con_descuento:
+            conn.close()
+            return "Pago insuficiente"
+
+        cursor.execute(
+            "INSERT INTO pagos VALUES (NULL, ?, ?, ?, ?, ?)",
+            (orden_id, metodo1, monto1, ref1, fecha),
+        )
+
+        if metodo2:
+            cursor.execute(
+                "INSERT INTO pagos VALUES (NULL, ?, ?, ?, ?, ?)",
+                (orden_id, metodo2, monto2, ref2, fecha),
+            )
+
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET estado='cerrada', descuento=?
+            WHERE id=?
+            """,
+            (descuento, orden_id),
+        )
+
+        conn.commit()
+        conn.close()
+        return redirect("/")
+
+    conn.close()
+    return f"""
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    body {{ font-family: Arial; margin: 0; background: #f5f6fa; }}
+    .contenedor {{ width: 95%; margin: 10px auto; background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
+    .titulo {{ text-align: center; font-size: 22px; font-weight: bold; }}
+    .numero {{ text-align: right; font-size: 18px; margin-bottom: 10px; }}
+    .sep {{ border-top: 1px dashed #ccc; margin: 15px 0; }}
+    .total {{ font-size: 20px; font-weight: bold; text-align: right; }}
+    input, select {{ width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; }}
+    .btn {{ width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 5px; font-size: 18px; cursor: pointer; }}
+    .confirmar {{ background: #27ae60; color: white; }}
+    .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:15px; border-radius:5px; }}
+    @media (max-width: 768px) {{ .total {{ font-size: 22px; }} }}
+    </style>
+    </head>
+    <body>
+    <div class="contenedor">
+    <div class="titulo">💳 COBRAR</div>
+    <div class="numero">Orden #{o[1]}</div>
+    <div>
+    <b>Cliente:</b> {o[5] if o[5] else '-'}<br>
+    <b>Tipo:</b> {o[3]}
+    </div>
+    <div class="sep"></div>
+    <div class="total">USD: ${round(total_usd, 2)}</div>
+    <div class="total">Bs: {round(total_bs, 2)}</div>
+    <div class="total">Total final Bs: {round(total_bs_final, 2)}</div>
+    <div class="sep"></div>
+    <form method="post">
+    <h3>Pago 1</h3>
+    <select name="metodo1" id="metodo1">
+        <option value="bs_pago_movil">📱 Pago móvil</option>
+        <option value="usd">💵 USD</option>
+        <option value="bs_efectivo">💰 Bs efectivo</option>
+    </select>
+    <input name="monto1" id="monto1" value="{round(total_bs_final, 2)}" placeholder="Monto">
+    <input name="ref1" placeholder="Referencia">
+    <div class="sep"></div>
+    <h3>Pago 2 (opcional)</h3>
+    <select name="metodo2">
+        <option value="">-- ninguno --</option>
+        <option value="usd">💵 USD</option>
+        <option value="bs_efectivo">💰 Bs efectivo</option>
+        <option value="bs_pago_movil">📱 Pago móvil</option>
+    </select>
+    <input name="monto2" placeholder="Monto">
+    <input name="ref2" placeholder="Referencia">
+    <div class="sep"></div>
+    <label>Descuento (Bs)</label>
+    <input name="descuento" type="number" step="0.01" value="{round(descuento_bs, 2)}">
+    <button class="btn confirmar">✅ Confirmar pago</button>
+    </form>
+    <a href="/orden/{orden_id}" class="volver">⬅ Volver</a>
+    </div>
+    <script>
+    const metodo1 = document.getElementById("metodo1");
+    const monto1 = document.getElementById("monto1");
+    const totalUSD = {round(total_usd, 2)};
+    const totalBSFinal = {round(total_bs_final, 2)};
+
+    metodo1.addEventListener("change", function() {{
+        if (metodo1.value === "usd") {{
+            monto1.value = totalUSD.toFixed(2);
+        }} else {{
+            monto1.value = totalBSFinal.toFixed(2);
+        }}
+    }});
+    </script>
+    </body>
+    </html>
+    """
+
+
+@app.route("/cierre")
+def cierre():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    ahora = ahora_venezuela()
+    inicio = ahora.strftime("%Y-%m-%d") + " 00:00:00"
+    fin = ahora.strftime("%Y-%m-%d") + " 23:59:59"
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    tasa = cursor.fetchone()[0]
+
+    cursor.execute(
+        """
+        SELECT SUM(i.precio)
+        FROM orden_items i
+        JOIN ordenes o ON i.orden_id = o.id
+        WHERE o.estado = 'cerrada'
+        AND o.fecha_hora BETWEEN ? AND ?
+        """,
+        (inicio, fin),
+    )
+    total_ventas_usd = cursor.fetchone()[0] or 0
+    total_ventas_bs = total_ventas_usd * tasa
+
+    cursor.execute(
+        """
+        SELECT metodo, SUM(monto)
+        FROM pagos
+        WHERE fecha BETWEEN ? AND ?
+        GROUP BY metodo
+        """,
+        (inicio, fin),
+    )
+
+    total_usd = 0
+    total_bs_efectivo = 0
+    total_pago_movil = 0
+
+    for metodo, monto in cursor.fetchall():
+        if metodo == "usd":
+            total_usd += monto
+        elif metodo == "bs_efectivo":
+            total_bs_efectivo += monto
+        elif metodo == "bs_pago_movil":
+            total_pago_movil += monto
+
+    total_bs = total_bs_efectivo + total_pago_movil
+    total_pagado_usd = total_usd + (total_bs / tasa)
+    diferencia = total_pagado_usd - total_ventas_usd
+    conn.close()
+
+    if abs(diferencia) > 0.01:
+        alerta = f"<h2 style='color:red;'>⚠️ DESCADRE: {round(diferencia, 2)} USD</h2>"
+    else:
+        alerta = "<h2 style='color:green;'>✔ Caja Cuadrada</h2>"
+
+    return f"""
+    <h1>📊 Cierre del Día</h1>
+    {alerta}
+    <h2>🧾 VENTAS</h2>
+    <p>USD: ${round(total_ventas_usd, 2)}</p>
+    <p>Bs: {round(total_ventas_bs, 2)}</p>
+    <h2>💰 PAGOS</h2>
+    <p>USD: ${round(total_usd, 2)}</p>
+    <p>Bs efectivo: {round(total_bs_efectivo, 2)}</p>
+    <p>Pago móvil: {round(total_pago_movil, 2)}</p>
+    <h2>📌 RESUMEN</h2>
+    <p>Total cobrado (USD): ${round(total_pagado_usd, 2)}</p>
+    <p>Diferencia: ${round(diferencia, 2)}</p>
+    <br><br>
+    <a href="/cerrar_dia">🔒 Confirmar cierre</a>
+    <br><br>
+    <a href="/">⬅ Volver</a>
+    """
+
+
+@app.route("/cocina")
+def pantalla_cocina():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, numero_orden, tipo, referencia, fecha_hora
+        FROM ordenes
+        WHERE estado = 'en cocina'
+        ORDER BY fecha_hora ASC
+        """
+    )
+    ordenes = cursor.fetchall()
+
+    ahora = ahora_venezuela()
+    arroz_html = ""
+    caliente_html = ""
+    total_ordenes = len(ordenes)
+
+    html = """
+    <html>
+    <head>
+    <meta http-equiv="refresh" content="5">
+    <style>
+        body { font-family: Arial; background:black; color:white; font-size:22px; }
+        .container { display:flex; }
+        .col { width:50%; padding:10px; }
+        .orden { border:4px solid white; margin:10px; padding:15px; border-radius:10px; }
+        .green { border-color: green; }
+        .orange { border-color: orange; }
+        .red { border-color: red; }
+        .btn { padding:10px; background:green; color:white; border:none; font-size:18px; }
+        h1 { text-align:center; }
+    </style>
+    <script>
+        let lastCount = 0;
+        function checkNewOrders(currentCount) {
+            if (currentCount > lastCount) {
+                let audio = new Audio('https://www.soundjay.com/buttons/sounds/button-3.mp3');
+                audio.play();
+            }
+            lastCount = currentCount;
+        }
+    </script>
+    </head>
+    <body>
+    <h1> COCINA</h1>
+    <div class="container">
+        <div class="col">
+            <h2> ESTACIÓN ARROZ</h2>
+    """
+
+    for o in ordenes:
+        fecha_orden = datetime.datetime.strptime(o[4], "%Y-%m-%d %H:%M:%S")
+        minutos = (ahora - fecha_orden).total_seconds() / 60
+
+        if minutos < 5:
+            color_class = "green"
+        elif minutos < 10:
+            color_class = "orange"
+        else:
+            color_class = "red"
+
+        cursor.execute("SELECT producto FROM orden_items WHERE orden_id=?", (o[0],))
+        items = cursor.fetchall()
+        tiene_arroz = any("Arroz chino" in i[0] for i in items)
+        tiene_otro = any("Arroz chino" not in i[0] for i in items)
+
+        bloque = f"""
+        <div class="orden {color_class}">
+            <h2>Orden #{o[1]}</h2>
+            <p>{o[2]} - {o[3]}</p>
+            <p>⏱ {int(minutos)} min</p>
+        """
+
+        for i in items:
+            bloque += f"<p>• {i[0]}</p>"
+
+        bloque += f"""
+            <a href="/listo/{o[0]}">
+                <button class="btn"> LISTO</button>
+            </a>
+        </div>
+        """
+
+        if tiene_arroz:
+            arroz_html += bloque
+        if tiene_otro:
+            caliente_html += bloque
+
+    html += arroz_html
+    html += """
+        </div>
+        <div class="col">
+            <h2> ESTACIÓN CALIENTE</h2>
+    """
+    html += caliente_html
+    html += f"""
+        </div>
+    </div>
+    <script>
+        checkNewOrders({total_ordenes});
+    </script>
+    </body>
+    </html>
+    """
+    conn.close()
+    return html
+
+
+@app.route("/listo/<int:orden_id>")
+def marcar_listo(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE ordenes SET estado='listo' WHERE id=?", (orden_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/cocina")
+
+
+@app.route("/exportar")
+def exportar():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, numero_orden, fecha_hora, tipo, referencia, cliente, estado, observacion, descuento FROM ordenes"
+    )
+    ordenes = cursor.fetchall()
+    filas = []
+
+    for o in ordenes:
+        orden_id = o[0]
+        cursor.execute(
+            """
+            SELECT producto, precio
+            FROM orden_items
+            WHERE orden_id=?
+            """,
+            (orden_id,),
+        )
+        items = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT metodo, monto, referencia
+            FROM pagos
+            WHERE orden_id=?
+            """,
+            (orden_id,),
+        )
+        pagos = cursor.fetchall()
+
+        total_usd = sum(i[1] for i in items)
+        cursor.execute("SELECT valor FROM tasa LIMIT 1")
+        row = cursor.fetchone()
+        tasa = row[0] if row else 36
+        total_bs = total_usd * tasa
+        descuento = o[8] if o[8] else 0
+        total_final = max(total_bs - descuento, 0)
+
+        for idx, item in enumerate(items):
+            metodo = ""
+            monto = 0
+            referencia = ""
+            if idx < len(pagos):
+                metodo = pagos[idx][0]
+                monto = pagos[idx][1]
+                referencia = pagos[idx][2]
+
+            filas.append(
+                [
+                    orden_id,
+                    o[2],
+                    o[3],
+                    o[4],
+                    o[5],
+                    item[0],
+                    item[1],
+                    metodo,
+                    monto,
+                    referencia,
+                    total_usd if idx == 0 else 0,
+                    total_final if idx == 0 else 0,
+                ]
+            )
+
+    conn.close()
+
+    def generate():
+        yield "Orden,Fecha,Tipo,Ref Orden,Cliente,Producto,Precio USD,Metodo,Monto,Referencia Pago,Total USD,Total Bs\n"
+        for f in filas:
+            yield ",".join(str(x) for x in f) + "\n"
+
+    return Response(generate(), mimetype="text/csv")
+
+
+@app.route("/eliminar_item/<int:item_id>/<int:orden_id>", methods=["POST"])
+def eliminar_item(item_id, orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT estado FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado = row[0]
+    if estado == "cerrada":
+        conn.close()
+        return "❌ Orden cerrada, no se puede modificar"
+
+    if estado == "en cocina":
+        clave = request.form.get("clave")
+        if clave != CLAVE_SUPERVISOR:
+            conn.close()
+            return "🔒 Clave incorrecta"
+
+    cursor.execute("DELETE FROM orden_items WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/editar_orden/<int:orden_id>", methods=["GET", "POST"])
+def editar_orden(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        tipo = request.form.get("tipo")
+        referencia = request.form.get("referencia")
+        cliente = request.form.get("cliente")
+        observacion = request.form.get("observacion")
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET tipo=?, referencia=?, cliente=?, observacion=?
+            WHERE id=?
+            """,
+            (tipo, referencia, cliente, observacion, orden_id),
+        )
+        conn.commit()
+        conn.close()
+        return redirect(f"/orden/{orden_id}")
+
+    cursor.execute("SELECT * FROM ordenes WHERE id=?", (orden_id,))
+    o = cursor.fetchone()
+    conn.close()
+
+    if not o:
+        return "Orden no encontrada"
+
+    return f"""
+    <h2>Editar Orden #{o[1]}</h2>
+    <form method="POST">
+        <label>Mesa / tipo:</label><br>
+        <input name="tipo" value="{o[3]}"><br><br>
+        <label>Referencia:</label><br>
+        <input name="referencia" value="{o[4]}"><br><br>
+        <label>Nombre:</label><br>
+        <input name="cliente" value="{o[5] if o[5] else ''}"><br><br>
+        <label>Observación:</label><br>
+        <textarea name="observacion" style="width:100%; height:80px;">{o[8] if len(o) > 8 and o[8] else ''}</textarea><br><br>
+        <button type="submit">Guardar</button>
+    </form>
+    <br>
+    <a href="/orden/{orden_id}">Volver</a>
+    """
+
+
+@app.route("/eliminar_orden/<int:orden_id>")
+def eliminar_orden(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM orden_items WHERE orden_id=?", (orden_id,))
+    cursor.execute("DELETE FROM pagos WHERE orden_id=?", (orden_id,))
+    cursor.execute("DELETE FROM ordenes WHERE id=?", (orden_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/")
+
+
+@app.route("/cambiar_tasa", methods=["GET", "POST"])
+def cambiar_tasa():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nueva_tasa = float(request.form["tasa"])
+        cursor.execute("UPDATE tasa SET valor=?", (nueva_tasa,))
+        conn.commit()
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa_actual = row[0] if row else 1
+    conn.close()
+
+    return f"""
+    <html>
+    <body style="font-family:Arial; padding:40px;">
+    <h2>💱 Cambiar tasa</h2>
+    <p>Tasa actual: <b>{tasa_actual}</b></p>
+    <form method="post">
+        <input name="tasa" placeholder="Nueva tasa" style="padding:10px; width:200px;">
+        <br><br>
+        <button style="padding:10px 20px; background:#27ae60; color:white; border:none;">Guardar</button>
+    </form>
+    <br><br>
+    <a href="/">⬅ Volver</a>
+    </body>
+    </html>
+    """
+
+
+@app.route("/ordenes_cocina")
+def ordenes_cocina():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, numero_orden, tipo, cliente, referencia
+        FROM ordenes
+        WHERE estado = 'en cocina'
+        """
+    )
+
+    ordenes = []
+    for o in cursor.fetchall():
+        cursor.execute("SELECT producto FROM orden_items WHERE orden_id=?", (o[0],))
+        items = [i[0] for i in cursor.fetchall()]
+        ordenes.append(
+            {
+                "id": o[0],
+                "numero": o[1],
+                "tipo": o[2],
+                "cliente": o[3],
+                "referencia": o[4],
+                "items": items,
+            }
+        )
+
+    conn.close()
+    return jsonify(ordenes)
+
+
+@app.route("/factura/<int:orden_id>")
+def factura(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT numero_orden, tipo, referencia, cliente
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    o = cursor.fetchone()
+    if not o:
+        conn.close()
+        return "Orden no encontrada"
+
+    cursor.execute(
+        """
+        SELECT producto, precio
+        FROM orden_items
+        WHERE orden_id=?
+        """,
+        (orden_id,),
+    )
+    items = cursor.fetchall()
+    conn.close()
+
+    total = sum(i[1] for i in items)
+    html = f"""
+    <html>
+    <head>
+    <style>
+    body {{ font-family: Arial; padding: 20px; max-width: 400px; margin: auto; }}
+    .titulo {{ text-align: center; font-size: 22px; font-weight: bold; }}
+    .numero {{ text-align: right; font-size: 20px; font-weight: bold; }}
+    .sep {{ border-top: 1px dashed black; margin: 10px 0; }}
+    .item {{ display: flex; justify-content: space-between; margin: 5px 0; }}
+    .total {{ font-size: 18px; font-weight: bold; text-align: right; }}
+    </style>
+    </head>
+    <body>
+    <div class="titulo">CHINA HOUSE</div>
+    <div class="numero">Orden #{o[0]}</div>
+    <div class="sep"></div>
+    <div>
+        <b>Tipo:</b> {o[1]}<br>
+        <b>Cliente:</b> {o[3] if o[3] else '-'}<br>
+        <b>Referencia:</b> {o[2]}
+    </div>
+    <div class="sep"></div>
+    """
+
+    for i in items:
+        html += f"""
+        <div class="item">
+            <span>{i[0]}</span>
+            <span>${i[1]}</span>
+        </div>
+        """
+
+    html += f"""
+    <div class="sep"></div>
+    <div class="total">TOTAL: ${round(total, 2)}</div>
+    </body>
+    </html>
+    """
     return html
 
 
