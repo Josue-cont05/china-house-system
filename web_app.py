@@ -1608,19 +1608,25 @@ def cambiar_tasa():
 def ordenes_cocina():
     conn = get_connection()
     cursor = conn.cursor()
+
     cursor.execute(
         """
         SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
         FROM ordenes o
-        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        JOIN usuarios u ON o.usuario_id = u.id
         WHERE o.estado = 'en cocina'
         """
     )
 
     ordenes = []
+
     for o in cursor.fetchall():
-        cursor.execute("SELECT producto FROM orden_items WHERE orden_id=?", (o[0],))
+        cursor.execute(
+            "SELECT producto FROM orden_items WHERE orden_id=?",
+            (o[0],)
+        )
         items = [i[0] for i in cursor.fetchall()]
+
         ordenes.append(
             {
                 "id": o[0],
@@ -1628,7 +1634,7 @@ def ordenes_cocina():
                 "tipo": o[2],
                 "cliente": o[3],
                 "referencia": o[4],
-                "mesonera": o[5],
+                "usuario": o[5],
                 "items": items,
             }
         )
