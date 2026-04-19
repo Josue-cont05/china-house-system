@@ -96,7 +96,7 @@ def barra_superior(extra_links=""):
 
 @app.before_request
 def proteger_sistema():
-    rutas_publicas = {"login", "static"}
+    rutas_publicas = {"login", "static", "ordenes_cocina", "facturas_pendientes"}
 
     if request.endpoint in rutas_publicas:
         return
@@ -1650,7 +1650,6 @@ def ordenes_cocina():
     except Exception as e:
         print("❌ ERROR EN ORDENES_COCINA:", e)
         return jsonify([])
-
 
 @app.route("/factura/<int:orden_id>")
 def factura(orden_id):
