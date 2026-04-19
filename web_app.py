@@ -468,6 +468,15 @@ def index():
                 <span class="estado" style="background:#e74c3c;">ABIERTA</span>
                 <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
                 <a href="/cobrar/{o[0]}" class="btn-cobrar">Cobrar</a>
+                
+                <a href="/editar_orden/{o[0]}" class="btn-ver" style="background:#f39c12;">✏️ Editar</a>
+                
+                <a href="/eliminar_orden/{o[0]}" 
+                   class="btn-ver" 
+                   style="background:#e74c3c;"
+                   onclick="return confirm('¿Seguro que quieres eliminar esta orden?')">
+                   🗑 Eliminar
+                </a>
             </div>
         </div>
         """
@@ -1037,8 +1046,20 @@ def orden(orden_id):
         <div class="total">Total Final Bs: {round(total_bs_final,2)}</div>
 
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">Enviar a cocina</a>
+
+        <a href="/editar_orden/{orden_id}" class="btn-accion" style="background:#f39c12;">✏️ Editar</a>
+        
+        <a href="/eliminar_orden/{orden_id}" 
+           class="btn-accion" 
+           style="background:#e74c3c;"
+           onclick="return confirm('¿Eliminar orden completa?')">
+           🗑 Eliminar
+        </a>
+        
         <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
+        
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">Cobrar</a>
+        
         <a href="/" class="btn-accion volver">Volver</a>
 
     </div>
