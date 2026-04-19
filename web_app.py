@@ -1606,41 +1606,50 @@ def cambiar_tasa():
 
 @app.route("/ordenes_cocina")
 def ordenes_cocina():
-    conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
-        FROM ordenes o
-        JOIN usuarios u ON o.usuario_id = u.id
-        WHERE o.estado = 'en cocina'
-        """
-    )
-
-    ordenes = []
-
-    for o in cursor.fetchall():
         cursor.execute(
-            "SELECT producto FROM orden_items WHERE orden_id=?",
-            (o[0],)
-        )
-        items = [i[0] for i in cursor.fetchall()]
-
-        ordenes.append(
-            {
-                "id": o[0],
-                "numero": o[1],
-                "tipo": o[2],
-                "cliente": o[3],
-                "referencia": o[4],
-                "usuario": o[5],
-                "items": items,
-            }
+            """
+            SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
+            FROM ordenes o
+            LEFT JOIN usuarios u ON o.usuario_id = u.id
+            WHERE o.estado = 'en cocina'
+            """
         )
 
-    conn.close()
-    return jsonify(ordenes)
+        ordenes = []
+
+        for o in cursor.fetchall():
+            cursor.execute(
+                """
+                SELECT producto
+                FROM orden_items
+                WHERE orden_id=?
+                """,
+                (o[0],),
+            )
+            items = [i[0] for i in cursor.fetchall()]
+
+            ordenes.append(
+                {
+                    "id": o[0],
+                    "numero": o[1],
+                    "tipo": o[2],
+                    "cliente": o[3],
+                    "referencia": o[4],
+                    "usuario": o[5] if o[5] else "N/A",
+                    "items": items,
+                }
+            )
+
+        conn.close()
+        return jsonify(ordenes)
+
+    except Exception as e:
+        print("❌ ERROR EN ORDENES_COCINA:", e)
+        return jsonify([])
 
 
 @app.route("/factura/<int:orden_id>")
@@ -1820,7 +1829,7 @@ def facturas_pendientes():
             """
             SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
             FROM ordenes o
-            JOIN usuarios u ON o.usuario_id = u.id
+            LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
             """
         )
@@ -1846,7 +1855,7 @@ def facturas_pendientes():
                     "tipo": o[2],
                     "cliente": o[3],
                     "referencia": o[4],
-                    "usuario": o[5],
+                    "usuario": o[5] if o[5] else "N/A",
                     "items": [f"{i[0]} - ${i[1]}" for i in items],
                     "total": sum(i[1] for i in items),
                 }
