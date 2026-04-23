@@ -190,6 +190,11 @@ def ahora_venezuela():
     return datetime.datetime.now(VENEZUELA_TZ)
 
 
+def parsear_fecha_hora_venezuela(fecha_texto):
+    dt = datetime.datetime.strptime(fecha_texto, "%Y-%m-%d %H:%M:%S")
+    return VENEZUELA_TZ.localize(dt)
+
+
 def asegurar_columna(tabla, columna, definicion):
     conn = get_connection()
     cursor = conn.cursor()
@@ -703,9 +708,11 @@ def init_db():
     conn.close()
 
     asegurar_columna("productos", "categoria_id", "INTEGER")
+    asegurar_columna("ordenes", "fecha", "TEXT")
     asegurar_columna("ordenes", "descuento", "REAL DEFAULT 0")
     asegurar_columna("ordenes", "observacion", "TEXT")
     asegurar_columna("ordenes", "usuario_id", "INTEGER")
+    asegurar_columna("ordenes", "cierre_id", "INTEGER")
     asegurar_columna("ordenes", "reimpresion_token", "TEXT")
     asegurar_columna_facturar()
     crear_tablas_cierre_jornada()
@@ -2455,6 +2462,153 @@ def reimprimir_cocina(orden_id):
     return redirect(f"/orden/{orden_id}")
 
 
+@app.route("/eliminar_item/<int:item_id>/<int:orden_id>", methods=["POST"])
+def eliminar_item(item_id, orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    if row[1] is not None:
+        conn.close()
+        return "❌ Orden archivada, no se puede modificar"
+
+    estado = row[0]
+    if estado == "cerrada":
+        conn.close()
+        return "❌ Orden cerrada, no se puede modificar"
+
+    if estado == "en cocina":
+        clave = request.form.get("clave")
+        if clave != CLAVE_SUPERVISOR:
+            conn.close()
+            return "🔒 Clave incorrecta"
+
+    cursor.execute("DELETE FROM orden_items WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/editar_orden/<int:orden_id>", methods=["GET", "POST"])
+def editar_orden(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT cierre_id FROM ordenes WHERE id=?", (orden_id,))
+    bloqueo = cursor.fetchone()
+    if not bloqueo:
+        conn.close()
+        return "Orden no encontrada"
+
+    if bloqueo[0] is not None:
+        conn.close()
+        return "No se puede editar una orden archivada por cierre de jornada"
+
+    if request.method == "POST":
+        tipo = request.form.get("tipo")
+        referencia = request.form.get("referencia")
+        cliente = request.form.get("cliente")
+        observacion = request.form.get("observacion")
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET tipo=?, referencia=?, cliente=?, observacion=?
+            WHERE id=?
+            """,
+            (tipo, referencia, cliente, observacion, orden_id),
+        )
+        conn.commit()
+        conn.close()
+        return redirect(f"/orden/{orden_id}")
+
+    cursor.execute(
+        """
+        SELECT o.id, o.numero_orden, o.tipo, o.referencia, o.cliente, o.observacion, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=?
+        """,
+        (orden_id,),
+    )
+    o = cursor.fetchone()
+    conn.close()
+
+    if not o:
+        return "Orden no encontrada"
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    body {{ font-family: Arial; padding: 20px; background: #f5f6fa; }}
+    .card {{ background: white; max-width: 520px; margin: auto; padding: 20px; border-radius: 10px; }}
+    input, textarea {{ width: 100%; padding: 12px; margin: 5px 0; box-sizing: border-box; }}
+    button {{ padding: 12px 20px; background: #27ae60; color: white; border: none; border-radius: 5px; }}
+    a {{ display: inline-block; margin-top: 10px; }}
+    </style>
+    </head>
+    <body>
+    <div class="card">
+    <h2>Editar Orden {texto_numero_orden(o[1])}</h2>
+    <p><b>Mesonera:</b> {o[6] if o[6] else '-'}</p>
+    <form method="POST">
+        <label>Mesa / tipo:</label><br>
+        <input name="tipo" value="{o[2]}"><br><br>
+        <label>Referencia:</label><br>
+        <input name="referencia" value="{o[3]}"><br><br>
+        <label>Nombre:</label><br>
+        <input name="cliente" value="{o[4] if o[4] else ''}"><br><br>
+        <label>Observación:</label><br>
+        <textarea name="observacion" style="height:80px;">{o[5] if o[5] else ''}</textarea><br><br>
+        <button type="submit">Guardar</button>
+    </form>
+    <br>
+    <a href="/orden/{orden_id}">Volver</a>
+    </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/eliminar_orden/<int:orden_id>")
+def eliminar_orden(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    if row[1] is not None:
+        conn.close()
+        return "No se puede eliminar una orden archivada"
+
+    estado = row[0]
+
+    if estado != "abierta":
+        conn.close()
+        return "No se puede eliminar esta orden"
+
+    cursor.execute("DELETE FROM orden_items WHERE orden_id=?", (orden_id,))
+    cursor.execute("DELETE FROM pagos WHERE orden_id=?", (orden_id,))
+    cursor.execute("DELETE FROM ordenes WHERE id=?", (orden_id,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/")
+
+
 @app.route("/cobrar/<int:orden_id>", methods=["GET", "POST"])
 def cobrar(orden_id):
     conn = get_connection()
@@ -2639,6 +2793,7 @@ def cobrar(orden_id):
     </html>
     """
 
+
 @app.route("/cambiar_tasa", methods=["GET", "POST"])
 def cambiar_tasa():
     conn = get_connection()
@@ -2674,6 +2829,110 @@ def cambiar_tasa():
     </body>
     </html>
     """
+
+
+@app.route("/exportar")
+def exportar():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
+               o.estado, o.observacion, o.descuento, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        ORDER BY o.id ASC
+        """
+    )
+    ordenes = cursor.fetchall()
+    filas = []
+
+    for o in ordenes:
+        orden_id = o[0]
+        cursor.execute(
+            """
+            SELECT producto, precio
+            FROM orden_items
+            WHERE orden_id=?
+            """,
+            (orden_id,),
+        )
+        items = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT metodo, monto, referencia
+            FROM pagos
+            WHERE orden_id=?
+            """,
+            (orden_id,),
+        )
+        pagos = cursor.fetchall()
+
+        total_usd = sum(i[1] for i in items)
+        cursor.execute("SELECT valor FROM tasa LIMIT 1")
+        row = cursor.fetchone()
+        tasa = row[0] if row else 36
+        total_bs = total_usd * tasa
+        descuento = o[8] if o[8] else 0
+        total_final = max(total_bs - descuento, 0)
+
+        if not items:
+            filas.append(
+                [
+                    orden_id,
+                    o[2],
+                    o[3],
+                    o[4],
+                    o[5],
+                    o[9] if o[9] else "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    total_usd,
+                    total_final,
+                ]
+            )
+            continue
+
+        for idx, item in enumerate(items):
+            metodo = ""
+            monto = 0
+            referencia = ""
+            if idx < len(pagos):
+                metodo = pagos[idx][0]
+                monto = pagos[idx][1]
+                referencia = pagos[idx][2]
+
+            filas.append(
+                [
+                    orden_id,
+                    o[2],
+                    o[3],
+                    o[4],
+                    o[5],
+                    o[9] if o[9] else "",
+                    item[0],
+                    item[1],
+                    metodo,
+                    monto,
+                    referencia,
+                    total_usd if idx == 0 else 0,
+                    total_final if idx == 0 else 0,
+                ]
+            )
+
+    conn.close()
+
+    def generar():
+        yield "Orden,Fecha,Tipo,Ref Orden,Cliente,Mesonera,Producto,Precio USD,Metodo,Monto,Referencia Pago,Total USD,Total Bs\n"
+        for fila in filas:
+            yield ",".join(str(x) for x in fila) + "\n"
+
+    return Response(generar(), mimetype="text/csv")
+
 
 @app.route("/cierre")
 def cierre():
@@ -2908,7 +3167,7 @@ def pantalla_cocina():
     """
 
     for o in ordenes:
-        fecha_orden = datetime.datetime.strptime(o[4], "%Y-%m-%d %H:%M:%S")
+        fecha_orden = parsear_fecha_hora_venezuela(o[4])
         minutos = (ahora - fecha_orden).total_seconds() / 60
 
         if minutos < 5:
@@ -3202,6 +3461,7 @@ def desactivar_factura(orden_id):
     conn.commit()
     conn.close()
     return "ok"
+
 
 with app.app_context():
     init_db()
