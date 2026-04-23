@@ -3168,44 +3168,6 @@ def desactivar_factura(orden_id):
     conn.close()
     return "ok"
 
-#-------------
-
-@app.route("/reset_db_seguro")
-def reset_db_seguro():
-    from flask import session
-    if session.get("usuario") != "Josue":
-        return "Acceso denegado"
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # PostgreSQL
-    if es_postgres():
-        cursor.execute("""
-        DO $$ DECLARE
-            r RECORD;
-        BEGIN
-            FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
-                EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
-            END LOOP;
-        END $$;
-        """)
-    else:
-        # SQLite
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tablas = cursor.fetchall()
-        for tabla in tablas:
-            cursor.execute(f"DROP TABLE IF EXISTS {tabla[0]}")
-
-    conn.commit()
-    conn.close()
-
-    # Volver a crear estructura
-    init_db()
-
-    return "Base de datos reiniciada correctamente"
-
-#--------------
 with app.app_context():
     init_db()
     cargar_productos()
