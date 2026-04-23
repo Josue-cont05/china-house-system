@@ -2936,27 +2936,114 @@ def exportar():
 
 @app.route("/cierre")
 def cierre():
-    resumen = resumen_cierre_pendiente()
+    conn = get_connection()
+    cursor = conn.cursor()
 
-    if resumen["ordenes_activas"] > 0:
+    inicio_jornada = obtener_inicio_jornada_actual(cursor)
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa = float(row[0]) if row and row[0] else 1.0
+
+    cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM ordenes
+        WHERE cierre_id IS NULL
+          AND estado != 'cerrada'
+          AND fecha_hora >= ?
+        """,
+        (inicio_jornada,),
+    )
+    ordenes_activas = cursor.fetchone()[0]
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM ordenes
+        WHERE cierre_id IS NULL
+          AND estado = 'cerrada'
+          AND fecha_hora >= ?
+        ORDER BY id ASC
+        """,
+        (inicio_jornada,),
+    )
+    orden_ids = [fila[0] for fila in cursor.fetchall()]
+    cantidad_ordenes_cerradas = len(orden_ids)
+
+    total_usd = 0.0
+    total_pago_movil_bs = 0.0
+    total_efectivo_bs = 0.0
+    total_efectivo_usd = 0.0
+
+    if orden_ids:
+        placeholders = ",".join("?" for _ in orden_ids)
+
+        cursor.execute(
+            f"""
+            SELECT COALESCE(SUM(precio), 0)
+            FROM orden_items
+            WHERE orden_id IN ({placeholders})
+            """,
+            orden_ids,
+        )
+        total_usd = float(cursor.fetchone()[0] or 0)
+
+        cursor.execute(
+            f"""
+            SELECT COALESCE(SUM(monto), 0)
+            FROM pagos
+            WHERE orden_id IN ({placeholders})
+              AND metodo IN ('pago_movil', 'bs_pago_movil')
+            """,
+            orden_ids,
+        )
+        total_pago_movil_bs = float(cursor.fetchone()[0] or 0)
+
+        cursor.execute(
+            f"""
+            SELECT COALESCE(SUM(monto), 0)
+            FROM pagos
+            WHERE orden_id IN ({placeholders})
+              AND metodo = 'bs_efectivo'
+            """,
+            orden_ids,
+        )
+        total_efectivo_bs = float(cursor.fetchone()[0] or 0)
+
+        cursor.execute(
+            f"""
+            SELECT COALESCE(SUM(monto), 0)
+            FROM pagos
+            WHERE orden_id IN ({placeholders})
+              AND metodo = 'usd'
+            """,
+            orden_ids,
+        )
+        total_efectivo_usd = float(cursor.fetchone()[0] or 0)
+
+    total_bs_equivalente = (
+        total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
+    )
+    total_usd_equivalente = (
+        total_efectivo_usd + ((total_pago_movil_bs + total_efectivo_bs) / tasa if tasa else 0)
+    )
+    diferencia = total_usd_equivalente - total_usd
+
+    conn.close()
+
+    if ordenes_activas > 0:
         mensaje = (
-            f"<h2 style='color:#e67e22;'>Hay {resumen['ordenes_activas']} órdenes activas. "
+            f"<h2 style='color:#e67e22;'>Hay {ordenes_activas} órdenes activas. "
             "Debes cerrarlas o resolverlas antes de cerrar la jornada.</h2>"
         )
-    elif resumen["cantidad_ordenes_cerradas"] == 0:
+    elif cantidad_ordenes_cerradas == 0:
         mensaje = "<h2 style='color:#c0392b;'>No hay órdenes cerradas para esta jornada.</h2>"
     else:
         mensaje = "<h2 style='color:green;'>Jornada lista para cierre</h2>"
 
-    productos_html = ""
-    for producto, cantidad in resumen["productos"]:
-        productos_html += f"<li>{producto}: {cantidad}</li>"
-
-    if not productos_html:
-        productos_html = "<li>Sin productos</li>"
-
     boton = ""
-    if resumen["ordenes_activas"] == 0 and resumen["cantidad_ordenes_cerradas"] > 0:
+    if ordenes_activas == 0 and cantidad_ordenes_cerradas > 0:
         boton = '<br><br><a href="/cerrar_jornada">🔒 Confirmar cierre de jornada</a>'
 
     return f"""
@@ -2966,29 +3053,56 @@ def cierre():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
-    .card {{ max-width: 700px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
+    .card {{ max-width: 760px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
+    .bloque {{ background: #f8f9fb; padding: 14px; border-radius: 10px; margin-bottom: 14px; }}
+    .titulo-bloque {{ font-size: 18px; font-weight: bold; margin-bottom: 10px; }}
+    .dato {{ margin: 6px 0; font-size: 17px; }}
     .volver {{ display:inline-block; margin-top:20px; padding:12px 16px; background:#2c3e50; color:white; text-decoration:none; border-radius:6px; }}
     </style>
     </head>
     <body>
     <div class="card">
-    <h1>📊 Cierre del Día</h1>
-    {mensaje}
-    <p>Inicio de jornada: {resumen["inicio_jornada"]}</p>
-    <p>Órdenes cerradas: {resumen["cantidad_ordenes_cerradas"]}</p>
-    <p>Total vendido: Bs {round(resumen["total_ventas"], 2)}</p>
-    <p>Total cobrado: Bs {round(resumen["total_cobrado"], 2)}</p>
-    <p>Diferencia: Bs {round(resumen["diferencia"], 2)}</p>
-    <h2>📦 Productos vendidos</h2>
-    <ul>{productos_html}</ul>
-    {boton}
-    <br><br>
-    <a href="/" class="volver">⬅ Volver</a>
+        <h1>📊 Cierre del Día</h1>
+        {mensaje}
+
+        <div class="dato"><b>Inicio de jornada:</b> {inicio_jornada}</div>
+        <div class="dato"><b>Órdenes cerradas:</b> {cantidad_ordenes_cerradas}</div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">VENTAS DEL DÍA</div>
+            <div class="dato"><b>Total vendido:</b> ${round(total_usd, 2)}</div>
+        </div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">COBRADO</div>
+            <div class="dato"><b>Pago móvil:</b> Bs {round(total_pago_movil_bs, 2)}</div>
+            <div class="dato"><b>Efectivo Bs:</b> Bs {round(total_efectivo_bs, 2)}</div>
+            <div class="dato"><b>Efectivo USD:</b> ${round(total_efectivo_usd, 2)}</div>
+        </div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">TASA BCV</div>
+            <div class="dato"><b>Bs {round(tasa, 2)}</b></div>
+        </div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">EQUIVALENTE</div>
+            <div class="dato"><b>Total en Bs:</b> Bs {round(total_bs_equivalente, 2)}</div>
+            <div class="dato"><b>Total en USD:</b> ${round(total_usd_equivalente, 2)}</div>
+        </div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">DIFERENCIA</div>
+            <div class="dato"><b>${round(diferencia, 2)}</b></div>
+        </div>
+
+        {boton}
+        <br><br>
+        <a href="/" class="volver">⬅ Volver</a>
     </div>
     </body>
     </html>
     """
-
 
 @app.route("/cerrar_jornada")
 def cerrar_jornada():
