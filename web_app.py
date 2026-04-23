@@ -2639,6 +2639,81 @@ def cobrar(orden_id):
     </html>
     """
 
+@app.route("/cambiar_tasa", methods=["GET", "POST"])
+def cambiar_tasa():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nueva_tasa = float(request.form["tasa"])
+        cursor.execute("UPDATE tasa SET valor=?", (nueva_tasa,))
+        conn.commit()
+
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    tasa_actual = row[0] if row else 1
+    conn.close()
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body style="font-family:Arial; padding:40px;">
+    <div style="margin-bottom:20px;">👩 Usuario: <b>{usuario_activo()}</b> | <a href="/logout">Cerrar sesión</a></div>
+    <h2>💱 Cambiar tasa</h2>
+    <p>Tasa actual: <b>{tasa_actual}</b></p>
+    <form method="post">
+        <input name="tasa" placeholder="Nueva tasa" style="padding:10px; width:200px;">
+        <br><br>
+        <button style="padding:10px 20px; background:#27ae60; color:white; border:none;">Guardar</button>
+    </form>
+    <br><br>
+    <a href="/">⬅ Volver</a>
+    </body>
+    </html>
+    """
+
+
+#---------------------
+
+@app.route("/reset_db_seguro")
+def reset_db_seguro():
+    from flask import session
+    if session.get("usuario") != "Josue":
+        return "Acceso denegado"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # PostgreSQL
+    if es_postgres():
+        cursor.execute("""
+        DO $$ DECLARE
+            r RECORD;
+        BEGIN
+            FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+                EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+            END LOOP;
+        END $$;
+        """)
+    else:
+        # SQLite
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tablas = cursor.fetchall()
+        for tabla in tablas:
+            cursor.execute(f"DROP TABLE IF EXISTS {tabla[0]}")
+
+    conn.commit()
+    conn.close()
+
+    # Volver a crear estructura
+    init_db()
+
+    return "Base de datos reiniciada correctamente"
+
+#------------------
 
 @app.route("/cierre")
 def cierre():
