@@ -3168,7 +3168,7 @@ def desactivar_factura(orden_id):
     conn.close()
     return "ok"
 
--------------
+#-------------
 
 @app.route("/reset_db_seguro")
 def reset_db_seguro():
@@ -3205,7 +3205,7 @@ def reset_db_seguro():
 
     return "Base de datos reiniciada correctamente"
 
---------------
+#--------------
 with app.app_context():
     init_db()
     cargar_productos()
