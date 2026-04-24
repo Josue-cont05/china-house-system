@@ -2963,47 +2963,6 @@ def cobrar(orden_id):
     </html>
     """
 
-#------------------
-
-
-@app.route("/limpiar_pagos_duplicados")
-def limpiar_pagos_duplicados():
-    if session.get("usuario") != "Josue":
-        return "Acceso denegado"
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT id, orden_id, metodo, monto, referencia
-        FROM pagos
-        ORDER BY orden_id, metodo, monto, id
-    """)
-
-    pagos = cursor.fetchall()
-    vistos = set()
-    duplicados = []
-
-    for pago in pagos:
-        pago_id, orden_id, metodo, monto, referencia = pago
-        clave = (orden_id, metodo, float(monto or 0), referencia or "")
-
-        if clave in vistos:
-            duplicados.append(pago_id)
-        else:
-            vistos.add(clave)
-
-    for pago_id in duplicados:
-        cursor.execute("DELETE FROM pagos WHERE id=?", (pago_id,))
-
-    conn.commit()
-    conn.close()
-
-    return f"Pagos duplicados eliminados: {len(duplicados)}"
-
-#-----------
-
-
 @app.route("/cambiar_tasa", methods=["GET", "POST"])
 def cambiar_tasa():
     conn = get_connection()
