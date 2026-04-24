@@ -2,7 +2,7 @@ from collections import defaultdict
 import datetime
 import os
 import sqlite3
-from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from flask import Flask, Response, jsonify, redirect, request, session
 import pytz
@@ -15,6 +15,13 @@ except Exception:
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
+METODOS_PAGO_VALIDOS = {"bs_pago_movil", "pago_movil", "bs_efectivo", "usd"}
+ETIQUETAS_METODO_PAGO = {
+    "bs_pago_movil": "Pago movil en Bs",
+    "pago_movil": "Pago movil en Bs",
+    "bs_efectivo": "Efectivo en Bs",
+    "usd": "Efectivo en USD",
+}
 
 
 def cargar_configuracion():
@@ -193,6 +200,57 @@ def ahora_venezuela():
 def parsear_fecha_hora_venezuela(fecha_texto):
     dt = datetime.datetime.strptime(fecha_texto, "%Y-%m-%d %H:%M:%S")
     return VENEZUELA_TZ.localize(dt)
+
+
+def a_float(valor, default=0.0):
+    try:
+        if valor is None:
+            return default
+        texto = str(valor).strip().replace(",", ".")
+        if texto == "":
+            return default
+        return float(texto)
+    except Exception:
+        return default
+
+
+def normalizar_metodo_pago(metodo):
+    metodo = (metodo or "").strip()
+    if metodo == "pago_movil":
+        return "bs_pago_movil"
+    return metodo
+
+
+def etiqueta_metodo_pago(metodo):
+    return ETIQUETAS_METODO_PAGO.get(normalizar_metodo_pago(metodo), metodo or "-")
+
+
+def monto_formateado_segun_metodo(metodo, monto):
+    metodo = normalizar_metodo_pago(metodo)
+    monto = a_float(monto)
+    if metodo == "usd":
+        return f"$ {round(monto, 2)}"
+    return f"Bs {round(monto, 2)}"
+
+
+def convertir_pago_equivalente(metodo, monto, tasa):
+    metodo = normalizar_metodo_pago(metodo)
+    monto = a_float(monto)
+
+    if metodo == "usd":
+        return monto * tasa, monto
+
+    if metodo in ("bs_pago_movil", "bs_efectivo"):
+        usd = (monto / tasa) if tasa else 0.0
+        return monto, usd
+
+    return 0.0, 0.0
+
+
+def obtener_tasa_actual(cursor):
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    return float(row[0]) if row and row[0] else 1.0
 
 
 def asegurar_columna(tabla, columna, definicion):
@@ -446,12 +504,12 @@ def obtener_costo_promedio_producto(cursor, producto):
 def barra_superior(extra_links=""):
     return f"""
     <div class="header">
-        <div class="titulo">🍜 China House POS</div>
+        <div class="titulo">China House POS</div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
-            <div style="font-size:14px;">👩 Usuario: <b>{usuario_activo()}</b></div>
+            <div style="font-size:14px;">Usuario: <b>{usuario_activo()}</b></div>
             <div class="menu-top">
                 {extra_links}
-                <a href="/logout">🚪 Cerrar sesión</a>
+                <a href="/logout">Cerrar sesion</a>
             </div>
         </div>
     </div>
@@ -480,19 +538,13 @@ def obtener_inicio_jornada_actual(cursor):
 
 def texto_numero_orden(numero):
     if numero is None:
-        return "Sin número"
+        return "Sin numero"
     return f"#{numero}"
 
 
-def resumen_cierre_pendiente():
-    conn = get_connection()
-    cursor = conn.cursor()
-
+def construir_resumen_cierre(cursor):
     inicio_jornada = obtener_inicio_jornada_actual(cursor)
-
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    row = cursor.fetchone()
-    tasa = float(row[0]) if row and row[0] else 1.0
+    tasa = obtener_tasa_actual(cursor)
 
     cursor.execute(
         """
@@ -504,68 +556,162 @@ def resumen_cierre_pendiente():
         """,
         (inicio_jornada,),
     )
-    ordenes_activas = cursor.fetchone()[0]
+    ordenes_activas = int(cursor.fetchone()[0] or 0)
 
     cursor.execute(
         """
-        SELECT id, numero_orden, descuento
-        FROM ordenes
-        WHERE cierre_id IS NULL
-          AND estado = 'cerrada'
-          AND fecha_hora >= ?
-        ORDER BY id ASC
+        SELECT
+            o.id,
+            o.numero_orden,
+            COALESCE(o.cliente, ''),
+            COALESCE(o.descuento, 0),
+            COALESCE(SUM(oi.precio), 0)
+        FROM ordenes o
+        LEFT JOIN orden_items oi ON oi.orden_id = o.id
+        WHERE o.cierre_id IS NULL
+          AND o.estado = 'cerrada'
+          AND o.fecha_hora >= ?
+        GROUP BY o.id, o.numero_orden, o.cliente, o.descuento
+        ORDER BY o.id ASC
         """,
         (inicio_jornada,),
     )
-    ordenes_cerradas = cursor.fetchall()
-    orden_ids = [fila[0] for fila in ordenes_cerradas]
+    filas_ordenes = cursor.fetchall()
 
-    total_ventas = 0.0
+    ordenes_cerradas = []
+    ordenes_cerradas_detalle = []
+    orden_ids = []
+    total_ventas_usd = 0.0
+    total_ventas_bs = 0.0
 
-    for orden_id, _, descuento in ordenes_cerradas:
-        cursor.execute(
-            """
-            SELECT COALESCE(SUM(precio), 0)
-            FROM orden_items
-            WHERE orden_id = ?
-            """,
-            (orden_id,),
+    for orden_id, numero_orden, cliente, descuento_bs, subtotal_usd in filas_ordenes:
+        subtotal_usd = a_float(subtotal_usd)
+        descuento_bs = a_float(descuento_bs)
+        descuento_usd = (descuento_bs / tasa) if tasa else 0.0
+        total_neto_usd = max(subtotal_usd - descuento_usd, 0.0)
+        total_neto_bs = max((subtotal_usd * tasa) - descuento_bs, 0.0)
+
+        total_ventas_usd += total_neto_usd
+        total_ventas_bs += total_neto_bs
+        orden_ids.append(orden_id)
+        ordenes_cerradas.append((orden_id, numero_orden, descuento_bs))
+        ordenes_cerradas_detalle.append(
+            {
+                "id": orden_id,
+                "numero_orden": numero_orden,
+                "cliente": cliente,
+                "descuento_bs": descuento_bs,
+                "subtotal_usd": subtotal_usd,
+                "total_neto_usd": total_neto_usd,
+                "total_neto_bs": total_neto_bs,
+            }
         )
-        subtotal_usd = float(cursor.fetchone()[0] or 0)
-        descuento_bs = float(descuento or 0)
-        total_orden_bs = max((subtotal_usd * tasa) - descuento_bs, 0)
-        total_ventas += total_orden_bs
 
-    productos = []
-    if orden_ids:
-        placeholders = ",".join("?" for _ in orden_ids)
-        cursor.execute(
-            f"""
-            SELECT producto, COUNT(*) as cantidad
-            FROM orden_items
-            WHERE orden_id IN ({placeholders})
-            GROUP BY producto
-            ORDER BY cantidad DESC, producto ASC
-            """,
-            orden_ids,
+    cursor.execute(
+        """
+        SELECT
+            o.id,
+            o.numero_orden,
+            COALESCE(o.cliente, ''),
+            p.metodo,
+            p.monto,
+            p.referencia,
+            p.fecha
+        FROM pagos p
+        JOIN ordenes o ON p.orden_id = o.id
+        WHERE o.cierre_id IS NULL
+          AND o.estado = 'cerrada'
+          AND o.fecha_hora >= ?
+        ORDER BY o.numero_orden ASC, o.id ASC, p.id ASC
+        """,
+        (inicio_jornada,),
+    )
+    filas_pagos = cursor.fetchall()
+
+    total_pago_movil_bs = 0.0
+    total_efectivo_bs = 0.0
+    total_efectivo_usd = 0.0
+    auditoria_pagos = []
+
+    for orden_id, numero_orden, cliente, metodo, monto, referencia, fecha in filas_pagos:
+        metodo = normalizar_metodo_pago(metodo)
+        monto = a_float(monto)
+
+        if metodo == "bs_pago_movil":
+            total_pago_movil_bs += monto
+        elif metodo == "bs_efectivo":
+            total_efectivo_bs += monto
+        elif metodo == "usd":
+            total_efectivo_usd += monto
+
+        auditoria_pagos.append(
+            {
+                "orden_id": orden_id,
+                "numero_orden": numero_orden,
+                "cliente": cliente,
+                "metodo": metodo,
+                "metodo_label": etiqueta_metodo_pago(metodo),
+                "monto": monto,
+                "referencia": referencia or "",
+                "fecha": fecha or "",
+            }
         )
-        productos = cursor.fetchall()
 
-    total_cobrado = total_ventas
-    diferencia = total_ventas - total_cobrado
+    cursor.execute(
+        """
+        SELECT oi.producto, COUNT(oi.id) as cantidad
+        FROM orden_items oi
+        JOIN ordenes o ON oi.orden_id = o.id
+        WHERE o.cierre_id IS NULL
+          AND o.estado = 'cerrada'
+          AND o.fecha_hora >= ?
+        GROUP BY oi.producto
+        ORDER BY cantidad DESC, oi.producto ASC
+        """,
+        (inicio_jornada,),
+    )
+    productos = cursor.fetchall()
 
-    conn.close()
+    total_cobrado_equiv_bs = (
+        total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
+    )
+    total_cobrado_equiv_usd = total_efectivo_usd + (
+        ((total_pago_movil_bs + total_efectivo_bs) / tasa) if tasa else 0.0
+    )
+    diferencia_usd = total_ventas_usd - total_cobrado_equiv_usd
+    diferencia_bs = total_ventas_bs - total_cobrado_equiv_bs
 
     return {
         "inicio_jornada": inicio_jornada,
+        "tasa": tasa,
         "ordenes_activas": ordenes_activas,
         "ordenes_cerradas": ordenes_cerradas,
+        "ordenes_cerradas_detalle": ordenes_cerradas_detalle,
+        "orden_ids": orden_ids,
         "cantidad_ordenes_cerradas": len(ordenes_cerradas),
-        "total_ventas": round(total_ventas, 2),
-        "total_cobrado": round(total_cobrado, 2),
-        "diferencia": round(diferencia, 2),
+        "total_ventas_usd": round(total_ventas_usd, 2),
+        "total_ventas_bs": round(total_ventas_bs, 2),
+        "total_ventas": round(total_ventas_bs, 2),
+        "total_pago_movil_bs": round(total_pago_movil_bs, 2),
+        "total_efectivo_bs": round(total_efectivo_bs, 2),
+        "total_efectivo_usd": round(total_efectivo_usd, 2),
+        "total_cobrado_equiv_bs": round(total_cobrado_equiv_bs, 2),
+        "total_cobrado_equiv_usd": round(total_cobrado_equiv_usd, 2),
+        "total_cobrado": round(total_cobrado_equiv_bs, 2),
+        "diferencia_usd": round(diferencia_usd, 2),
+        "diferencia_bs": round(diferencia_bs, 2),
+        "diferencia": round(diferencia_bs, 2),
+        "auditoria_pagos": auditoria_pagos,
         "productos": productos,
     }
+
+
+def resumen_cierre_pendiente():
+    conn = get_connection()
+    cursor = conn.cursor()
+    resumen = construir_resumen_cierre(cursor)
+    conn.close()
+    return resumen
 
 
 @app.before_request
@@ -843,7 +989,7 @@ def login():
     </head>
     <body>
     <div class="login-box">
-        <h1>🔐 Login Mesonera</h1>
+        <h1>Login Mesonera</h1>
     """
 
     if error:
@@ -925,33 +1071,33 @@ def index():
     links_admin = ""
     if usuario_es_admin_cierre():
         links_admin = """
-        <a href="/exportar">📦 Exportar</a>
-        <a href="/cierre">📊 Cierre</a>
-        <a href="/cerrar_jornada">🔒 Cerrar jornada</a>
+        <a href="/exportar">Exportar</a>
+        <a href="/cierre">Cierre</a>
+        <a href="/cerrar_jornada">Cerrar jornada</a>
         """
 
     html += barra_superior(
         f"""
-        <a href="/cambiar_tasa">💱 Tasa</a>
+        <a href="/cambiar_tasa">Tasa</a>
         {links_admin}
-        <a href="/menu">📋 Menú</a>
-        <a href="/inventario">📦 Inventario</a>
-        <a href="/compras">🛒 Compras</a>
-        <a href="/produccion">🏭 Producción</a>
-        <a href="/cocina">🍳 Cocina</a>
+        <a href="/menu">Menu</a>
+        <a href="/inventario">Inventario</a>
+        <a href="/compras">Compras</a>
+        <a href="/produccion">Produccion</a>
+        <a href="/cocina">Cocina</a>
         """
     )
 
     boton_cerrar_jornada = ""
     if usuario_es_admin_cierre():
         boton_cerrar_jornada = (
-            '<a href="/cerrar_jornada" class="btn-cierre-jornada">🔒 Cerrar jornada</a>'
+            '<a href="/cerrar_jornada" class="btn-cierre-jornada">Confirmar cierre de jornada</a>'
         )
 
     html += f"""
     <div class="contenedor">
         <div class="panel-izq">
-            <h3>🆕 Nueva Orden</h3>
+            <h3>Nueva Orden</h3>
             <form action="/crear_orden" method="post">
                 <label>Tipo</label>
                 <select name="tipo">
@@ -970,7 +1116,7 @@ def index():
         <div class="panel-der">
     """
 
-    html += "<h3>Órdenes activas</h3>"
+    html += "<h3>Ordenes activas</h3>"
     for o in ordenes:
         if o[6] != "abierta":
             continue
@@ -979,7 +1125,7 @@ def index():
             <div>
                 <b>Orden {texto_numero_orden(o[1])}</b><br>
                 {o[3]} - {o[4]}<br>
-                👤 {o[5] if o[5] else '-'}
+                Cliente: {o[5] if o[5] else '-'}
                 <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
             </div>
             <div>
@@ -999,7 +1145,7 @@ def index():
             <div>
                 <b>Orden {texto_numero_orden(o[1])}</b><br>
                 {o[3]} - {o[4]}<br>
-                👤 {o[5] if o[5] else '-'}
+                Cliente: {o[5] if o[5] else '-'}
                 <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
             </div>
             <div>
@@ -1009,20 +1155,18 @@ def index():
         </div>
         """
 
-    html += "<h3>📊 Historial del día</h3>"
+    html += "<h3>Historial del dia</h3>"
     for o in ordenes:
         if o[6] != "cerrada":
             continue
         html += f"""
         <div style="background:#ecf0f1; padding:10px; margin-bottom:8px; border-radius:5px;">
             <div style="font-weight:bold;">
-                ✔ Orden {texto_numero_orden(o[1])} - {o[5] if o[5] else '-'}
+                Orden {texto_numero_orden(o[1])} - {o[5] if o[5] else '-'}
             </div>
             <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
             <div style="margin-top:5px;">
-                <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">
-                    🔍 Ver detalle
-                </a>
+                <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">Ver detalle</a>
             </div>
         </div>
         """
@@ -1091,10 +1235,10 @@ def menu():
     <body>
     """
 
-    html += barra_superior('<a href="/">🏠 Inicio</a>')
+    html += barra_superior('<a href="/">Inicio</a>')
     html += """
     <div class="contenido">
-    <h1>📋 Menú</h1>
+    <h1>Menu</h1>
     <div class="card">
         <form method="post">
             <input name="nombre" placeholder="Nombre del producto" required>
@@ -1107,10 +1251,10 @@ def menu():
 
     html += """
             </select>
-            <button>➕ Agregar producto</button>
+            <button>Agregar producto</button>
         </form>
     </div>
-    <h2>📦 Productos</h2>
+    <h2>Productos</h2>
     """
 
     for p in productos:
@@ -1126,7 +1270,7 @@ def menu():
         """
 
     html += """
-    <a href="/" class="volver">⬅ Volver</a>
+    <a href="/" class="volver">Volver</a>
     </div>
     </body>
     </html>
@@ -1167,14 +1311,14 @@ def inventario():
     """
 
     html += barra_superior(
-        '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a><a href="/produccion">🏭 Producción</a>'
+        '<a href="/">Inicio</a><a href="/compras">Compras</a><a href="/produccion">Produccion</a>'
     )
     html += """
     <div class="contenido">
-        <h1>📦 Inventario</h1>
+        <h1>Inventario</h1>
         <div class="accesos">
-            <a href="/productos_base" class="btn-acceso">📦 Productos base</a>
-            <a href="/proveedores" class="btn-acceso">🚚 Proveedores</a>
+            <a href="/productos_base" class="btn-acceso">Productos base</a>
+            <a href="/proveedores" class="btn-acceso">Proveedores</a>
         </div>
     """
 
@@ -1195,7 +1339,7 @@ def inventario():
             """
 
     html += """
-        <a href="/" class="volver">⬅ Volver</a>
+        <a href="/" class="volver">Volver</a>
     </div>
     </body>
     </html>
@@ -1241,7 +1385,7 @@ def compras():
                 cantidad = 0
 
             if producto_base_id == "" or cantidad <= 0:
-                error = "Debes seleccionar un producto y una cantidad válida"
+                error = "Debes seleccionar un producto y una cantidad valida"
             else:
                 cursor.execute(
                     """
@@ -1265,13 +1409,13 @@ def compras():
                     )
                     proveedor_row = cursor.fetchone()
                     if not proveedor_row:
-                        error = "Proveedor no válido"
+                        error = "Proveedor no valido"
                     else:
                         proveedor = proveedor_row[0]
 
                 if not error:
                     if not producto_row:
-                        error = "Producto no válido"
+                        error = "Producto no valido"
                     else:
                         compras_temporales.append(
                             {
@@ -1396,7 +1540,7 @@ def compras():
     """
 
     html += barra_superior(
-        '<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/produccion">Producción</a>'
+        '<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/produccion">Produccion</a>'
     )
     html += """
     <div class="contenido">
@@ -1488,7 +1632,7 @@ def compras():
         """
 
     html += """
-        <h2>Últimas compras guardadas</h2>
+        <h2>Ultimas compras guardadas</h2>
     """
 
     if not historial:
@@ -1583,11 +1727,11 @@ def proveedores():
     """
 
     html += barra_superior(
-        '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a><a href="/productos_base">🧱 Productos base</a>'
+        '<a href="/">Inicio</a><a href="/compras">Compras</a><a href="/productos_base">Productos base</a>'
     )
     html += """
     <div class="contenido">
-        <h1>🚚 Proveedores</h1>
+        <h1>Proveedores</h1>
         <div class="card">
     """
 
@@ -1618,7 +1762,7 @@ def proveedores():
             """
 
     html += """
-        <a href="/" class="volver">⬅ Volver</a>
+        <a href="/" class="volver">Volver</a>
     </div>
     </body>
     </html>
@@ -1637,7 +1781,7 @@ def productos_base():
         unidad = request.form.get("unidad", "").strip()
 
         if nombre == "" or unidad == "":
-            error = "Datos inválidos"
+            error = "Datos invalidos"
         else:
             cursor.execute(
                 "SELECT id FROM productos_base WHERE lower(nombre)=lower(?)",
@@ -1686,11 +1830,11 @@ def productos_base():
     """
 
     html += barra_superior(
-        '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a><a href="/proveedores">🚚 Proveedores</a>'
+        '<a href="/">Inicio</a><a href="/compras">Compras</a><a href="/proveedores">Proveedores</a>'
     )
     html += """
     <div class="contenido">
-        <h1>🧱 Productos base</h1>
+        <h1>Productos base</h1>
         <div class="card">
     """
 
@@ -1723,7 +1867,7 @@ def productos_base():
             """
 
     html += """
-        <a href="/" class="volver">⬅ Volver</a>
+        <a href="/" class="volver">Volver</a>
     </div>
     </body>
     </html>
@@ -1772,7 +1916,7 @@ def produccion():
             or cantidad_origen <= 0
             or cantidad_resultado <= 0
         ):
-            error = "Datos inválidos"
+            error = "Datos invalidos"
         else:
             cursor.execute(
                 """
@@ -1799,9 +1943,9 @@ def produccion():
             if not origen:
                 error = "Producto origen no encontrado en inventario"
             elif not resultado_base:
-                error = "Producto resultado no válido"
+                error = "Producto resultado no valido"
             elif float(origen[2] or 0) < cantidad_origen:
-                error = "Stock insuficiente para realizar la producción"
+                error = "Stock insuficiente para realizar la produccion"
             else:
                 producto_origen = origen[1]
                 producto_resultado = resultado_base[1]
@@ -1919,11 +2063,11 @@ def produccion():
     """
 
     html += barra_superior(
-        '<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/compras">🛒 Compras</a>'
+        '<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/compras">Compras</a>'
     )
     html += """
     <div class="contenido">
-        <h1>🏭 Producción</h1>
+        <h1>Produccion</h1>
         <div class="card">
     """
 
@@ -1963,10 +2107,10 @@ def produccion():
                 </div>
                 <input name="cantidad_origen" type="number" step="0.01" min="0.01" placeholder="Cantidad origen" required>
                 <input name="cantidad_resultado" type="number" step="0.01" min="0.01" placeholder="Cantidad resultado" required>
-                <button type="submit">Registrar producción</button>
+                <button type="submit">Registrar produccion</button>
             </form>
         </div>
-        <h2>Últimas producciones</h2>
+        <h2>Ultimas producciones</h2>
     """
 
     if not historial:
@@ -1990,7 +2134,7 @@ def produccion():
             """
 
     html += """
-        <a href="/" class="volver">⬅ Volver</a>
+        <a href="/" class="volver">Volver</a>
     </div>
     </body>
     </html>
@@ -2006,7 +2150,7 @@ def agregar_producto():
         precio = float(request.form["precio"])
         categoria_id = int(request.form["categoria_id"])
     except Exception:
-        return "Datos inválidos"
+        return "Datos invalidos"
 
     if nombre == "":
         return "Nombre requerido"
@@ -2049,7 +2193,7 @@ def editar_producto(id):
             categoria_id = int(request.form["categoria_id"])
         except Exception:
             conn.close()
-            return "Datos inválidos"
+            return "Datos invalidos"
 
         cursor.execute(
             """
@@ -2096,7 +2240,7 @@ def editar_producto(id):
     <form method="post">
         Nombre: <input name="nombre" value="{p[0]}"><br><br>
         Precio: <input name="precio" value="{p[1]}"><br><br>
-        Categoría:
+        Categoria:
         <select name="categoria_id">
     """
 
@@ -2188,9 +2332,7 @@ def orden(orden_id):
     )
     items = cursor.fetchall()
 
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    row = cursor.fetchone()
-    tasa = row[0] if row else 1
+    tasa = obtener_tasa_actual(cursor)
     conn.close()
 
     total_usd = sum(float(i[1]) for i in items)
@@ -2203,7 +2345,7 @@ def orden(orden_id):
     if usuario_puede_reimprimir_cocina() and estado in ("en cocina", "cerrada"):
         boton_reimprimir = (
             f'<a href="/reimprimir_cocina/{orden_id}" class="btn-accion" '
-            'style="background:#8e44ad;">🔁 Reimprimir cocina</a>'
+            'style="background:#8e44ad;">Reimprimir cocina</a>'
         )
 
     html = f"""
@@ -2241,7 +2383,7 @@ def orden(orden_id):
     <body>
     """
 
-    html += barra_superior('<a href="/">🏠 Inicio</a>')
+    html += barra_superior('<a href="/">Inicio</a>')
 
     html += """
     <div class="contenedor">
@@ -2258,12 +2400,12 @@ def orden(orden_id):
 
     categorias = defaultdict(list)
     for p in productos:
-        categoria = p[3] if p[3] else "Sin categoría"
+        categoria = p[3] if p[3] else "Sin categoria"
         categorias[categoria].append(p)
 
     if not bloqueada_por_cierre:
         for categoria, lista in categorias.items():
-            html += f"<div class='categoria'>🍽 {categoria}</div>"
+            html += f"<div class='categoria'>{categoria}</div>"
             html += "<div class='grid-productos'>"
 
             mitad = (len(lista) + 1) // 2
@@ -2299,7 +2441,7 @@ def orden(orden_id):
         <p>Cliente: {o[5] if o[5] else '-'}</p>
         <p>Mesonera: <b>{o[9] if o[9] else '-'}</b></p>
         <p>Estado: {estado}</p>
-        <p>Observación: {o[7] if o[7] else '-'}</p>
+        <p>Observacion: {o[7] if o[7] else '-'}</p>
         <h3>Productos</h3>
     """
 
@@ -2310,7 +2452,7 @@ def orden(orden_id):
             boton_eliminar = f"""
             <form method="post" action="/eliminar_item/{i[2]}/{orden_id}" style="display:flex; gap:5px;">
                 <input type="password" name="clave" placeholder="Clave" style="width:70px;">
-                <button type="submit" style="background:red; color:white;">❌</button>
+                <button type="submit" style="background:red; color:white;">X</button>
             </form>
             """
 
@@ -2332,7 +2474,7 @@ def orden(orden_id):
     if not bloqueada_por_cierre:
         html += f"""
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">Enviar a cocina</a>
-        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
+        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">Facturar</a>
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">Cobrar</a>
         """
 
@@ -2360,11 +2502,11 @@ def agregar(orden_id, producto_id):
 
     if row[1] is not None:
         conn.close()
-        return "❌ No puedes modificar una orden archivada en cierre de jornada"
+        return "No puedes modificar una orden archivada en cierre de jornada"
 
     if row[0] == "cerrada":
         conn.close()
-        return "❌ No puedes agregar productos a una orden cerrada"
+        return "No puedes agregar productos a una orden cerrada"
 
     cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (producto_id,))
     p = cursor.fetchone()
@@ -2444,7 +2586,7 @@ def reimprimir_cocina(orden_id):
 
     if orden[1] not in ("en cocina", "cerrada"):
         conn.close()
-        return "Solo se pueden reimprimir órdenes en cocina o cerradas"
+        return "Solo se pueden reimprimir ordenes en cocina o cerradas"
 
     reimpresion_token = ahora_venezuela().strftime("%Y%m%d%H%M%S%f")
 
@@ -2475,18 +2617,18 @@ def eliminar_item(item_id, orden_id):
 
     if row[1] is not None:
         conn.close()
-        return "❌ Orden archivada, no se puede modificar"
+        return "Orden archivada, no se puede modificar"
 
     estado = row[0]
     if estado == "cerrada":
         conn.close()
-        return "❌ Orden cerrada, no se puede modificar"
+        return "Orden cerrada, no se puede modificar"
 
     if estado == "en cocina":
         clave = request.form.get("clave")
         if clave != CLAVE_SUPERVISOR:
             conn.close()
-            return "🔒 Clave incorrecta"
+            return "Clave incorrecta"
 
     cursor.execute("DELETE FROM orden_items WHERE id=?", (item_id,))
     conn.commit()
@@ -2565,7 +2707,7 @@ def editar_orden(orden_id):
         <input name="referencia" value="{o[3]}"><br><br>
         <label>Nombre:</label><br>
         <input name="cliente" value="{o[4] if o[4] else ''}"><br><br>
-        <label>Observación:</label><br>
+        <label>Observacion:</label><br>
         <textarea name="observacion" style="height:80px;">{o[5] if o[5] else ''}</textarea><br><br>
         <button type="submit">Guardar</button>
     </form>
@@ -2638,84 +2780,110 @@ def cobrar(orden_id):
 
     if estado == "cerrada":
         conn.close()
-        return "Esta orden ya está cerrada"
+        return "Esta orden ya esta cerrada"
 
     cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
 
     if len(items) == 0:
         conn.close()
-        return "No puedes cobrar una orden vacía"
+        return "No puedes cobrar una orden vacia"
 
-    total_usd = sum(i[0] for i in items)
-
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    row = cursor.fetchone()
-    tasa = row[0] if row else 1
+    total_usd = sum(a_float(i[0]) for i in items)
+    tasa = obtener_tasa_actual(cursor)
 
     total_bs = total_usd * tasa
-    descuento_bs = o[8] if o[8] else 0
+    descuento_bs = a_float(o[8])
     total_bs_final = max(total_bs - descuento_bs, 0)
 
+    error = ""
+    metodo1_val = "bs_pago_movil"
+    monto1_val = f"{round(total_bs_final, 2)}"
+    ref1_val = ""
+    metodo2_val = ""
+    monto2_val = ""
+    ref2_val = ""
+    descuento_val = f"{round(descuento_bs, 2)}"
+
     if request.method == "POST":
-        metodo1 = request.form["metodo1"]
-        monto1 = float(request.form["monto1"] or 0)
-        ref1 = request.form.get("ref1", "")
-        descuento = float(request.form.get("descuento", 0) or 0)
-        metodo2 = request.form.get("metodo2")
-        monto2 = float(request.form.get("monto2") or 0)
-        ref2 = request.form.get("ref2", "")
-        fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+        metodo1_val = normalizar_metodo_pago(request.form.get("metodo1"))
+        monto1_val = (request.form.get("monto1", "") or "").strip()
+        ref1_val = (request.form.get("ref1", "") or "").strip()
+        descuento_val = (request.form.get("descuento", "") or "").strip()
+        metodo2_val = normalizar_metodo_pago(request.form.get("metodo2"))
+        monto2_val = (request.form.get("monto2", "") or "").strip()
+        ref2_val = (request.form.get("ref2", "") or "").strip()
 
-        def convertir(metodo, monto):
-            if metodo == "usd":
-                return monto, monto * tasa
-            if metodo in ["bs_efectivo", "bs_pago_movil"]:
-                return monto / tasa, monto
-            return 0, 0
+        monto1 = a_float(monto1_val)
+        monto2 = a_float(monto2_val)
+        descuento = a_float(descuento_val)
 
-        usd1, _ = convertir(metodo1, monto1)
-        usd2, _ = convertir(metodo2, monto2) if metodo2 else (0, 0)
+        if metodo1_val == "":
+            error = "Debes seleccionar el metodo de pago principal"
+        elif metodo1_val not in METODOS_PAGO_VALIDOS:
+            error = "Metodo de pago principal invalido"
+        elif monto1 <= 0:
+            error = "El monto del pago 1 debe ser mayor a 0"
+        elif descuento < 0:
+            error = "El descuento no puede ser negativo"
+        elif metodo2_val and metodo2_val not in METODOS_PAGO_VALIDOS:
+            error = "Metodo de pago 2 invalido"
+        elif metodo2_val and (monto2_val == "" or monto2 <= 0):
+            error = "Si usas pago 2, el monto debe ser mayor a 0"
+        else:
+            total_bs_final = max(total_bs - descuento, 0)
 
-        total_pagado_usd = usd1 + usd2
-        descuento_usd = descuento / tasa if tasa else 0
-        total_con_descuento = max(total_usd - descuento_usd, 0)
+            pago1_bs, pago1_usd = convertir_pago_equivalente(metodo1_val, monto1, tasa)
+            total_pagado_bs = pago1_bs
+            total_pagado_usd = pago1_usd
 
-        if total_pagado_usd < total_con_descuento:
-            conn.close()
-            return "Pago insuficiente"
+            insertar_pago_2 = bool(metodo2_val and monto2_val != "" and monto2 > 0)
+            if insertar_pago_2:
+                pago2_bs, pago2_usd = convertir_pago_equivalente(metodo2_val, monto2, tasa)
+                total_pagado_bs += pago2_bs
+                total_pagado_usd += pago2_usd
 
-        cursor.execute(
-            """
-            INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (orden_id, metodo1, monto1, ref1, fecha),
-        )
+            if total_pagado_bs + 0.0001 < total_bs_final:
+                error = "Pago insuficiente"
+            else:
+                fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
 
-        if metodo2:
-            cursor.execute(
-                """
-                INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (orden_id, metodo2, monto2, ref2, fecha),
-            )
+                cursor.execute("DELETE FROM pagos WHERE orden_id = ?", (orden_id,))
 
-        cursor.execute(
-            """
-            UPDATE ordenes
-            SET estado='cerrada', descuento=?
-            WHERE id=?
-            """,
-            (descuento, orden_id),
-        )
+                cursor.execute(
+                    """
+                    INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (orden_id, metodo1_val, monto1, ref1_val, fecha),
+                )
 
-        conn.commit()
-        conn.close()
-        return redirect("/")
+                if insertar_pago_2:
+                    cursor.execute(
+                        """
+                        INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (orden_id, metodo2_val, monto2, ref2_val, fecha),
+                    )
+
+                cursor.execute(
+                    """
+                    UPDATE ordenes
+                    SET estado='cerrada', descuento=?
+                    WHERE id=?
+                    """,
+                    (descuento, orden_id),
+                )
+
+                conn.commit()
+                conn.close()
+                return redirect("/")
 
     conn.close()
+
+    def selected(actual, esperado):
+        return "selected" if actual == esperado else ""
 
     return f"""
     <html>
@@ -2733,11 +2901,12 @@ def cobrar(orden_id):
     .btn {{ width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 5px; font-size: 18px; cursor: pointer; }}
     .confirmar {{ background: #27ae60; color: white; }}
     .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:15px; border-radius:5px; }}
+    .error {{ background:#fdecea; color:#c0392b; padding:12px; border-radius:8px; margin-bottom:12px; }}
     </style>
     </head>
     <body>
     <div class="contenedor">
-    <div class="titulo">💳 COBRAR</div>
+    <div class="titulo">COBRAR</div>
     <div class="numero">Orden {texto_numero_orden(o[1])}</div>
     <div>
     <b>Cliente:</b> {o[5] if o[5] else '-'}<br>
@@ -2749,31 +2918,32 @@ def cobrar(orden_id):
     <div class="total">Bs: {round(total_bs, 2)}</div>
     <div class="total">Total final Bs: {round(total_bs_final, 2)}</div>
     <div class="sep"></div>
+    {"<div class='error'>" + error + "</div>" if error else ""}
     <form method="post">
     <h3>Pago 1</h3>
-    <select name="metodo1" id="metodo1">
-        <option value="bs_pago_movil">📱 Pago móvil</option>
-        <option value="usd">💵 USD</option>
-        <option value="bs_efectivo">💰 Bs efectivo</option>
+    <select name="metodo1" id="metodo1" required>
+        <option value="bs_pago_movil" {selected(metodo1_val, "bs_pago_movil")}>Pago movil en Bs</option>
+        <option value="usd" {selected(metodo1_val, "usd")}>Efectivo USD</option>
+        <option value="bs_efectivo" {selected(metodo1_val, "bs_efectivo")}>Efectivo Bs</option>
     </select>
-    <input name="monto1" id="monto1" value="{round(total_bs_final, 2)}" placeholder="Monto">
-    <input name="ref1" placeholder="Referencia">
+    <input name="monto1" id="monto1" type="number" step="0.01" min="0.01" value="{monto1_val}" placeholder="Monto" required>
+    <input name="ref1" value="{ref1_val}" placeholder="Referencia">
     <div class="sep"></div>
     <h3>Pago 2 (opcional)</h3>
     <select name="metodo2">
-        <option value="">-- ninguno --</option>
-        <option value="usd">💵 USD</option>
-        <option value="bs_efectivo">💰 Bs efectivo</option>
-        <option value="bs_pago_movil">📱 Pago móvil</option>
+        <option value="" {selected(metodo2_val, "")}>-- ninguno --</option>
+        <option value="usd" {selected(metodo2_val, "usd")}>Efectivo USD</option>
+        <option value="bs_efectivo" {selected(metodo2_val, "bs_efectivo")}>Efectivo Bs</option>
+        <option value="bs_pago_movil" {selected(metodo2_val, "bs_pago_movil")}>Pago movil en Bs</option>
     </select>
-    <input name="monto2" placeholder="Monto">
-    <input name="ref2" placeholder="Referencia">
+    <input name="monto2" type="number" step="0.01" min="0" value="{monto2_val}" placeholder="Monto">
+    <input name="ref2" value="{ref2_val}" placeholder="Referencia">
     <div class="sep"></div>
     <label>Descuento (Bs)</label>
-    <input name="descuento" type="number" step="0.01" value="{round(descuento_bs, 2)}">
-    <button class="btn confirmar">✅ Confirmar pago</button>
+    <input name="descuento" type="number" step="0.01" value="{descuento_val}">
+    <button class="btn confirmar">Confirmar pago</button>
     </form>
-    <a href="/orden/{orden_id}" class="volver">⬅ Volver</a>
+    <a href="/orden/{orden_id}" class="volver">Volver</a>
     </div>
     <script>
     const metodo1 = document.getElementById("metodo1");
@@ -2804,9 +2974,7 @@ def cambiar_tasa():
         cursor.execute("UPDATE tasa SET valor=?", (nueva_tasa,))
         conn.commit()
 
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    row = cursor.fetchone()
-    tasa_actual = row[0] if row else 1
+    tasa_actual = obtener_tasa_actual(cursor)
     conn.close()
 
     return f"""
@@ -2816,8 +2984,8 @@ def cambiar_tasa():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     </head>
     <body style="font-family:Arial; padding:40px;">
-    <div style="margin-bottom:20px;">👩 Usuario: <b>{usuario_activo()}</b> | <a href="/logout">Cerrar sesión</a></div>
-    <h2>💱 Cambiar tasa</h2>
+    <div style="margin-bottom:20px;">Usuario: <b>{usuario_activo()}</b> | <a href="/logout">Cerrar sesion</a></div>
+    <h2>Cambiar tasa</h2>
     <p>Tasa actual: <b>{tasa_actual}</b></p>
     <form method="post">
         <input name="tasa" placeholder="Nueva tasa" style="padding:10px; width:200px;">
@@ -2825,7 +2993,7 @@ def cambiar_tasa():
         <button style="padding:10px 20px; background:#27ae60; color:white; border:none;">Guardar</button>
     </form>
     <br><br>
-    <a href="/">⬅ Volver</a>
+    <a href="/">Volver</a>
     </body>
     </html>
     """
@@ -2864,15 +3032,14 @@ def exportar():
             SELECT metodo, monto, referencia
             FROM pagos
             WHERE orden_id=?
+            ORDER BY id ASC
             """,
             (orden_id,),
         )
         pagos = cursor.fetchall()
 
         total_usd = sum(i[1] for i in items)
-        cursor.execute("SELECT valor FROM tasa LIMIT 1")
-        row = cursor.fetchone()
-        tasa = row[0] if row else 36
+        tasa = obtener_tasa_actual(cursor)
         total_bs = total_usd * tasa
         descuento = o[8] if o[8] else 0
         total_final = max(total_bs - descuento, 0)
@@ -2938,113 +3105,66 @@ def exportar():
 def cierre():
     conn = get_connection()
     cursor = conn.cursor()
-
-    inicio_jornada = obtener_inicio_jornada_actual(cursor)
-
-    cursor.execute("SELECT valor FROM tasa LIMIT 1")
-    row = cursor.fetchone()
-    tasa = float(row[0]) if row and row[0] else 1.0
-
-    cursor.execute(
-        """
-        SELECT COUNT(*)
-        FROM ordenes
-        WHERE cierre_id IS NULL
-          AND estado != 'cerrada'
-          AND fecha_hora >= ?
-        """,
-        (inicio_jornada,),
-    )
-    ordenes_activas = cursor.fetchone()[0]
-
-    cursor.execute(
-        """
-        SELECT id
-        FROM ordenes
-        WHERE cierre_id IS NULL
-          AND estado = 'cerrada'
-          AND fecha_hora >= ?
-        ORDER BY id ASC
-        """,
-        (inicio_jornada,),
-    )
-    orden_ids = [fila[0] for fila in cursor.fetchall()]
-    cantidad_ordenes_cerradas = len(orden_ids)
-
-    total_usd = 0.0
-    total_pago_movil_bs = 0.0
-    total_efectivo_bs = 0.0
-    total_efectivo_usd = 0.0
-
-    if orden_ids:
-        placeholders = ",".join("?" for _ in orden_ids)
-
-        cursor.execute(
-            f"""
-            SELECT COALESCE(SUM(precio), 0)
-            FROM orden_items
-            WHERE orden_id IN ({placeholders})
-            """,
-            orden_ids,
-        )
-        total_usd = float(cursor.fetchone()[0] or 0)
-
-        cursor.execute(
-            f"""
-            SELECT COALESCE(SUM(monto), 0)
-            FROM pagos
-            WHERE orden_id IN ({placeholders})
-              AND metodo IN ('pago_movil', 'bs_pago_movil')
-            """,
-            orden_ids,
-        )
-        total_pago_movil_bs = float(cursor.fetchone()[0] or 0)
-
-        cursor.execute(
-            f"""
-            SELECT COALESCE(SUM(monto), 0)
-            FROM pagos
-            WHERE orden_id IN ({placeholders})
-              AND metodo = 'bs_efectivo'
-            """,
-            orden_ids,
-        )
-        total_efectivo_bs = float(cursor.fetchone()[0] or 0)
-
-        cursor.execute(
-            f"""
-            SELECT COALESCE(SUM(monto), 0)
-            FROM pagos
-            WHERE orden_id IN ({placeholders})
-              AND metodo = 'usd'
-            """,
-            orden_ids,
-        )
-        total_efectivo_usd = float(cursor.fetchone()[0] or 0)
-
-    total_bs_equivalente = (
-        total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
-    )
-    total_usd_equivalente = (
-        total_efectivo_usd + ((total_pago_movil_bs + total_efectivo_bs) / tasa if tasa else 0)
-    )
-    diferencia = total_usd_equivalente - total_usd
-
+    resumen = construir_resumen_cierre(cursor)
     conn.close()
+
+    ordenes_activas = resumen["ordenes_activas"]
+    cantidad_ordenes_cerradas = resumen["cantidad_ordenes_cerradas"]
 
     if ordenes_activas > 0:
         mensaje = (
-            f"<h2 style='color:#e67e22;'>Hay {ordenes_activas} órdenes activas. "
+            f"<h2 style='color:#e67e22;'>Hay {ordenes_activas} ordenes activas. "
             "Debes cerrarlas o resolverlas antes de cerrar la jornada.</h2>"
         )
     elif cantidad_ordenes_cerradas == 0:
-        mensaje = "<h2 style='color:#c0392b;'>No hay órdenes cerradas para esta jornada.</h2>"
+        mensaje = "<h2 style='color:#c0392b;'>No hay ordenes cerradas para esta jornada.</h2>"
     else:
         mensaje = "<h2 style='color:green;'>Jornada lista para cierre</h2>"
 
     boton = ""
     if ordenes_activas == 0 and cantidad_ordenes_cerradas > 0:
-        boton = '<br><br><a href="/cerrar_jornada">🔒 Confirmar cierre de jornada</a>'
+        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:#c0392b;">Confirmar cierre de jornada</a>'
+
+    auditoria_html = ""
+    if not resumen["auditoria_pagos"]:
+        auditoria_html = "<div class='vacio'>No hay pagos registrados para esta jornada.</div>"
+    else:
+        auditoria_html += """
+        <div class="tabla-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Orden</th>
+                    <th>Cliente</th>
+                    <th>Metodo</th>
+                    <th>Monto</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        for pago in resumen["auditoria_pagos"]:
+            auditoria_html += f"""
+            <tr>
+                <td>{texto_numero_orden(pago["numero_orden"])}</td>
+                <td>{pago["cliente"] if pago["cliente"] else '-'}</td>
+                <td>{pago["metodo_label"]}</td>
+                <td>{monto_formateado_segun_metodo(pago["metodo"], pago["monto"])}</td>
+            </tr>
+            """
+        auditoria_html += """
+            </tbody>
+        </table>
+        </div>
+        """
+
+    productos_html = ""
+    if not resumen["productos"]:
+        productos_html = "<div class='vacio'>No hay platos vendidos en la jornada.</div>"
+    else:
+        productos_html += "<div class='tabla-wrap'><table><thead><tr><th>Producto</th><th>Cantidad</th></tr></thead><tbody>"
+        for producto, cantidad in resumen["productos"]:
+            productos_html += f"<tr><td>{producto}</td><td>{cantidad}</td></tr>"
+        productos_html += "</tbody></table></div>"
 
     return f"""
     <html>
@@ -3053,56 +3173,72 @@ def cierre():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
-    .card {{ max-width: 760px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
+    .card {{ max-width: 980px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
     .bloque {{ background: #f8f9fb; padding: 14px; border-radius: 10px; margin-bottom: 14px; }}
     .titulo-bloque {{ font-size: 18px; font-weight: bold; margin-bottom: 10px; }}
     .dato {{ margin: 6px 0; font-size: 17px; }}
     .volver {{ display:inline-block; margin-top:20px; padding:12px 16px; background:#2c3e50; color:white; text-decoration:none; border-radius:6px; }}
+    .tabla-wrap {{ overflow:auto; }}
+    table {{ width:100%; border-collapse: collapse; background:white; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
+    th {{ background:#eef2f7; }}
+    .vacio {{ color:#7f8c8d; }}
     </style>
     </head>
     <body>
     <div class="card">
-        <h1>📊 Cierre del Día</h1>
+        <h1>Cierre del Dia</h1>
         {mensaje}
 
-        <div class="dato"><b>Inicio de jornada:</b> {inicio_jornada}</div>
-        <div class="dato"><b>Órdenes cerradas:</b> {cantidad_ordenes_cerradas}</div>
+        <div class="dato"><b>Inicio de jornada:</b> {resumen["inicio_jornada"]}</div>
+        <div class="dato"><b>Ordenes cerradas:</b> {cantidad_ordenes_cerradas}</div>
 
         <div class="bloque">
-            <div class="titulo-bloque">VENTAS DEL DÍA</div>
-            <div class="dato"><b>Total vendido:</b> ${round(total_usd, 2)}</div>
+            <div class="titulo-bloque">VENTAS</div>
+            <div class="dato"><b>Total vendido en USD:</b> ${round(resumen["total_ventas_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
             <div class="titulo-bloque">COBRADO</div>
-            <div class="dato"><b>Pago móvil:</b> Bs {round(total_pago_movil_bs, 2)}</div>
-            <div class="dato"><b>Efectivo Bs:</b> Bs {round(total_efectivo_bs, 2)}</div>
-            <div class="dato"><b>Efectivo USD:</b> ${round(total_efectivo_usd, 2)}</div>
+            <div class="dato"><b>Pago movil en Bs:</b> Bs {round(resumen["total_pago_movil_bs"], 2)}</div>
+            <div class="dato"><b>Efectivo en Bs:</b> Bs {round(resumen["total_efectivo_bs"], 2)}</div>
+            <div class="dato"><b>Efectivo en USD:</b> $ {round(resumen["total_efectivo_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">TASA BCV</div>
-            <div class="dato"><b>Bs {round(tasa, 2)}</b></div>
+            <div class="titulo-bloque">TASA</div>
+            <div class="dato"><b>Tasa actual:</b> Bs {round(resumen["tasa"], 2)}</div>
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">EQUIVALENTE</div>
-            <div class="dato"><b>Total en Bs:</b> Bs {round(total_bs_equivalente, 2)}</div>
-            <div class="dato"><b>Total en USD:</b> ${round(total_usd_equivalente, 2)}</div>
+            <div class="titulo-bloque">EQUIVALENTES</div>
+            <div class="dato"><b>Total cobrado equivalente en Bs:</b> Bs {round(resumen["total_cobrado_equiv_bs"], 2)}</div>
+            <div class="dato"><b>Total cobrado equivalente en USD:</b> $ {round(resumen["total_cobrado_equiv_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
             <div class="titulo-bloque">DIFERENCIA</div>
-            <div class="dato"><b>${round(diferencia, 2)}</b></div>
+            <div class="dato"><b>Diferencia en USD entre vendido y cobrado:</b> $ {round(resumen["diferencia_usd"], 2)}</div>
+        </div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">AUDITORIA DE PAGOS</div>
+            {auditoria_html}
+        </div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">PLATOS VENDIDOS EN LA JORNADA</div>
+            {productos_html}
         </div>
 
         {boton}
-        <br><br>
-        <a href="/" class="volver">⬅ Volver</a>
+        <br>
+        <a href="/" class="volver">Volver</a>
     </div>
     </body>
     </html>
     """
+
 
 @app.route("/cerrar_jornada")
 def cerrar_jornada():
@@ -3116,9 +3252,9 @@ def cerrar_jornada():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         </head>
         <body style="font-family:Arial; padding:20px;">
-        <h1>❌ No se puede cerrar la jornada</h1>
-        <p>Hay {resumen['ordenes_activas']} órdenes activas pendientes.</p>
-        <a href="/">⬅ Volver</a>
+        <h1>No se puede cerrar la jornada</h1>
+        <p>Hay {resumen['ordenes_activas']} ordenes activas pendientes.</p>
+        <a href="/">Volver</a>
         </body>
         </html>
         """
@@ -3131,8 +3267,8 @@ def cerrar_jornada():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         </head>
         <body style="font-family:Arial; padding:20px;">
-        <h1>❌ No hay órdenes cerradas para esta jornada</h1>
-        <a href="/">⬅ Volver</a>
+        <h1>No hay ordenes cerradas para esta jornada</h1>
+        <a href="/">Volver</a>
         </body>
         </html>
         """
@@ -3148,7 +3284,7 @@ def cerrar_jornada():
         INSERT INTO cierres_caja (fecha, total_ventas, usuario_id)
         VALUES (?, ?, ?)
         """,
-        (fecha_cierre, resumen["total_ventas"], usuario_id),
+        (fecha_cierre, resumen["total_ventas_bs"], usuario_id),
     )
     cierre_id = obtener_ultimo_id(cursor, "cierres_caja")
 
@@ -3161,16 +3297,17 @@ def cerrar_jornada():
             (cierre_id, producto, cantidad),
         )
 
-    orden_ids = [fila[0] for fila in resumen["ordenes_cerradas"]]
-    placeholders = ",".join("?" for _ in orden_ids)
-    cursor.execute(
-        f"""
-        UPDATE ordenes
-        SET cierre_id = ?
-        WHERE id IN ({placeholders})
-        """,
-        [cierre_id] + orden_ids,
-    )
+    orden_ids = resumen["orden_ids"]
+    if orden_ids:
+        placeholders = ",".join("?" for _ in orden_ids)
+        cursor.execute(
+            f"""
+            UPDATE ordenes
+            SET cierre_id = ?
+            WHERE id IN ({placeholders})
+            """,
+            [cierre_id] + orden_ids,
+        )
 
     conn.commit()
     conn.close()
@@ -3189,25 +3326,25 @@ def cerrar_jornada():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
-    .card {{ max-width: 700px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
+    .card {{ max-width: 760px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
     h1 {{ margin-top: 0; }}
-    .total {{ font-size: 24px; font-weight: bold; color: #27ae60; }}
+    .total {{ font-size: 22px; font-weight: bold; color: #27ae60; margin-bottom: 8px; }}
     .volver {{ display:inline-block; margin-top:20px; padding:12px 16px; background:#2c3e50; color:white; text-decoration:none; border-radius:6px; }}
     </style>
     </head>
     <body>
     <div class="card">
-        <h1>✅ CIERRE REALIZADO</h1>
+        <h1>CIERRE REALIZADO</h1>
         <p>Cierre #{cierre_id}</p>
         <p>Inicio de jornada: {resumen["inicio_jornada"]}</p>
         <p>Fecha de cierre: {fecha_cierre}</p>
-        <p>Órdenes cerradas: {resumen["cantidad_ordenes_cerradas"]}</p>
-        <div class="total">Total vendido: Bs {round(resumen["total_ventas"], 2)}</div>
-        <div class="total">Total cobrado: Bs {round(resumen["total_cobrado"], 2)}</div>
-        <div class="total">Diferencia: Bs {round(resumen["diferencia"], 2)}</div>
-        <h2>📦 Productos vendidos</h2>
+        <p>Ordenes cerradas: {resumen["cantidad_ordenes_cerradas"]}</p>
+        <div class="total">Total vendido: $ {round(resumen["total_ventas_usd"], 2)}</div>
+        <div class="total">Total cobrado equivalente: Bs {round(resumen["total_cobrado_equiv_bs"], 2)} / $ {round(resumen["total_cobrado_equiv_usd"], 2)}</div>
+        <div class="total">Diferencia: $ {round(resumen["diferencia_usd"], 2)}</div>
+        <h2>Productos vendidos</h2>
         <ul>{productos_html}</ul>
-        <a href="/" class="volver">⬅ Volver</a>
+        <a href="/" class="volver">Volver</a>
     </div>
     </body>
     </html>
@@ -3268,16 +3405,16 @@ def pantalla_cocina():
     </head>
     <body>
     <div class="topbar">
-        <div>👩 Usuario: <b>""" + usuario_activo() + """</b></div>
+        <div>Usuario: <b>""" + usuario_activo() + """</b></div>
         <div style="display:flex; gap:8px;">
             <a href="/">Inicio</a>
-            <a href="/logout">Cerrar sesión</a>
+            <a href="/logout">Cerrar sesion</a>
         </div>
     </div>
     <h1>COCINA</h1>
     <div class="container">
         <div class="col">
-            <h2>ESTACIÓN ARROZ</h2>
+            <h2>ESTACION ARROZ</h2>
     """
 
     for o in ordenes:
@@ -3301,11 +3438,11 @@ def pantalla_cocina():
             <h2>Orden {texto_numero_orden(o[1])}</h2>
             <p>{o[2]} - {o[3]}</p>
             <p class="mesonera">Mesonera: {(o[5] or '-').upper()}</p>
-            <p>⏱ {int(minutos)} min</p>
+            <p>{int(minutos)} min</p>
         """
 
         for i in items:
-            bloque += f"<p>• {i[0]}</p>"
+            bloque += f"<p>- {i[0]}</p>"
 
         bloque += f"""
             <a href="/listo/{o[0]}">
@@ -3323,7 +3460,7 @@ def pantalla_cocina():
     html += """
         </div>
         <div class="col">
-            <h2>ESTACIÓN CALIENTE</h2>
+            <h2>ESTACION CALIENTE</h2>
     """
     html += caliente_html
     html += f"""
@@ -3421,7 +3558,7 @@ def ordenes_cocina():
         return jsonify(ordenes)
 
     except Exception as e:
-        print("❌ ERROR EN ORDENES_COCINA:", e)
+        print("ERROR EN ORDENES_COCINA:", e)
         return jsonify([])
 
 
@@ -3550,7 +3687,7 @@ def facturas_pendientes():
         return jsonify(resultado)
 
     except Exception as e:
-        print("❌ ERROR EN FACTURAS:", e)
+        print("ERROR EN FACTURAS:", e)
         return jsonify([])
 
 
