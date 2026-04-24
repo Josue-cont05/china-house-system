@@ -1,7 +1,10 @@
 from collections import defaultdict
 import datetime
+import html as html_lib
+import io
 import os
 import sqlite3
+import zipfile
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from flask import Flask, Response, jsonify, redirect, request, session
@@ -501,15 +504,97 @@ def obtener_costo_promedio_producto(cursor, producto):
     return 0.0
 
 
+def estilos_base():
+    return """
+    :root {
+        --rojo-china: #b91c1c;
+        --rojo-oscuro: #7f1d1d;
+        --dorado: #f59e0b;
+        --verde: #15803d;
+        --azul: #1d4ed8;
+        --gris-fondo: #f3f4f6;
+        --texto: #111827;
+        --borde: #e5e7eb;
+        --sombra: 0 10px 26px rgba(17, 24, 39, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+        font-family: Arial, Helvetica, sans-serif;
+        color: var(--texto);
+        background:
+            radial-gradient(circle at top left, rgba(245, 158, 11, 0.14), transparent 28rem),
+            linear-gradient(180deg, #fff7ed 0%, var(--gris-fondo) 34%, #eef2f7 100%);
+    }
+    .header {
+        background: linear-gradient(135deg, var(--rojo-oscuro), var(--rojo-china) 58%, #111827);
+        color: white;
+        padding: 18px 22px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        box-shadow: 0 8px 24px rgba(127, 29, 29, 0.28);
+        position: sticky;
+        top: 0;
+        z-index: 20;
+    }
+    .titulo { font-size: 26px; font-weight: 900; letter-spacing: 0; }
+    .menu-top { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .menu-top a, .volver, .btn-accion, .btn-ver, .btn-cobrar, .btn-acceso {
+        color: white;
+        text-decoration: none;
+        font-weight: 800;
+        border-radius: 8px;
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        box-shadow: 0 3px 10px rgba(17, 24, 39, 0.12);
+    }
+    .menu-top a { background: rgba(255, 255, 255, 0.16); padding: 10px 13px; font-size: 14px; }
+    .menu-top a:hover { background: rgba(255, 255, 255, 0.26); }
+    .contenido, .contenedor { max-width: 1280px; margin: 0 auto; }
+    .card, .panel-izq, .panel-der, .panel, .login-box {
+        border: 1px solid rgba(229, 231, 235, 0.85);
+        box-shadow: var(--sombra);
+    }
+    h1, h2, h3 { letter-spacing: 0; }
+    input, select, textarea {
+        border: 1px solid #cbd5e1;
+        min-height: 46px;
+        background: white;
+    }
+    button, .btn, .btn-agregar, .btn-guardar {
+        font-weight: 900;
+        min-height: 48px;
+        box-shadow: 0 4px 12px rgba(17, 24, 39, 0.14);
+    }
+    @media (min-width: 900px) {
+        .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
+        .panel-izq { flex: 0 0 360px; }
+        .panel-der { flex: 1; }
+        .card { flex-direction: row !important; justify-content: space-between; align-items: center; }
+    }
+    @media (max-width: 768px) {
+        .header { position: static; flex-direction: column; align-items: stretch; }
+        .titulo { font-size: 23px; text-align: center; }
+        .menu-top { justify-content: stretch; }
+        .menu-top a { flex: 1 1 42%; }
+    }
+    """
+
+
 def barra_superior(extra_links=""):
     return f"""
+    <style>{estilos_base()}</style>
     <div class="header">
-        <div class="titulo">China House POS</div>
+        <div class="titulo">🍜 China House POS</div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
-            <div style="font-size:14px;">Usuario: <b>{usuario_activo()}</b></div>
+            <div style="font-size:14px;">👤 Usuario: <b>{usuario_activo()}</b></div>
             <div class="menu-top">
                 {extra_links}
-                <a href="/logout">Cerrar sesion</a>
+                <a href="/logout">🚪 Cerrar sesión</a>
             </div>
         </div>
     </div>
@@ -712,6 +797,307 @@ def resumen_cierre_pendiente():
     resumen = construir_resumen_cierre(cursor)
     conn.close()
     return resumen
+
+
+def fechas_reporte_desde_request():
+    hoy = ahora_venezuela().strftime("%Y-%m-%d")
+    desde = (request.args.get("desde") or hoy).strip()
+    hasta = (request.args.get("hasta") or hoy).strip()
+
+    try:
+        datetime.datetime.strptime(desde, "%Y-%m-%d")
+    except Exception:
+        desde = hoy
+
+    try:
+        datetime.datetime.strptime(hasta, "%Y-%m-%d")
+    except Exception:
+        hasta = hoy
+
+    if desde > hasta:
+        desde, hasta = hasta, desde
+
+    return desde, hasta
+
+
+def construir_reporte_rango(cursor, desde, hasta):
+    inicio = f"{desde} 00:00:00"
+    fin = f"{hasta} 23:59:59"
+    tasa = obtener_tasa_actual(cursor)
+
+    cursor.execute(
+        """
+        SELECT
+            o.id,
+            o.numero_orden,
+            o.fecha_hora,
+            COALESCE(o.tipo, ''),
+            COALESCE(o.referencia, ''),
+            COALESCE(o.cliente, ''),
+            COALESCE(o.descuento, 0),
+            COALESCE(u.nombre, ''),
+            COALESCE(SUM(oi.precio), 0)
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        LEFT JOIN orden_items oi ON oi.orden_id = o.id
+        WHERE o.estado = 'cerrada'
+          AND o.fecha_hora >= ?
+          AND o.fecha_hora <= ?
+        GROUP BY o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia,
+                 o.cliente, o.descuento, u.nombre
+        ORDER BY o.fecha_hora ASC, o.id ASC
+        """,
+        (inicio, fin),
+    )
+    ordenes_db = cursor.fetchall()
+
+    ventas_por_orden = []
+    ventas_por_dia = defaultdict(lambda: {"total_usd": 0.0, "total_bs": 0.0, "ordenes": 0})
+    total_vendido_usd = 0.0
+    total_vendido_bs = 0.0
+    orden_ids = []
+
+    for orden in ordenes_db:
+        (
+            orden_id,
+            numero_orden,
+            fecha_hora,
+            tipo,
+            referencia,
+            cliente,
+            descuento_bs,
+            mesonera,
+            subtotal_usd,
+        ) = orden
+        subtotal_usd = a_float(subtotal_usd)
+        descuento_bs = a_float(descuento_bs)
+        descuento_usd = (descuento_bs / tasa) if tasa else 0.0
+        total_neto_usd = max(subtotal_usd - descuento_usd, 0.0)
+        total_neto_bs = max((subtotal_usd * tasa) - descuento_bs, 0.0)
+        dia = (fecha_hora or "")[:10]
+
+        total_vendido_usd += total_neto_usd
+        total_vendido_bs += total_neto_bs
+        orden_ids.append(orden_id)
+        ventas_por_dia[dia]["total_usd"] += total_neto_usd
+        ventas_por_dia[dia]["total_bs"] += total_neto_bs
+        ventas_por_dia[dia]["ordenes"] += 1
+
+        ventas_por_orden.append(
+            {
+                "orden_id": orden_id,
+                "numero_orden": numero_orden,
+                "fecha_hora": fecha_hora,
+                "tipo": tipo,
+                "referencia": referencia,
+                "cliente": cliente,
+                "mesonera": mesonera,
+                "subtotal_usd": round(subtotal_usd, 2),
+                "descuento_bs": round(descuento_bs, 2),
+                "total_usd": round(total_neto_usd, 2),
+                "total_bs": round(total_neto_bs, 2),
+            }
+        )
+
+    cursor.execute(
+        """
+        SELECT
+            o.id,
+            o.numero_orden,
+            o.fecha_hora,
+            COALESCE(o.cliente, ''),
+            p.metodo,
+            p.monto,
+            COALESCE(p.referencia, ''),
+            COALESCE(p.fecha, '')
+        FROM pagos p
+        JOIN ordenes o ON p.orden_id = o.id
+        WHERE o.estado = 'cerrada'
+          AND o.fecha_hora >= ?
+          AND o.fecha_hora <= ?
+        ORDER BY o.fecha_hora ASC, o.id ASC, p.id ASC
+        """,
+        (inicio, fin),
+    )
+    pagos_db = cursor.fetchall()
+
+    pagos = []
+    metodos_pago = defaultdict(lambda: {"cantidad": 0, "total_bs": 0.0, "total_usd": 0.0})
+    total_pago_movil_bs = 0.0
+    total_efectivo_bs = 0.0
+    total_efectivo_usd = 0.0
+
+    for orden_id, numero_orden, fecha_hora, cliente, metodo, monto, referencia, fecha_pago in pagos_db:
+        metodo = normalizar_metodo_pago(metodo)
+        monto = a_float(monto)
+        equiv_bs, equiv_usd = convertir_pago_equivalente(metodo, monto, tasa)
+
+        if metodo == "bs_pago_movil":
+            total_pago_movil_bs += monto
+        elif metodo == "bs_efectivo":
+            total_efectivo_bs += monto
+        elif metodo == "usd":
+            total_efectivo_usd += monto
+
+        metodos_pago[metodo]["cantidad"] += 1
+        metodos_pago[metodo]["total_bs"] += equiv_bs
+        metodos_pago[metodo]["total_usd"] += equiv_usd
+
+        pagos.append(
+            {
+                "orden_id": orden_id,
+                "numero_orden": numero_orden,
+                "fecha_hora": fecha_hora,
+                "cliente": cliente,
+                "metodo": metodo,
+                "metodo_label": etiqueta_metodo_pago(metodo),
+                "monto": round(monto, 2),
+                "referencia": referencia,
+                "fecha_pago": fecha_pago,
+                "equivalente_bs": round(equiv_bs, 2),
+                "equivalente_usd": round(equiv_usd, 2),
+            }
+        )
+
+    cursor.execute(
+        """
+        SELECT oi.producto, COUNT(oi.id) as cantidad
+        FROM orden_items oi
+        JOIN ordenes o ON oi.orden_id = o.id
+        WHERE o.estado = 'cerrada'
+          AND o.fecha_hora >= ?
+          AND o.fecha_hora <= ?
+        GROUP BY oi.producto
+        ORDER BY cantidad DESC, oi.producto ASC
+        """,
+        (inicio, fin),
+    )
+    platos_vendidos = [
+        {"producto": producto, "cantidad": int(cantidad or 0)}
+        for producto, cantidad in cursor.fetchall()
+    ]
+
+    total_equiv_bs = total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
+    total_equiv_usd = total_efectivo_usd + (
+        ((total_pago_movil_bs + total_efectivo_bs) / tasa) if tasa else 0.0
+    )
+
+    ventas_por_dia_lista = []
+    for dia in sorted(ventas_por_dia):
+        datos = ventas_por_dia[dia]
+        ventas_por_dia_lista.append(
+            {
+                "fecha": dia,
+                "ordenes": datos["ordenes"],
+                "total_usd": round(datos["total_usd"], 2),
+                "total_bs": round(datos["total_bs"], 2),
+            }
+        )
+
+    metodos_pago_lista = []
+    for metodo, datos in sorted(metodos_pago.items()):
+        metodos_pago_lista.append(
+            {
+                "metodo": metodo,
+                "metodo_label": etiqueta_metodo_pago(metodo),
+                "cantidad": datos["cantidad"],
+                "total_bs": round(datos["total_bs"], 2),
+                "total_usd": round(datos["total_usd"], 2),
+            }
+        )
+
+    return {
+        "desde": desde,
+        "hasta": hasta,
+        "inicio": inicio,
+        "fin": fin,
+        "tasa": round(tasa, 2),
+        "total_vendido_usd": round(total_vendido_usd, 2),
+        "total_vendido_bs": round(total_vendido_bs, 2),
+        "total_pago_movil_bs": round(total_pago_movil_bs, 2),
+        "total_efectivo_bs": round(total_efectivo_bs, 2),
+        "total_efectivo_usd": round(total_efectivo_usd, 2),
+        "total_equiv_usd": round(total_equiv_usd, 2),
+        "total_equiv_bs": round(total_equiv_bs, 2),
+        "cantidad_ordenes": len(orden_ids),
+        "ventas_por_orden": ventas_por_orden,
+        "pagos": pagos,
+        "platos_vendidos": platos_vendidos,
+        "ventas_por_dia": ventas_por_dia_lista,
+        "metodos_pago": metodos_pago_lista,
+    }
+
+
+def xml_cell(valor):
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        return f"<c><v>{valor}</v></c>"
+    texto = html_lib.escape("" if valor is None else str(valor), quote=True)
+    return f'<c t="inlineStr"><is><t>{texto}</t></is></c>'
+
+
+def xml_sheet(filas):
+    rows = []
+    for idx, fila in enumerate(filas, start=1):
+        cells = "".join(xml_cell(valor) for valor in fila)
+        rows.append(f'<row r="{idx}">{cells}</row>')
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f"<sheetData>{''.join(rows)}</sheetData>"
+        "</worksheet>"
+    )
+
+
+def generar_xlsx(hojas):
+    salida = io.BytesIO()
+    with zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            + "".join(
+                f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                for i in range(1, len(hojas) + 1)
+            )
+            + "</Types>",
+        )
+        zf.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            "</Relationships>",
+        )
+        zf.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            "<sheets>"
+            + "".join(
+                f'<sheet name="{html_lib.escape(nombre, quote=True)}" sheetId="{i}" r:id="rId{i}"/>'
+                for i, (nombre, _) in enumerate(hojas, start=1)
+            )
+            + "</sheets></workbook>",
+        )
+        zf.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            + "".join(
+                f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>'
+                for i in range(1, len(hojas) + 1)
+            )
+            + "</Relationships>",
+        )
+        for i, (_, filas) in enumerate(hojas, start=1):
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", xml_sheet(filas))
+
+    salida.seek(0)
+    return salida.getvalue()
 
 
 @app.before_request
@@ -979,17 +1365,18 @@ def login():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+    """ + estilos_base() + """
     body { font-family: Arial; margin: 0; background: #f5f6fa; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .login-box { background: white; width: 92%; max-width: 380px; padding: 25px; border-radius: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.12); }
+    .login-box { background: white; width: 92%; max-width: 420px; padding: 28px; border-radius: 12px; box-shadow: 0 18px 40px rgba(127,29,29,0.18); }
     h1 { text-align: center; margin-top: 0; }
     input, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 6px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
-    button { width: 100%; padding: 14px; background: #27ae60; color: white; border: none; border-radius: 6px; font-size: 17px; margin-top: 10px; }
+    button { width: 100%; padding: 15px; background: linear-gradient(135deg, #15803d, #16a34a); color: white; border: none; border-radius: 8px; font-size: 18px; margin-top: 10px; }
     .error { background: #fdecea; color: #c0392b; padding: 10px; border-radius: 6px; margin-bottom: 10px; text-align: center; }
     </style>
     </head>
     <body>
     <div class="login-box">
-        <h1>Login Mesonera</h1>
+        <h1>🔐 Login Mesonera</h1>
     """
 
     if error:
@@ -1008,7 +1395,7 @@ def login():
             </select>
             <label>PIN</label>
             <input type="password" name="pin" required placeholder="Ingrese PIN">
-            <button type="submit">Entrar</button>
+            <button type="submit">🔐 Entrar</button>
         </form>
     </div>
     </body>
@@ -1071,33 +1458,34 @@ def index():
     links_admin = ""
     if usuario_es_admin_cierre():
         links_admin = """
-        <a href="/exportar">Exportar</a>
-        <a href="/cierre">Cierre</a>
-        <a href="/cerrar_jornada">Cerrar jornada</a>
+        <a href="/exportar">📤 Exportar</a>
+        <a href="/cierre">📊 Cierre</a>
+        <a href="/reportes">📊 Reportes</a>
+        <a href="/cerrar_jornada">🔒 Cerrar jornada</a>
         """
 
     html += barra_superior(
         f"""
-        <a href="/cambiar_tasa">Tasa</a>
+        <a href="/cambiar_tasa">💱 Tasa</a>
         {links_admin}
-        <a href="/menu">Menu</a>
-        <a href="/inventario">Inventario</a>
-        <a href="/compras">Compras</a>
-        <a href="/produccion">Produccion</a>
-        <a href="/cocina">Cocina</a>
+        <a href="/menu">📋 Menú</a>
+        <a href="/inventario">📦 Inventario</a>
+        <a href="/compras">🛒 Compras</a>
+        <a href="/produccion">🏭 Producción</a>
+        <a href="/cocina">🍳 Cocina</a>
         """
     )
 
     boton_cerrar_jornada = ""
     if usuario_es_admin_cierre():
         boton_cerrar_jornada = (
-            '<a href="/cerrar_jornada" class="btn-cierre-jornada">Confirmar cierre de jornada</a>'
+            '<a href="/cerrar_jornada" class="btn-cierre-jornada">🔒 Confirmar cierre de jornada</a>'
         )
 
     html += f"""
     <div class="contenedor">
         <div class="panel-izq">
-            <h3>Nueva Orden</h3>
+            <h3>🆕 Nueva Orden</h3>
             <form action="/crear_orden" method="post">
                 <label>Tipo</label>
                 <select name="tipo">
@@ -1107,16 +1495,16 @@ def index():
                 </select>
                 <label>Referencia</label>
                 <input name="referencia">
-                <label>Cliente</label>
+                <label>👤 Cliente</label>
                 <input name="cliente">
-                <button type="submit">Crear Orden</button>
+                <button type="submit">🆕 Crear Orden</button>
             </form>
             {boton_cerrar_jornada}
         </div>
         <div class="panel-der">
     """
 
-    html += "<h3>Ordenes activas</h3>"
+    html += "<h3>🧾 Ordenes activas</h3>"
     for o in ordenes:
         if o[6] != "abierta":
             continue
@@ -1126,17 +1514,17 @@ def index():
                 <b>Orden {texto_numero_orden(o[1])}</b><br>
                 {o[3]} - {o[4]}<br>
                 Cliente: {o[5] if o[5] else '-'}
-                <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
+                <div class="mesonera">👩 Mesonera: {o[9] if o[9] else '-'}</div>
             </div>
             <div>
                 <span class="estado" style="background:#e74c3c;">ABIERTA</span>
-                <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
-                <a href="/cobrar/{o[0]}" class="btn-cobrar">Cobrar</a>
+                <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
+                <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
             </div>
         </div>
         """
 
-    html += "<h3>En cocina</h3>"
+    html += "<h3>🍳 En cocina</h3>"
     for o in ordenes:
         if o[6] != "en cocina":
             continue
@@ -1146,16 +1534,16 @@ def index():
                 <b>Orden {texto_numero_orden(o[1])}</b><br>
                 {o[3]} - {o[4]}<br>
                 Cliente: {o[5] if o[5] else '-'}
-                <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
+                <div class="mesonera">👩 Mesonera: {o[9] if o[9] else '-'}</div>
             </div>
             <div>
                 <span class="estado" style="background:#e67e22;">EN COCINA</span>
-                <a href="/orden/{o[0]}" class="btn-ver">Ver</a>
+                <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
             </div>
         </div>
         """
 
-    html += "<h3>Historial del dia</h3>"
+    html += "<h3>📚 Historial del dia</h3>"
     for o in ordenes:
         if o[6] != "cerrada":
             continue
@@ -1164,9 +1552,9 @@ def index():
             <div style="font-weight:bold;">
                 Orden {texto_numero_orden(o[1])} - {o[5] if o[5] else '-'}
             </div>
-            <div class="mesonera">Mesonera: {o[9] if o[9] else '-'}</div>
+            <div class="mesonera">👩 Mesonera: {o[9] if o[9] else '-'}</div>
             <div style="margin-top:5px;">
-                <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">Ver detalle</a>
+                <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">🔍 Ver detalle</a>
             </div>
         </div>
         """
@@ -1235,10 +1623,10 @@ def menu():
     <body>
     """
 
-    html += barra_superior('<a href="/">Inicio</a>')
+    html += barra_superior('<a href="/">🏠 Inicio</a>')
     html += """
     <div class="contenido">
-    <h1>Menu</h1>
+    <h1>📋 Menú</h1>
     <div class="card">
         <form method="post">
             <input name="nombre" placeholder="Nombre del producto" required>
@@ -1251,10 +1639,10 @@ def menu():
 
     html += """
             </select>
-            <button>Agregar producto</button>
+            <button>➕ Agregar producto</button>
         </form>
     </div>
-    <h2>Productos</h2>
+    <h2>🍽️ Productos</h2>
     """
 
     for p in productos:
@@ -1263,14 +1651,14 @@ def menu():
             {p[1]} - ${p[2]} <br>
             <small>{p[3] if p[3] else ''}</small>
             <div class="acciones">
-                <a class="editar" href="/editar_producto/{p[0]}">Editar</a>
-                <a class="eliminar" href="/eliminar_producto/{p[0]}">Eliminar</a>
+                <a class="editar" href="/editar_producto/{p[0]}">✏️ Editar</a>
+                <a class="eliminar" href="/eliminar_producto/{p[0]}">🗑️ Eliminar</a>
             </div>
         </div>
         """
 
     html += """
-    <a href="/" class="volver">Volver</a>
+    <a href="/" class="volver">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -1311,14 +1699,14 @@ def inventario():
     """
 
     html += barra_superior(
-        '<a href="/">Inicio</a><a href="/compras">Compras</a><a href="/produccion">Produccion</a>'
+        '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a><a href="/produccion">🏭 Producción</a>'
     )
     html += """
     <div class="contenido">
-        <h1>Inventario</h1>
+        <h1>📦 Inventario</h1>
         <div class="accesos">
-            <a href="/productos_base" class="btn-acceso">Productos base</a>
-            <a href="/proveedores" class="btn-acceso">Proveedores</a>
+            <a href="/productos_base" class="btn-acceso">📦 Productos base</a>
+            <a href="/proveedores" class="btn-acceso">🤝 Proveedores</a>
         </div>
     """
 
@@ -1339,7 +1727,7 @@ def inventario():
             """
 
     html += """
-        <a href="/" class="volver">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -1540,11 +1928,11 @@ def compras():
     """
 
     html += barra_superior(
-        '<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/produccion">Produccion</a>'
+        '<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/produccion">🏭 Producción</a>'
     )
     html += """
     <div class="contenido">
-        <h1>Compras</h1>
+        <h1>🛒 Compras</h1>
         <div class="card">
     """
 
@@ -1591,7 +1979,7 @@ def compras():
                         </select>
                     </div>
                 </div>
-                <button type="submit" class="btn-agregar">Agregar</button>
+                <button type="submit" class="btn-agregar">➕ Agregar</button>
             </form>
         </div>
         <h2>Lista temporal</h2>
@@ -1618,7 +2006,7 @@ def compras():
                 <form method="post" style="margin:0;">
                     <input type="hidden" name="accion" value="eliminar">
                     <input type="hidden" name="indice" value="{idx}">
-                    <button type="submit" class="btn-eliminar">Eliminar</button>
+                    <button type="submit" class="btn-eliminar">🗑️ Eliminar</button>
                 </form>
             </div>
             """
@@ -1626,13 +2014,13 @@ def compras():
             <div class="resumen-lista">Items: {len(compras_temporales)} | Cantidad total: {round(cantidad_total, 2)}</div>
             <form method="post" style="margin-top:15px;">
                 <input type="hidden" name="accion" value="guardar">
-                <button type="submit" class="btn-guardar">Guardar compras</button>
+                <button type="submit" class="btn-guardar">💾 Guardar compras</button>
             </form>
         </div>
         """
 
     html += """
-        <h2>Ultimas compras guardadas</h2>
+        <h2>🧾 Ultimas compras guardadas</h2>
     """
 
     if not historial:
@@ -1654,7 +2042,7 @@ def compras():
             """
 
     html += """
-        <a href="/" class="volver">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
     </div>
     <script>
     const cantidad = document.getElementById("cantidad");
@@ -1727,11 +2115,11 @@ def proveedores():
     """
 
     html += barra_superior(
-        '<a href="/">Inicio</a><a href="/compras">Compras</a><a href="/productos_base">Productos base</a>'
+        '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a><a href="/productos_base">📦 Productos base</a>'
     )
     html += """
     <div class="contenido">
-        <h1>Proveedores</h1>
+        <h1>🤝 Proveedores</h1>
         <div class="card">
     """
 
@@ -1741,7 +2129,7 @@ def proveedores():
     html += """
             <form method="post">
                 <input name="nombre" placeholder="Nombre del proveedor" required>
-                <button type="submit">Agregar proveedor</button>
+                <button type="submit">➕ Agregar proveedor</button>
             </form>
         </div>
         <h2>Lista de proveedores</h2>
@@ -1762,7 +2150,7 @@ def proveedores():
             """
 
     html += """
-        <a href="/" class="volver">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -1830,11 +2218,11 @@ def productos_base():
     """
 
     html += barra_superior(
-        '<a href="/">Inicio</a><a href="/compras">Compras</a><a href="/proveedores">Proveedores</a>'
+        '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a><a href="/proveedores">🤝 Proveedores</a>'
     )
     html += """
     <div class="contenido">
-        <h1>Productos base</h1>
+        <h1>📦 Productos base</h1>
         <div class="card">
     """
 
@@ -1845,7 +2233,7 @@ def productos_base():
             <form method="post">
                 <input name="nombre" placeholder="Nombre del producto base" required>
                 <input name="unidad" placeholder="Unidad (kg, lt, und)" required>
-                <button type="submit">Agregar producto base</button>
+                <button type="submit">➕ Agregar producto base</button>
             </form>
         </div>
         <h2>Lista de productos base</h2>
@@ -1867,7 +2255,7 @@ def productos_base():
             """
 
     html += """
-        <a href="/" class="volver">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -2063,11 +2451,11 @@ def produccion():
     """
 
     html += barra_superior(
-        '<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/compras">Compras</a>'
+        '<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/compras">🛒 Compras</a>'
     )
     html += """
     <div class="contenido">
-        <h1>Produccion</h1>
+        <h1>🏭 Producción</h1>
         <div class="card">
     """
 
@@ -2107,10 +2495,10 @@ def produccion():
                 </div>
                 <input name="cantidad_origen" type="number" step="0.01" min="0.01" placeholder="Cantidad origen" required>
                 <input name="cantidad_resultado" type="number" step="0.01" min="0.01" placeholder="Cantidad resultado" required>
-                <button type="submit">Registrar produccion</button>
+                <button type="submit">🏭 Registrar producción</button>
             </form>
         </div>
-        <h2>Ultimas producciones</h2>
+        <h2>🏭 Ultimas producciones</h2>
     """
 
     if not historial:
@@ -2134,7 +2522,7 @@ def produccion():
             """
 
     html += """
-        <a href="/" class="volver">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -2345,7 +2733,7 @@ def orden(orden_id):
     if usuario_puede_reimprimir_cocina() and estado in ("en cocina", "cerrada"):
         boton_reimprimir = (
             f'<a href="/reimprimir_cocina/{orden_id}" class="btn-accion" '
-            'style="background:#8e44ad;">Reimprimir cocina</a>'
+            'style="background:#8e44ad;">🔁 Reimprimir cocina</a>'
         )
 
     html = f"""
@@ -2383,12 +2771,12 @@ def orden(orden_id):
     <body>
     """
 
-    html += barra_superior('<a href="/">Inicio</a>')
+    html += barra_superior('<a href="/">🏠 Inicio</a>')
 
     html += """
     <div class="contenedor">
     <div class="productos">
-    <h2>Agregar productos</h2>
+    <h2>📋 Agregar productos</h2>
     """
 
     if bloqueada_por_cierre:
@@ -2431,18 +2819,18 @@ def orden(orden_id):
     html += "</div>"
     html += f"""
     <div class="panel">
-        <h2>Orden {texto_numero_orden(o[1])}</h2>
+        <h2>🧾 Orden {texto_numero_orden(o[1])}</h2>
         <div class="acciones-superiores">
-            <a href="/editar_orden/{orden_id}" class="btn-accion editar">Editar orden</a>
-            <a href="/eliminar_orden/{orden_id}" class="btn-accion eliminar" onclick="return confirm('¿Eliminar esta orden completa?')">Eliminar orden</a>
+            <a href="/editar_orden/{orden_id}" class="btn-accion editar">✏️ Editar orden</a>
+            <a href="/eliminar_orden/{orden_id}" class="btn-accion eliminar" onclick="return confirm('¿Eliminar esta orden completa?')">🗑️ Eliminar orden</a>
         </div>
         <p>Tipo: {o[3]}</p>
         <p>Referencia: {o[4]}</p>
-        <p>Cliente: {o[5] if o[5] else '-'}</p>
-        <p>Mesonera: <b>{o[9] if o[9] else '-'}</b></p>
+        <p>👤 Cliente: {o[5] if o[5] else '-'}</p>
+        <p>👩 Mesonera: <b>{o[9] if o[9] else '-'}</b></p>
         <p>Estado: {estado}</p>
         <p>Observacion: {o[7] if o[7] else '-'}</p>
-        <h3>Productos</h3>
+        <h3>🍽️ Productos</h3>
     """
 
     for i in items:
@@ -2473,14 +2861,14 @@ def orden(orden_id):
 
     if not bloqueada_por_cierre:
         html += f"""
-        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">Enviar a cocina</a>
-        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">Facturar</a>
-        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">Cobrar</a>
+        <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">🍳 Enviar a cocina</a>
+        <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
+        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">💵 Cobrar</a>
         """
 
     html += f"""
-        <a href="/factura/{orden_id}" class="btn-accion" style="background:#16a085;">Ver factura</a>
-        <a href="/" class="btn-accion volver">Volver</a>
+        <a href="/factura/{orden_id}" class="btn-accion" style="background:#16a085;">🔍 Ver factura</a>
+        <a href="/" class="btn-accion volver">🏠 Volver</a>
     </div>
     </div>
     </body>
@@ -2830,6 +3218,8 @@ def cobrar(orden_id):
             error = "Metodo de pago 2 invalido"
         elif metodo2_val and (monto2_val == "" or monto2 <= 0):
             error = "Si usas pago 2, el monto debe ser mayor a 0"
+        elif not metodo2_val and monto2 > 0:
+            error = "Si colocas monto en pago 2, debes seleccionar el metodo"
         else:
             total_bs_final = max(total_bs - descuento, 0)
 
@@ -2837,26 +3227,30 @@ def cobrar(orden_id):
             total_pagado_bs = pago1_bs
             total_pagado_usd = pago1_usd
 
-            insertar_pago_2 = bool(metodo2_val and monto2_val != "" and monto2 > 0)
+            insertar_pago_1 = bool(metodo1_val and monto1 > 0)
+            insertar_pago_2 = bool(metodo2_val and monto2 > 0)
             if insertar_pago_2:
                 pago2_bs, pago2_usd = convertir_pago_equivalente(metodo2_val, monto2, tasa)
                 total_pagado_bs += pago2_bs
                 total_pagado_usd += pago2_usd
 
-            if total_pagado_bs + 0.0001 < total_bs_final:
+            if not insertar_pago_1:
+                error = "No hay pagos validos para registrar"
+            elif total_pagado_bs + 0.0001 < total_bs_final:
                 error = "Pago insuficiente"
             else:
                 fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
 
                 cursor.execute("DELETE FROM pagos WHERE orden_id = ?", (orden_id,))
 
-                cursor.execute(
-                    """
-                    INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (orden_id, metodo1_val, monto1, ref1_val, fecha),
-                )
+                if insertar_pago_1:
+                    cursor.execute(
+                        """
+                        INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (orden_id, metodo1_val, monto1, ref1_val, fecha),
+                    )
 
                 if insertar_pago_2:
                     cursor.execute(
@@ -2872,9 +3266,16 @@ def cobrar(orden_id):
                     UPDATE ordenes
                     SET estado='cerrada', descuento=?
                     WHERE id=?
+                      AND cierre_id IS NULL
+                      AND estado != 'cerrada'
                     """,
                     (descuento, orden_id),
                 )
+
+                if getattr(cursor, "rowcount", 0) == 0:
+                    conn.rollback()
+                    conn.close()
+                    return "Esta orden ya fue cerrada o pertenece a un cierre de jornada"
 
                 conn.commit()
                 conn.close()
@@ -2891,27 +3292,28 @@ def cobrar(orden_id):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+    {estilos_base()}
     body {{ font-family: Arial; margin: 0; background: #f5f6fa; }}
-    .contenedor {{ width: 95%; margin: 10px auto; background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
-    .titulo {{ text-align: center; font-size: 22px; font-weight: bold; }}
+    .contenedor {{ width: 95%; max-width: 720px; margin: 18px auto; background: white; padding: 22px; border-radius: 12px; box-shadow: var(--sombra); }}
+    .titulo {{ text-align: center; font-size: 28px; font-weight: 900; color:#7f1d1d; }}
     .numero {{ text-align: right; font-size: 18px; margin-bottom: 10px; }}
     .sep {{ border-top: 1px dashed #ccc; margin: 15px 0; }}
     .total {{ font-size: 20px; font-weight: bold; text-align: right; }}
     input, select {{ width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }}
     .btn {{ width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 5px; font-size: 18px; cursor: pointer; }}
-    .confirmar {{ background: #27ae60; color: white; }}
+    .confirmar {{ background: linear-gradient(135deg, #15803d, #16a34a); color: white; }}
     .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:15px; border-radius:5px; }}
     .error {{ background:#fdecea; color:#c0392b; padding:12px; border-radius:8px; margin-bottom:12px; }}
     </style>
     </head>
     <body>
     <div class="contenedor">
-    <div class="titulo">COBRAR</div>
+    <div class="titulo">💵 COBRAR</div>
     <div class="numero">Orden {texto_numero_orden(o[1])}</div>
     <div>
-    <b>Cliente:</b> {o[5] if o[5] else '-'}<br>
+    <b>👤 Cliente:</b> {o[5] if o[5] else '-'}<br>
     <b>Tipo:</b> {o[3]}<br>
-    <b>Mesonera:</b> {o[9] if o[9] else '-'}
+    <b>👩 Mesonera:</b> {o[9] if o[9] else '-'}
     </div>
     <div class="sep"></div>
     <div class="total">USD: ${round(total_usd, 2)}</div>
@@ -2920,7 +3322,7 @@ def cobrar(orden_id):
     <div class="sep"></div>
     {"<div class='error'>" + error + "</div>" if error else ""}
     <form method="post">
-    <h3>Pago 1</h3>
+    <h3>💳 Pago 1</h3>
     <select name="metodo1" id="metodo1" required>
         <option value="bs_pago_movil" {selected(metodo1_val, "bs_pago_movil")}>Pago movil en Bs</option>
         <option value="usd" {selected(metodo1_val, "usd")}>Efectivo USD</option>
@@ -2929,7 +3331,7 @@ def cobrar(orden_id):
     <input name="monto1" id="monto1" type="number" step="0.01" min="0.01" value="{monto1_val}" placeholder="Monto" required>
     <input name="ref1" value="{ref1_val}" placeholder="Referencia">
     <div class="sep"></div>
-    <h3>Pago 2 (opcional)</h3>
+    <h3>💳 Pago 2 (opcional)</h3>
     <select name="metodo2">
         <option value="" {selected(metodo2_val, "")}>-- ninguno --</option>
         <option value="usd" {selected(metodo2_val, "usd")}>Efectivo USD</option>
@@ -2941,9 +3343,9 @@ def cobrar(orden_id):
     <div class="sep"></div>
     <label>Descuento (Bs)</label>
     <input name="descuento" type="number" step="0.01" value="{descuento_val}">
-    <button class="btn confirmar">Confirmar pago</button>
+    <button class="btn confirmar">💵 Confirmar pago</button>
     </form>
-    <a href="/orden/{orden_id}" class="volver">Volver</a>
+    <a href="/orden/{orden_id}" class="volver">🏠 Volver</a>
     </div>
     <script>
     const metodo1 = document.getElementById("metodo1");
@@ -2963,6 +3365,7 @@ def cobrar(orden_id):
     </html>
     """
 
+
 @app.route("/cambiar_tasa", methods=["GET", "POST"])
 def cambiar_tasa():
     conn = get_connection()
@@ -2981,18 +3384,19 @@ def cambiar_tasa():
     <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}</style>
     </head>
-    <body style="font-family:Arial; padding:40px;">
-    <div style="margin-bottom:20px;">Usuario: <b>{usuario_activo()}</b> | <a href="/logout">Cerrar sesion</a></div>
-    <h2>Cambiar tasa</h2>
+    <body style="font-family:Arial; padding:24px;">
+    {barra_superior('<a href="/">🏠 Inicio</a>')}
+    <div class="card" style="max-width:520px; margin:24px auto; background:white; padding:24px; border-radius:12px;">
+    <h2>💱 Cambiar tasa</h2>
     <p>Tasa actual: <b>{tasa_actual}</b></p>
     <form method="post">
-        <input name="tasa" placeholder="Nueva tasa" style="padding:10px; width:200px;">
-        <br><br>
-        <button style="padding:10px 20px; background:#27ae60; color:white; border:none;">Guardar</button>
+        <input name="tasa" placeholder="Nueva tasa" style="padding:12px; width:100%;">
+        <button style="padding:12px 20px; background:#15803d; color:white; border:none; border-radius:8px;">💾 Guardar</button>
     </form>
-    <br><br>
-    <a href="/">Volver</a>
+    <a href="/" class="volver" style="background:#2c3e50; margin-top:15px;">🏠 Volver</a>
+    </div>
     </body>
     </html>
     """
@@ -3000,6 +3404,9 @@ def cambiar_tasa():
 
 @app.route("/exportar")
 def exportar():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -3100,8 +3507,381 @@ def exportar():
     return Response(generar(), mimetype="text/csv")
 
 
+@app.route("/reportes")
+def reportes():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
+    desde, hasta = fechas_reporte_desde_request()
+    conn = get_connection()
+    cursor = conn.cursor()
+    reporte = construir_reporte_rango(cursor, desde, hasta)
+    conn.close()
+
+    platos_html = ""
+    if reporte["platos_vendidos"]:
+        for plato in reporte["platos_vendidos"]:
+            platos_html += f"""
+            <tr>
+                <td>{html_lib.escape(plato["producto"])}</td>
+                <td>{plato["cantidad"]}</td>
+            </tr>
+            """
+    else:
+        platos_html = '<tr><td colspan="2">No hay platos vendidos en este rango.</td></tr>'
+
+    ordenes_html = ""
+    if reporte["ventas_por_orden"]:
+        for orden in reporte["ventas_por_orden"]:
+            ordenes_html += f"""
+            <tr>
+                <td>{texto_numero_orden(orden["numero_orden"])}</td>
+                <td>{orden["fecha_hora"]}</td>
+                <td>{html_lib.escape(orden["cliente"] or "-")}</td>
+                <td>{html_lib.escape(orden["mesonera"] or "-")}</td>
+                <td>$ {orden["total_usd"]}</td>
+                <td>Bs {orden["total_bs"]}</td>
+            </tr>
+            """
+    else:
+        ordenes_html = '<tr><td colspan="6">No hay ordenes cerradas en este rango.</td></tr>'
+
+    export_url = f"/exportar_reporte?{urlencode({'desde': desde, 'hasta': hasta})}"
+    dashboard_url = f"/dashboard?{urlencode({'desde': desde, 'hasta': hasta})}"
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; }}
+    .filtros, .metricas, .bloque {{ background:white; border-radius:12px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
+    .filtros form {{ display:grid; grid-template-columns: 1fr 1fr auto auto; gap:12px; align-items:end; }}
+    .metricas {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; }}
+    .metrica {{ background:#f8fafc; border:1px solid #e5e7eb; border-left:5px solid var(--rojo-china); padding:14px; border-radius:8px; }}
+    .metrica small {{ display:block; color:#64748b; font-weight:bold; margin-bottom:6px; }}
+    .metrica b {{ font-size:22px; }}
+    button, .btn-link {{ border:none; border-radius:8px; padding:13px 16px; color:white; background:#15803d; text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; }}
+    .btn-excel {{ background:#1d4ed8; }}
+    .btn-dashboard {{ background:#7f1d1d; }}
+    table {{ width:100%; border-collapse:collapse; background:white; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:11px; text-align:left; }}
+    th {{ background:#fff7ed; color:#7f1d1d; }}
+    .tabla-wrap {{ overflow:auto; }}
+    @media (max-width: 900px) {{
+        .filtros form, .metricas {{ grid-template-columns:1fr; }}
+    }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">🏠 Inicio</a><a href="/dashboard">📈 Dashboard</a>')}
+    <div class="contenido">
+        <h1>📊 Reportes</h1>
+        <div class="filtros">
+            <form method="get" action="/reportes">
+                <div>
+                    <label>Fecha desde</label>
+                    <input type="date" name="desde" value="{desde}" required>
+                </div>
+                <div>
+                    <label>Fecha hasta</label>
+                    <input type="date" name="hasta" value="{hasta}" required>
+                </div>
+                <button type="submit">🔍 Consultar</button>
+                <a class="btn-link btn-excel" href="{export_url}">📤 Exportar Excel</a>
+            </form>
+        </div>
+
+        <div class="metricas">
+            <div class="metrica"><small>Total vendido USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
+            <div class="metrica"><small>Pago movil Bs</small><b>Bs {reporte["total_pago_movil_bs"]}</b></div>
+            <div class="metrica"><small>Efectivo Bs</small><b>Bs {reporte["total_efectivo_bs"]}</b></div>
+            <div class="metrica"><small>Efectivo USD</small><b>$ {reporte["total_efectivo_usd"]}</b></div>
+            <div class="metrica"><small>Total equivalente USD</small><b>$ {reporte["total_equiv_usd"]}</b></div>
+            <div class="metrica"><small>Total equivalente Bs</small><b>Bs {reporte["total_equiv_bs"]}</b></div>
+            <div class="metrica"><small>Cantidad de ordenes</small><b>{reporte["cantidad_ordenes"]}</b></div>
+            <div class="metrica"><small>Tasa usada</small><b>Bs {reporte["tasa"]}</b></div>
+        </div>
+
+        <div class="bloque">
+            <h2>🧾 Ventas por orden</h2>
+            <div class="tabla-wrap">
+                <table>
+                    <thead><tr><th>Orden</th><th>Fecha</th><th>Cliente</th><th>Mesonera</th><th>Total USD</th><th>Total Bs</th></tr></thead>
+                    <tbody>{ordenes_html}</tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="bloque">
+            <h2>🍽️ Platos vendidos</h2>
+            <div class="tabla-wrap">
+                <table>
+                    <thead><tr><th>Producto</th><th>Cantidad</th></tr></thead>
+                    <tbody>{platos_html}</tbody>
+                </table>
+            </div>
+        </div>
+
+        <a class="btn-link btn-dashboard" href="{dashboard_url}">📈 Ver dashboard</a>
+    </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/exportar_reporte")
+def exportar_reporte():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
+    desde, hasta = fechas_reporte_desde_request()
+    conn = get_connection()
+    cursor = conn.cursor()
+    reporte = construir_reporte_rango(cursor, desde, hasta)
+    conn.close()
+
+    resumen = [
+        ["Concepto", "Valor"],
+        ["Desde", reporte["desde"]],
+        ["Hasta", reporte["hasta"]],
+        ["Tasa", reporte["tasa"]],
+        ["Total vendido USD", reporte["total_vendido_usd"]],
+        ["Total pago movil Bs", reporte["total_pago_movil_bs"]],
+        ["Total efectivo Bs", reporte["total_efectivo_bs"]],
+        ["Total efectivo USD", reporte["total_efectivo_usd"]],
+        ["Total equivalente USD", reporte["total_equiv_usd"]],
+        ["Total equivalente Bs", reporte["total_equiv_bs"]],
+        ["Cantidad de ordenes", reporte["cantidad_ordenes"]],
+    ]
+
+    ventas = [[
+        "Orden ID",
+        "Numero",
+        "Fecha",
+        "Tipo",
+        "Referencia",
+        "Cliente",
+        "Mesonera",
+        "Subtotal USD",
+        "Descuento Bs",
+        "Total USD",
+        "Total Bs",
+    ]]
+    for orden in reporte["ventas_por_orden"]:
+        ventas.append([
+            orden["orden_id"],
+            orden["numero_orden"] or "",
+            orden["fecha_hora"],
+            orden["tipo"],
+            orden["referencia"],
+            orden["cliente"],
+            orden["mesonera"],
+            orden["subtotal_usd"],
+            orden["descuento_bs"],
+            orden["total_usd"],
+            orden["total_bs"],
+        ])
+
+    pagos = [[
+        "Orden ID",
+        "Numero",
+        "Fecha orden",
+        "Cliente",
+        "Metodo",
+        "Monto",
+        "Referencia",
+        "Fecha pago",
+        "Equiv Bs",
+        "Equiv USD",
+    ]]
+    for pago in reporte["pagos"]:
+        pagos.append([
+            pago["orden_id"],
+            pago["numero_orden"] or "",
+            pago["fecha_hora"],
+            pago["cliente"],
+            pago["metodo_label"],
+            pago["monto"],
+            pago["referencia"],
+            pago["fecha_pago"],
+            pago["equivalente_bs"],
+            pago["equivalente_usd"],
+        ])
+
+    platos = [["Producto", "Cantidad"]]
+    for plato in reporte["platos_vendidos"]:
+        platos.append([plato["producto"], plato["cantidad"]])
+
+    contenido = generar_xlsx(
+        [
+            ("Resumen", resumen),
+            ("Ventas por orden", ventas),
+            ("Pagos", pagos),
+            ("Platos vendidos", platos),
+        ]
+    )
+
+    nombre = f"reporte_china_house_{desde}_a_{hasta}.xlsx"
+    respuesta = Response(
+        contenido,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    respuesta.headers["Content-Disposition"] = f'attachment; filename="{nombre}"'
+    return respuesta
+
+
+@app.route("/dashboard")
+def dashboard():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
+    desde, hasta = fechas_reporte_desde_request()
+    conn = get_connection()
+    cursor = conn.cursor()
+    reporte = construir_reporte_rango(cursor, desde, hasta)
+    conn.close()
+
+    max_ventas = max([dia["total_usd"] for dia in reporte["ventas_por_dia"]] or [1])
+    ventas_dia_html = ""
+    for dia in reporte["ventas_por_dia"]:
+        ancho = int((dia["total_usd"] / max_ventas) * 100) if max_ventas else 0
+        ventas_dia_html += f"""
+        <div class="fila-barra">
+            <div><b>{dia["fecha"]}</b><br>{dia["ordenes"]} ordenes · $ {dia["total_usd"]}</div>
+            <div class="barra"><span style="width:{ancho}%;"></span></div>
+        </div>
+        """
+    if not ventas_dia_html:
+        ventas_dia_html = "<div class='vacio'>No hay ventas por dia en este rango.</div>"
+
+    max_ordenes = max([dia["ordenes"] for dia in reporte["ventas_por_dia"]] or [1])
+    ordenes_dia_html = ""
+    for dia in reporte["ventas_por_dia"]:
+        ancho = int((dia["ordenes"] / max_ordenes) * 100) if max_ordenes else 0
+        ordenes_dia_html += f"""
+        <div class="fila-barra">
+            <div><b>{dia["fecha"]}</b><br>{dia["ordenes"]} ordenes cerradas</div>
+            <div class="barra"><span style="width:{ancho}%;"></span></div>
+        </div>
+        """
+    if not ordenes_dia_html:
+        ordenes_dia_html = "<div class='vacio'>No hay ordenes cerradas en este rango.</div>"
+
+    platos_html = ""
+    max_platos = max([plato["cantidad"] for plato in reporte["platos_vendidos"]] or [1])
+    for plato in reporte["platos_vendidos"][:12]:
+        ancho = int((plato["cantidad"] / max_platos) * 100) if max_platos else 0
+        platos_html += f"""
+        <div class="fila-barra">
+            <div><b>{html_lib.escape(plato["producto"])}</b><br>{plato["cantidad"]} vendidos</div>
+            <div class="barra"><span style="width:{ancho}%;"></span></div>
+        </div>
+        """
+    if not platos_html:
+        platos_html = "<div class='vacio'>No hay platos vendidos en este rango.</div>"
+
+    metodos_html = ""
+    max_metodos = max([metodo["total_bs"] for metodo in reporte["metodos_pago"]] or [1])
+    for metodo in reporte["metodos_pago"]:
+        ancho = int((metodo["total_bs"] / max_metodos) * 100) if max_metodos else 0
+        metodos_html += f"""
+        <div class="fila-barra">
+            <div><b>{metodo["metodo_label"]}</b><br>{metodo["cantidad"]} pagos · Bs {metodo["total_bs"]} · $ {metodo["total_usd"]}</div>
+            <div class="barra"><span style="width:{ancho}%;"></span></div>
+        </div>
+        """
+    if not metodos_html:
+        metodos_html = "<div class='vacio'>No hay pagos en este rango.</div>"
+
+    reportes_url = f"/reportes?{urlencode({'desde': desde, 'hasta': hasta})}"
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; }}
+    .filtros, .panel-dashboard {{ background:white; border-radius:12px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
+    .filtros form {{ display:grid; grid-template-columns: 1fr 1fr auto auto; gap:12px; align-items:end; }}
+    .grid-dashboard {{ display:grid; grid-template-columns: repeat(2, 1fr); gap:16px; }}
+    .resumen-top {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; margin-bottom:16px; }}
+    .metrica {{ background:#fff7ed; border-left:5px solid var(--rojo-china); padding:14px; border-radius:8px; }}
+    .metrica small {{ display:block; color:#64748b; font-weight:bold; margin-bottom:6px; }}
+    .metrica b {{ font-size:22px; }}
+    button, .btn-link {{ border:none; border-radius:8px; padding:13px 16px; color:white; background:#15803d; text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; }}
+    .btn-reportes {{ background:#1d4ed8; }}
+    .fila-barra {{ display:grid; grid-template-columns: 240px 1fr; gap:12px; align-items:center; padding:10px 0; border-bottom:1px solid #e5e7eb; }}
+    .fila-barra:last-child {{ border-bottom:none; }}
+    .barra {{ height:18px; background:#fee2e2; border-radius:999px; overflow:hidden; }}
+    .barra span {{ display:block; height:100%; background:linear-gradient(90deg, var(--rojo-china), var(--dorado)); }}
+    .vacio {{ color:#64748b; padding:12px 0; }}
+    @media (max-width: 900px) {{
+        .filtros form, .grid-dashboard, .resumen-top, .fila-barra {{ grid-template-columns:1fr; }}
+    }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">🏠 Inicio</a><a href="/reportes">📊 Reportes</a>')}
+    <div class="contenido">
+        <h1>📈 Dashboard</h1>
+        <div class="filtros">
+            <form method="get" action="/dashboard">
+                <div>
+                    <label>Fecha desde</label>
+                    <input type="date" name="desde" value="{desde}" required>
+                </div>
+                <div>
+                    <label>Fecha hasta</label>
+                    <input type="date" name="hasta" value="{hasta}" required>
+                </div>
+                <button type="submit">🔍 Consultar</button>
+                <a class="btn-link btn-reportes" href="{reportes_url}">📊 Ver reporte</a>
+            </form>
+        </div>
+
+        <div class="resumen-top">
+            <div class="metrica"><small>Total facturado USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
+            <div class="metrica"><small>Total facturado Bs</small><b>Bs {reporte["total_vendido_bs"]}</b></div>
+            <div class="metrica"><small>Ordenes cerradas</small><b>{reporte["cantidad_ordenes"]}</b></div>
+            <div class="metrica"><small>Total cobrado USD equiv.</small><b>$ {reporte["total_equiv_usd"]}</b></div>
+        </div>
+
+        <div class="grid-dashboard">
+            <div class="panel-dashboard">
+                <h2>📅 Ventas por dia</h2>
+                {ventas_dia_html}
+            </div>
+            <div class="panel-dashboard">
+                <h2>🧾 Cantidad de ordenes por dia</h2>
+                {ordenes_dia_html}
+            </div>
+            <div class="panel-dashboard">
+                <h2>🍽️ Platos mas vendidos</h2>
+                {platos_html}
+            </div>
+            <div class="panel-dashboard">
+                <h2>💳 Metodos de pago</h2>
+                {metodos_html}
+            </div>
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
+
 @app.route("/cierre")
 def cierre():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
     conn = get_connection()
     cursor = conn.cursor()
     resumen = construir_resumen_cierre(cursor)
@@ -3122,7 +3902,7 @@ def cierre():
 
     boton = ""
     if ordenes_activas == 0 and cantidad_ordenes_cerradas > 0:
-        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:#c0392b;">Confirmar cierre de jornada</a>'
+        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:#c0392b;">🔒 Confirmar cierre de jornada</a>'
 
     auditoria_html = ""
     if not resumen["auditoria_pagos"]:
@@ -3171,8 +3951,9 @@ def cierre():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+    {estilos_base()}
     body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
-    .card {{ max-width: 980px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
+    .card {{ max-width: 980px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: var(--sombra); }}
     .bloque {{ background: #f8f9fb; padding: 14px; border-radius: 10px; margin-bottom: 14px; }}
     .titulo-bloque {{ font-size: 18px; font-weight: bold; margin-bottom: 10px; }}
     .dato {{ margin: 6px 0; font-size: 17px; }}
@@ -3186,53 +3967,53 @@ def cierre():
     </head>
     <body>
     <div class="card">
-        <h1>Cierre del Dia</h1>
+        <h1>📊 Cierre del Dia</h1>
         {mensaje}
 
         <div class="dato"><b>Inicio de jornada:</b> {resumen["inicio_jornada"]}</div>
         <div class="dato"><b>Ordenes cerradas:</b> {cantidad_ordenes_cerradas}</div>
 
         <div class="bloque">
-            <div class="titulo-bloque">VENTAS</div>
+            <div class="titulo-bloque">💵 VENTAS</div>
             <div class="dato"><b>Total vendido en USD:</b> ${round(resumen["total_ventas_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">COBRADO</div>
+            <div class="titulo-bloque">💳 COBRADO</div>
             <div class="dato"><b>Pago movil en Bs:</b> Bs {round(resumen["total_pago_movil_bs"], 2)}</div>
             <div class="dato"><b>Efectivo en Bs:</b> Bs {round(resumen["total_efectivo_bs"], 2)}</div>
             <div class="dato"><b>Efectivo en USD:</b> $ {round(resumen["total_efectivo_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">TASA</div>
+            <div class="titulo-bloque">💱 TASA</div>
             <div class="dato"><b>Tasa actual:</b> Bs {round(resumen["tasa"], 2)}</div>
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">EQUIVALENTES</div>
+            <div class="titulo-bloque">🧮 EQUIVALENTES</div>
             <div class="dato"><b>Total cobrado equivalente en Bs:</b> Bs {round(resumen["total_cobrado_equiv_bs"], 2)}</div>
             <div class="dato"><b>Total cobrado equivalente en USD:</b> $ {round(resumen["total_cobrado_equiv_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">DIFERENCIA</div>
+            <div class="titulo-bloque">⚖️ DIFERENCIA</div>
             <div class="dato"><b>Diferencia en USD entre vendido y cobrado:</b> $ {round(resumen["diferencia_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">AUDITORIA DE PAGOS</div>
+            <div class="titulo-bloque">🔍 AUDITORIA DE PAGOS</div>
             {auditoria_html}
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">PLATOS VENDIDOS EN LA JORNADA</div>
+            <div class="titulo-bloque">🍽️ PLATOS VENDIDOS EN LA JORNADA</div>
             {productos_html}
         </div>
 
         {boton}
         <br>
-        <a href="/" class="volver">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -3241,6 +4022,9 @@ def cierre():
 
 @app.route("/cerrar_jornada")
 def cerrar_jornada():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
     resumen = resumen_cierre_pendiente()
 
     if resumen["ordenes_activas"] > 0:
@@ -3249,25 +4033,27 @@ def cerrar_jornada():
         <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>{estilos_base()}</style>
         </head>
         <body style="font-family:Arial; padding:20px;">
-        <h1>No se puede cerrar la jornada</h1>
+        <h1>🔒 No se puede cerrar la jornada</h1>
         <p>Hay {resumen['ordenes_activas']} ordenes activas pendientes.</p>
-        <a href="/">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
         </body>
         </html>
         """
 
     if resumen["cantidad_ordenes_cerradas"] == 0:
-        return """
+        return f"""
         <html>
         <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>{estilos_base()}</style>
         </head>
         <body style="font-family:Arial; padding:20px;">
-        <h1>No hay ordenes cerradas para esta jornada</h1>
-        <a href="/">Volver</a>
+        <h1>📊 No hay ordenes cerradas para esta jornada</h1>
+        <a href="/" class="volver">🏠 Volver</a>
         </body>
         </html>
         """
@@ -3324,6 +4110,7 @@ def cerrar_jornada():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+    {estilos_base()}
     body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
     .card {{ max-width: 760px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
     h1 {{ margin-top: 0; }}
@@ -3333,7 +4120,7 @@ def cerrar_jornada():
     </head>
     <body>
     <div class="card">
-        <h1>CIERRE REALIZADO</h1>
+        <h1>✅ CIERRE REALIZADO</h1>
         <p>Cierre #{cierre_id}</p>
         <p>Inicio de jornada: {resumen["inicio_jornada"]}</p>
         <p>Fecha de cierre: {fecha_cierre}</p>
@@ -3341,9 +4128,9 @@ def cerrar_jornada():
         <div class="total">Total vendido: $ {round(resumen["total_ventas_usd"], 2)}</div>
         <div class="total">Total cobrado equivalente: Bs {round(resumen["total_cobrado_equiv_bs"], 2)} / $ {round(resumen["total_cobrado_equiv_usd"], 2)}</div>
         <div class="total">Diferencia: $ {round(resumen["diferencia_usd"], 2)}</div>
-        <h2>Productos vendidos</h2>
+        <h2>🍽️ Productos vendidos</h2>
         <ul>{productos_html}</ul>
-        <a href="/" class="volver">Volver</a>
+        <a href="/" class="volver">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -3377,6 +4164,7 @@ def pantalla_cocina():
     <meta http-equiv="refresh" content="5">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+        """ + estilos_base() + """
         body { font-family: Arial; background:black; color:white; font-size:22px; margin:0; }
         .topbar { padding:12px 16px; background:#111; display:flex; justify-content:space-between; align-items:center; gap:10px; }
         .topbar a { color:white; text-decoration:none; background:#2c3e50; padding:10px 12px; border-radius:5px; }
@@ -3406,14 +4194,14 @@ def pantalla_cocina():
     <div class="topbar">
         <div>Usuario: <b>""" + usuario_activo() + """</b></div>
         <div style="display:flex; gap:8px;">
-            <a href="/">Inicio</a>
-            <a href="/logout">Cerrar sesion</a>
+            <a href="/">🏠 Inicio</a>
+            <a href="/logout">🚪 Cerrar sesión</a>
         </div>
     </div>
-    <h1>COCINA</h1>
+    <h1>🍳 COCINA</h1>
     <div class="container">
         <div class="col">
-            <h2>ESTACION ARROZ</h2>
+            <h2>🍚 ESTACION ARROZ</h2>
     """
 
     for o in ordenes:
@@ -3436,7 +4224,7 @@ def pantalla_cocina():
         <div class="orden {color_class}">
             <h2>Orden {texto_numero_orden(o[1])}</h2>
             <p>{o[2]} - {o[3]}</p>
-            <p class="mesonera">Mesonera: {(o[5] or '-').upper()}</p>
+            <p class="mesonera">👩 Mesonera: {(o[5] or '-').upper()}</p>
             <p>{int(minutos)} min</p>
         """
 
@@ -3445,7 +4233,7 @@ def pantalla_cocina():
 
         bloque += f"""
             <a href="/listo/{o[0]}">
-                <button class="btn">LISTO</button>
+                <button class="btn">✅ LISTO</button>
             </a>
         </div>
         """
@@ -3459,7 +4247,7 @@ def pantalla_cocina():
     html += """
         </div>
         <div class="col">
-            <h2>ESTACION CALIENTE</h2>
+            <h2>🔥 ESTACION CALIENTE</h2>
     """
     html += caliente_html
     html += f"""
