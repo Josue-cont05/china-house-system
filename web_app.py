@@ -3500,8 +3500,6 @@ def cobrar(orden_id):
 
                 conn.commit()
                 conn.close()
-                if usuario_es_admin_cierre():
-                    return redirect("/cierre")
                 return redirect("/")
 
     conn.close()
