@@ -836,6 +836,7 @@ def construir_reporte_rango(cursor, desde, hasta):
             COALESCE(o.referencia, ''),
             COALESCE(o.cliente, ''),
             COALESCE(o.descuento, 0),
+            o.cierre_id,
             COALESCE(u.nombre, ''),
             COALESCE(SUM(oi.precio), 0)
         FROM ordenes o
@@ -845,7 +846,7 @@ def construir_reporte_rango(cursor, desde, hasta):
           AND o.fecha_hora >= ?
           AND o.fecha_hora <= ?
         GROUP BY o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia,
-                 o.cliente, o.descuento, u.nombre
+                 o.cliente, o.descuento, o.cierre_id, u.nombre
         ORDER BY o.fecha_hora ASC, o.id ASC
         """,
         (inicio, fin),
@@ -867,6 +868,7 @@ def construir_reporte_rango(cursor, desde, hasta):
             referencia,
             cliente,
             descuento_bs,
+            cierre_id,
             mesonera,
             subtotal_usd,
         ) = orden
@@ -892,6 +894,7 @@ def construir_reporte_rango(cursor, desde, hasta):
                 "tipo": tipo,
                 "referencia": referencia,
                 "cliente": cliente,
+                "cierre_id": cierre_id,
                 "mesonera": mesonera,
                 "subtotal_usd": round(subtotal_usd, 2),
                 "descuento_bs": round(descuento_bs, 2),
@@ -3631,6 +3634,53 @@ def exportar():
     return Response(generar(), mimetype="text/csv")
 
 
+@app.route("/revertir_orden_cierre/<int:orden_id>", methods=["POST"])
+def revertir_orden_cierre(orden_id):
+    clave = request.form.get("clave", "").strip()
+    if clave != CLAVE_SUPERVISOR:
+        return "Clave incorrecta"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT estado, cierre_id
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    orden_row = cursor.fetchone()
+
+    if not orden_row:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado, cierre_id = orden_row
+    if cierre_id is None:
+        conn.close()
+        return "La orden no pertenece a ningun cierre"
+
+    if estado != "cerrada":
+        conn.close()
+        return "Solo se pueden revertir ordenes cerradas"
+
+    cursor.execute(
+        """
+        UPDATE ordenes
+        SET cierre_id = NULL
+        WHERE id=?
+          AND cierre_id IS NOT NULL
+          AND estado='cerrada'
+        """,
+        (orden_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    return redirect(request.form.get("volver") or "/reportes")
+
+
 @app.route("/reportes")
 def reportes():
     if not usuario_es_admin_cierre():
@@ -3657,6 +3707,16 @@ def reportes():
     ordenes_html = ""
     if reporte["ventas_por_orden"]:
         for orden in reporte["ventas_por_orden"]:
+            accion_revertir = "-"
+            if orden["cierre_id"] is not None:
+                volver_url = f"/reportes?{urlencode({'desde': desde, 'hasta': hasta})}"
+                accion_revertir = f"""
+                <form method="post" action="/revertir_orden_cierre/{orden["orden_id"]}" class="form-revertir-cierre" style="margin:0;">
+                    <input type="hidden" name="clave" value="">
+                    <input type="hidden" name="volver" value="{volver_url}">
+                    <button type="submit" style="background:#7f1d1d; color:white; border:none; border-radius:8px; padding:9px 11px; cursor:pointer; width:auto; min-height:38px;">🧨 Revertir orden</button>
+                </form>
+                """
             ordenes_html += f"""
             <tr>
                 <td>{texto_numero_orden(orden["numero_orden"])}</td>
@@ -3665,10 +3725,12 @@ def reportes():
                 <td>{html_lib.escape(orden["mesonera"] or "-")}</td>
                 <td>$ {orden["total_usd"]}</td>
                 <td>Bs {orden["total_bs"]}</td>
+                <td>{orden["cierre_id"] if orden["cierre_id"] is not None else "-"}</td>
+                <td>{accion_revertir}</td>
             </tr>
             """
     else:
-        ordenes_html = '<tr><td colspan="6">No hay ordenes cerradas en este rango.</td></tr>'
+        ordenes_html = '<tr><td colspan="8">No hay ordenes cerradas en este rango.</td></tr>'
 
     export_url = f"/exportar_reporte?{urlencode({'desde': desde, 'hasta': hasta})}"
     dashboard_url = f"/dashboard?{urlencode({'desde': desde, 'hasta': hasta})}"
@@ -3734,7 +3796,7 @@ def reportes():
             <h2>🧾 Ventas por orden</h2>
             <div class="tabla-wrap">
                 <table>
-                    <thead><tr><th>Orden</th><th>Fecha</th><th>Cliente</th><th>Mesonera</th><th>Total USD</th><th>Total Bs</th></tr></thead>
+                    <thead><tr><th>Orden</th><th>Fecha</th><th>Cliente</th><th>Mesonera</th><th>Total USD</th><th>Total Bs</th><th>Cierre</th><th>Accion</th></tr></thead>
                     <tbody>{ordenes_html}</tbody>
                 </table>
             </div>
@@ -3752,6 +3814,22 @@ def reportes():
 
         <a class="btn-link btn-dashboard" href="{dashboard_url}">📈 Ver dashboard</a>
     </div>
+    <script>
+    document.querySelectorAll(".form-revertir-cierre").forEach(function(form) {{
+        form.addEventListener("submit", function(event) {{
+            if (!confirm("¿Revertir esta orden del cierre? No se eliminaran pagos ni productos.")) {{
+                event.preventDefault();
+                return;
+            }}
+            const clave = prompt("Clave de supervisor");
+            if (!clave || !clave.trim()) {{
+                event.preventDefault();
+                return;
+            }}
+            form.querySelector('input[name="clave"]').value = clave.trim();
+        }});
+    }});
+    </script>
     </body>
     </html>
     """
