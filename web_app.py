@@ -364,17 +364,11 @@ def crear_usuarios_iniciales():
 
     usuarios = [
         ("Gaby", "2807"),
-        ("Julissa", "2402"),
+        ("Julissa", "2002"),
         ("Monica", "1310"),
         ("Josue", "0510"),
-        ("Fabian", "2106"),
+        ("Fabian", "2107"),
         ("Oscar", "1810"),
-        ("Isabela", "0212"),
-        ("Armando", "0000"),
-        ("Emmanuel", "0000"),
-        ("Ismaldo", "0000"),
-        ("Sofia", "3007"),
-        
     ]
 
     for nombre, pin in usuarios:
@@ -1306,6 +1300,7 @@ def init_db():
     asegurar_columna("ordenes", "usuario_id", "INTEGER")
     asegurar_columna("ordenes", "cierre_id", "INTEGER")
     asegurar_columna("ordenes", "reimpresion_token", "TEXT")
+    asegurar_columna("ordenes", "factura_reimpresion_token", "TEXT")
     asegurar_columna_facturar()
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
@@ -2962,6 +2957,11 @@ def orden(orden_id):
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">🍳 Enviar a cocina</a>
         <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar"{advertencia_cobro}>💵 Cobrar</a>
+        """
+
+    if not bloqueada_por_cierre and items and estado in ("abierta", "en cocina", "cerrada"):
+        html += f"""
+        <a href="/reimprimir_factura/{orden_id}" class="btn-accion" style="background:#d35400;">🧾 Reimprimir factura</a>
         """
 
     html += f"""
@@ -4809,7 +4809,8 @@ def facturas_pendientes():
 
         cursor.execute(
             """
-            SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre
+            SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
+                   o.factura_reimpresion_token
             FROM ordenes o
             LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
@@ -4839,6 +4840,7 @@ def facturas_pendientes():
                     "cliente": o[3],
                     "referencia": o[4],
                     "usuario": o[5] if o[5] else "N/A",
+                    "evento_impresion": f"{o[0]}-{o[6] if o[6] else 'base'}",
                     "items": [f"{i[0]} - ${i[1]}" for i in items],
                     "total": sum(i[1] for i in items),
                 }
@@ -4857,8 +4859,45 @@ def activar_factura(orden_id):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "UPDATE ordenes SET facturar=1 WHERE id=? AND cierre_id IS NULL",
+        "UPDATE ordenes SET facturar=1, factura_reimpresion_token=NULL WHERE id=? AND cierre_id IS NULL",
         (orden_id,),
+    )
+    conn.commit()
+    conn.close()
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/reimprimir_factura/<int:orden_id>")
+def reimprimir_factura(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, cierre_id
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    orden = cursor.fetchone()
+
+    if not orden:
+        conn.close()
+        return "Orden no encontrada"
+
+    if orden[1] is not None:
+        conn.close()
+        return "No se puede reimprimir una factura archivada en cierre de jornada"
+
+    token = ahora_venezuela().strftime("%Y%m%d%H%M%S%f")
+    cursor.execute(
+        """
+        UPDATE ordenes
+        SET facturar=1, factura_reimpresion_token=?
+        WHERE id=?
+        """,
+        (token, orden_id),
     )
     conn.commit()
     conn.close()
