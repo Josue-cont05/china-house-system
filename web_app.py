@@ -19,7 +19,16 @@ except Exception:
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
 METODOS_PAGO_VALIDOS = {"bs_pago_movil", "pago_movil", "bs_efectivo", "usd"}
-SABORES_REFRESCO = ["Coca Cola", "Chinotto", "Naranja", "Uva", "Frecolita"]
+SABORES_REFRESCO = [
+    "Coca Cola",
+    "Chinotto",
+    "Frescolita",
+    "Naranja",
+    "Uva",
+    "Manzana",
+    "7Up",
+    "Pepsi",
+]
 ETIQUETAS_METODO_PAGO = {
     "bs_pago_movil": "Pago movil en Bs",
     "pago_movil": "Pago movil en Bs",
@@ -231,10 +240,15 @@ def es_producto_refresco(nombre):
 
 def normalizar_sabor_refresco(sabor):
     sabor_limpio = (sabor or "").strip()
+    if not sabor_limpio or len(sabor_limpio) > 40:
+        return ""
+
     for opcion in SABORES_REFRESCO:
         if sabor_limpio.lower() == opcion.lower():
             return opcion
-    return ""
+
+    sabor_limpio = sabor_limpio.replace("<", "").replace(">", "")
+    return sabor_limpio.strip()
 
 
 def etiqueta_metodo_pago(metodo):
@@ -1120,12 +1134,27 @@ def generar_xlsx(hojas):
 @app.before_request
 def proteger_sistema():
     rutas_publicas = {"login", "static", "ordenes_cocina", "facturas_pendientes"}
+    rutas_admin = {
+        "cierre",
+        "cerrar_jornada",
+        "cerrar_dia",
+        "exportar",
+        "reportes",
+        "exportar_reporte",
+        "dashboard",
+        "revertir_orden_cierre",
+        "eliminar_orden",
+        "produccion",
+    }
 
     if request.endpoint in rutas_publicas:
         return
 
     if not session.get("usuario_id"):
         return redirect("/login")
+
+    if request.endpoint in rutas_admin and not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
 
 
 def init_db():
@@ -1479,6 +1508,7 @@ def index():
         <a href="/cierre">📊 Cierre</a>
         <a href="/reportes">📊 Reportes</a>
         <a href="/cerrar_jornada">🔒 Cerrar jornada</a>
+        <a href="/produccion">🏭 Producción</a>
         """
 
     html += barra_superior(
@@ -1488,7 +1518,6 @@ def index():
         <a href="/menu">📋 Menú</a>
         <a href="/inventario">📦 Inventario</a>
         <a href="/compras">🛒 Compras</a>
-        <a href="/produccion">🏭 Producción</a>
         <a href="/cocina">🍳 Cocina</a>
         """
     )
@@ -1536,7 +1565,7 @@ def index():
             <div>
                 <span class="estado" style="background:#e74c3c;">ABIERTA</span>
                 <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
-                <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
+                <a href="/cobrar/{o[0]}" class="btn-cobrar" onclick="return confirm('⚠️ Esta orden aún no ha sido enviada a cocina. ¿Seguro que quieres continuar con el cobro?')">💵 Cobrar</a>
             </div>
         </div>
         """
@@ -1556,6 +1585,7 @@ def index():
             <div>
                 <span class="estado" style="background:#e67e22;">EN COCINA</span>
                 <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
+                <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
             </div>
         </div>
         """
@@ -1715,8 +1745,9 @@ def inventario():
     <body>
     """
 
+    produccion_link = '<a href="/produccion">🏭 Producción</a>' if usuario_es_admin_cierre() else ""
     html += barra_superior(
-        '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a><a href="/produccion">🏭 Producción</a>'
+        f'<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a>{produccion_link}'
     )
     html += """
     <div class="contenido">
@@ -1944,8 +1975,9 @@ def compras():
     <body>
     """
 
+    produccion_link = '<a href="/produccion">🏭 Producción</a>' if usuario_es_admin_cierre() else ""
     html += barra_superior(
-        '<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/produccion">🏭 Producción</a>'
+        f'<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a>{produccion_link}'
     )
     html += """
     <div class="contenido">
@@ -2753,6 +2785,13 @@ def orden(orden_id):
             'style="background:#8e44ad;">🔁 Reimprimir cocina</a>'
         )
 
+    advertencia_cobro = ""
+    if estado == "abierta":
+        advertencia_cobro = (
+            ' onclick="return confirm(\'⚠️ Esta orden aún no ha sido enviada a cocina. '
+            '¿Seguro que quieres continuar con el cobro?\')"'
+        )
+
     html = f"""
     <html>
     <head>
@@ -2779,9 +2818,20 @@ def orden(orden_id):
     .volver {{ background: #7f8c8d; }}
     .total {{ font-size: 20px; margin-top: 10px; }}
     .info-cierre {{ background:#fff3cd; border:1px solid #f1c40f; padding:12px; border-radius:8px; margin-bottom:15px; }}
+    .modal-refresco {{ position:fixed; inset:0; background:rgba(17,24,39,0.62); display:none; align-items:center; justify-content:center; padding:18px; z-index:1000; }}
+    .modal-refresco.activo {{ display:flex; }}
+    .modal-contenido {{ width:min(620px, 100%); background:white; border-radius:12px; padding:20px; box-shadow:0 20px 46px rgba(0,0,0,0.28); }}
+    .modal-top {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }}
+    .modal-top h2 {{ margin:0; color:#7f1d1d; }}
+    .modal-top p {{ margin:5px 0 0; color:#4b5563; }}
+    .cerrar-modal {{ width:auto; min-height:44px; padding:8px 12px; border:none; border-radius:8px; background:#7f8c8d; color:white; cursor:pointer; }}
+    .sabores-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
+    .sabor-btn {{ min-height:64px; padding:12px; border:none; border-radius:8px; background:#27ae60; color:white; font-size:17px; font-weight:900; cursor:pointer; }}
+    .sabor-btn.otro {{ background:#8e44ad; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; }}
+        .sabores-grid {{ grid-template-columns:1fr 1fr; }}
     }}
     </style>
     </head>
@@ -2827,7 +2877,7 @@ def orden(orden_id):
             for p in ordenados:
                 if es_producto_refresco(p[1]):
                     html += f"""
-                    <button class="btn btn-refresco" type="button" data-url="/agregar/{orden_id}/{p[0]}">
+                    <button class="btn btn-refresco" type="button" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}">
                         {p[1]} - ${p[2]}
                     </button>
                     """
@@ -2896,13 +2946,25 @@ def orden(orden_id):
         html += f"""
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">🍳 Enviar a cocina</a>
         <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
-        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">💵 Cobrar</a>
+        <a href="/cobrar/{orden_id}" class="btn-accion cobrar"{advertencia_cobro}>💵 Cobrar</a>
         """
 
     html += f"""
         <a href="/factura/{orden_id}" class="btn-accion" style="background:#16a085;">🔍 Ver factura</a>
         <a href="/" class="btn-accion volver">🏠 Volver</a>
     </div>
+    </div>
+    <div id="modal-refresco" class="modal-refresco" aria-hidden="true">
+        <div class="modal-contenido">
+            <div class="modal-top">
+                <div>
+                    <h2>🥤 Seleccionar sabor</h2>
+                    <p id="modal-refresco-producto">Refresco</p>
+                </div>
+                <button id="cerrar-modal-refresco" class="cerrar-modal" type="button">✖</button>
+            </div>
+            <div id="sabores-refresco-grid" class="sabores-grid"></div>
+        </div>
     </div>
     <script>
     function pedirClaveSupervisor() {{
@@ -2913,37 +2975,66 @@ def orden(orden_id):
         return clave.trim();
     }}
 
-    const saboresRefresco = ["Coca Cola", "Chinotto", "Naranja", "Uva", "Frecolita"];
+    const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", "Manzana", "7Up", "Pepsi", "Otro"];
+    const modalRefresco = document.getElementById("modal-refresco");
+    const modalRefrescoProducto = document.getElementById("modal-refresco-producto");
+    const saboresRefrescoGrid = document.getElementById("sabores-refresco-grid");
+    const cerrarModalRefresco = document.getElementById("cerrar-modal-refresco");
+    let refrescoSeleccionadoUrl = "";
+
+    function cerrarSelectorRefresco() {{
+        refrescoSeleccionadoUrl = "";
+        modalRefresco.classList.remove("activo");
+        modalRefresco.setAttribute("aria-hidden", "true");
+    }}
+
+    function agregarRefrescoConSabor(sabor) {{
+        const saborLimpio = (sabor || "").trim();
+        if (!saborLimpio || !refrescoSeleccionadoUrl) {{
+            return;
+        }}
+        window.location.href = refrescoSeleccionadoUrl + "?sabor=" + encodeURIComponent(saborLimpio);
+    }}
+
+    function abrirSelectorRefresco(btn) {{
+        refrescoSeleccionadoUrl = btn.dataset.url;
+        modalRefrescoProducto.textContent = btn.dataset.producto || "Refresco";
+        saboresRefrescoGrid.innerHTML = "";
+
+        saboresRefresco.forEach(function(sabor) {{
+            const boton = document.createElement("button");
+            boton.type = "button";
+            boton.className = "sabor-btn" + (sabor === "Otro" ? " otro" : "");
+            boton.textContent = sabor === "Otro" ? "✍️ Otro" : "🥤 " + sabor;
+            boton.addEventListener("click", function() {{
+                if (sabor === "Otro") {{
+                    const escrito = prompt("Escribe el sabor del refresco");
+                    if (escrito === null || !escrito.trim()) {{
+                        return;
+                    }}
+                    agregarRefrescoConSabor(escrito);
+                    return;
+                }}
+                agregarRefrescoConSabor(sabor);
+            }});
+            saboresRefrescoGrid.appendChild(boton);
+        }});
+
+        modalRefresco.classList.add("activo");
+        modalRefresco.setAttribute("aria-hidden", "false");
+    }}
 
     document.querySelectorAll(".btn-refresco").forEach(function(btn) {{
         btn.addEventListener("click", function() {{
-            const mensaje = "Seleccione sabor:\\n" + saboresRefresco.map(function(sabor, idx) {{
-                return (idx + 1) + ". " + sabor;
-            }}).join("\\n");
-            const respuesta = prompt(mensaje);
-            if (respuesta === null) {{
-                return;
-            }}
-
-            const texto = respuesta.trim();
-            const numero = parseInt(texto, 10);
-            let sabor = "";
-
-            if (Number.isFinite(numero) && numero >= 1 && numero <= saboresRefresco.length) {{
-                sabor = saboresRefresco[numero - 1];
-            }} else {{
-                sabor = saboresRefresco.find(function(opcion) {{
-                    return opcion.toLowerCase() === texto.toLowerCase();
-                }}) || "";
-            }}
-
-            if (!sabor) {{
-                alert("Sabor no valido");
-                return;
-            }}
-
-            window.location.href = btn.dataset.url + "?sabor=" + encodeURIComponent(sabor);
+            abrirSelectorRefresco(btn);
         }});
+    }});
+
+    cerrarModalRefresco.addEventListener("click", cerrarSelectorRefresco);
+    modalRefresco.addEventListener("click", function(event) {{
+        if (event.target === modalRefresco) {{
+            cerrarSelectorRefresco();
+        }}
     }});
 
     document.querySelectorAll(".form-eliminar-item").forEach(function(form) {{
@@ -3697,6 +3788,9 @@ def exportar():
 
 @app.route("/revertir_orden_cierre/<int:orden_id>", methods=["POST"])
 def revertir_orden_cierre(orden_id):
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
     clave = request.form.get("clave", "").strip()
     if clave != CLAVE_SUPERVISOR:
         return "Clave incorrecta"
