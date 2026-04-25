@@ -2995,7 +2995,7 @@ def orden(orden_id):
         return clave.trim();
     }}
 
-    const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", "Manzana", "7Up", "Pepsi", "Otro"];
+    const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", "Otro"];
     const modalRefresco = document.getElementById("modal-refresco");
     const modalRefrescoProducto = document.getElementById("modal-refresco-producto");
     const saboresRefrescoGrid = document.getElementById("sabores-refresco-grid");
