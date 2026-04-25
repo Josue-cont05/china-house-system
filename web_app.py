@@ -25,7 +25,9 @@ SABORES_REFRESCO = [
     "Frescolita",
     "Naranja",
     "Uva",
-    
+    "Manzana",
+    "7Up",
+    "Pepsi",
 ]
 ETIQUETAS_METODO_PAGO = {
     "bs_pago_movil": "Pago movil en Bs",
@@ -2973,7 +2975,7 @@ def orden(orden_id):
         return clave.trim();
     }}
 
-    const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", ];
+    const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", "Manzana", "7Up", "Pepsi", "Otro"];
     const modalRefresco = document.getElementById("modal-refresco");
     const modalRefrescoProducto = document.getElementById("modal-refresco-producto");
     const saboresRefrescoGrid = document.getElementById("sabores-refresco-grid");
@@ -3498,7 +3500,9 @@ def cobrar(orden_id):
 
                 conn.commit()
                 conn.close()
-                return redirect("/cierre")
+                if usuario_es_admin_cierre():
+                    return redirect("/cierre")
+                return redirect("/")
 
     conn.close()
 
