@@ -369,7 +369,6 @@ def crear_usuarios_iniciales():
         ("Josue", "0510"),
         ("Fabian", "2107"),
         ("Oscar", "1810"),
-        ("Isabela", "0212"),
     ]
 
     for nombre, pin in usuarios:
@@ -2837,8 +2836,15 @@ def orden(orden_id):
     .modal-top p {{ margin:5px 0 0; color:#4b5563; }}
     .cerrar-modal {{ width:auto; min-height:44px; padding:8px 12px; border:none; border-radius:8px; background:#7f8c8d; color:white; cursor:pointer; }}
     .sabores-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
-    .sabor-btn {{ min-height:64px; padding:12px; border:none; border-radius:8px; background:#27ae60; color:white; font-size:17px; font-weight:900; cursor:pointer; }}
-    .sabor-btn.otro {{ background:#8e44ad; }}
+    .sabor-btn {{ min-height:68px; padding:14px; border:none; border-radius:10px; background:#27ae60; color:white; font-size:17px; font-weight:900; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 16px rgba(17,24,39,0.18); transition:opacity 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease; }}
+    .sabor-btn:hover {{ opacity:0.88; transform:translateY(-1px); box-shadow:0 10px 22px rgba(17,24,39,0.24); }}
+    .sabor-btn:active {{ transform:translateY(0); box-shadow:0 4px 10px rgba(17,24,39,0.18); }}
+    .sabor-coca-cola {{ background:#E50914; color:white; }}
+    .sabor-chinotto {{ background:#111827; color:white; }}
+    .sabor-frescolita {{ background:#FF4C4C; color:white; }}
+    .sabor-naranja {{ background:#FFA500; color:#111827; }}
+    .sabor-uva {{ background:#6A0DAD; color:white; }}
+    .sabor-btn.otro {{ background:#8e44ad; color:white; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; }}
@@ -3012,6 +3018,17 @@ def orden(orden_id):
         window.location.href = refrescoSeleccionadoUrl + "?sabor=" + encodeURIComponent(saborLimpio);
     }}
 
+    function claseSaborRefresco(sabor) {{
+        const clases = {{
+            "Coca Cola": "sabor-coca-cola",
+            "Chinotto": "sabor-chinotto",
+            "Frescolita": "sabor-frescolita",
+            "Naranja": "sabor-naranja",
+            "Uva": "sabor-uva"
+        }};
+        return clases[sabor] || "";
+    }}
+
     function abrirSelectorRefresco(btn) {{
         refrescoSeleccionadoUrl = btn.dataset.url;
         modalRefrescoProducto.textContent = btn.dataset.producto || "Refresco";
@@ -3020,7 +3037,8 @@ def orden(orden_id):
         saboresRefresco.forEach(function(sabor) {{
             const boton = document.createElement("button");
             boton.type = "button";
-            boton.className = "sabor-btn" + (sabor === "Otro" ? " otro" : "");
+            const claseColor = claseSaborRefresco(sabor);
+            boton.className = "sabor-btn" + (claseColor ? " " + claseColor : "") + (sabor === "Otro" ? " otro" : "");
             boton.textContent = sabor === "Otro" ? "✍️ Otro" : "🥤 " + sabor;
             boton.addEventListener("click", function() {{
                 if (sabor === "Otro") {{
