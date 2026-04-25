@@ -25,9 +25,7 @@ SABORES_REFRESCO = [
     "Frescolita",
     "Naranja",
     "Uva",
-    "Manzana",
-    "7Up",
-    "Pepsi",
+
 ]
 ETIQUETAS_METODO_PAGO = {
     "bs_pago_movil": "Pago movil en Bs",
