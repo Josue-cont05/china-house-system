@@ -2818,12 +2818,21 @@ def orden(orden_id):
             html += "</div>"
 
     html += "</div>"
+    boton_eliminar_orden = ""
+    if usuario_es_admin_cierre() and not bloqueada_por_cierre and estado in ("abierta", "en cocina"):
+        boton_eliminar_orden = f"""
+            <form method="post" action="/eliminar_orden/{orden_id}" class="form-eliminar-orden" style="margin:0;">
+                <input type="hidden" name="clave" value="">
+                <button type="submit" class="btn-accion eliminar" style="width:100%; border:none; cursor:pointer;">🗑️ Eliminar orden</button>
+            </form>
+        """
+
     html += f"""
     <div class="panel">
         <h2>🧾 Orden {texto_numero_orden(o[1])}</h2>
         <div class="acciones-superiores">
             <a href="/editar_orden/{orden_id}" class="btn-accion editar">✏️ Editar orden</a>
-            <a href="/eliminar_orden/{orden_id}" class="btn-accion eliminar" onclick="return confirm('¿Eliminar esta orden completa?')">🗑️ Eliminar orden</a>
+            {boton_eliminar_orden}
         </div>
         <p>Tipo: {o[3]}</p>
         <p>Referencia: {o[4]}</p>
@@ -2839,9 +2848,9 @@ def orden(orden_id):
             boton_eliminar = ""
         else:
             boton_eliminar = f"""
-            <form method="post" action="/eliminar_item/{i[2]}/{orden_id}" style="display:flex; gap:5px;">
-                <input type="password" name="clave" placeholder="Clave" style="width:70px;">
-                <button type="submit" style="background:red; color:white;">X</button>
+            <form method="post" action="/eliminar_item/{i[2]}/{orden_id}" class="form-eliminar-item" style="margin:0;">
+                <input type="hidden" name="clave" value="">
+                <button type="submit" style="background:#c0392b; color:white; border:none; border-radius:6px; padding:8px 12px; cursor:pointer; width:auto;">❌</button>
             </form>
             """
 
@@ -2872,6 +2881,41 @@ def orden(orden_id):
         <a href="/" class="btn-accion volver">🏠 Volver</a>
     </div>
     </div>
+    <script>
+    function pedirClaveSupervisor() {{
+        const clave = prompt("Clave de supervisor");
+        if (clave === null) {{
+            return null;
+        }}
+        return clave.trim();
+    }}
+
+    document.querySelectorAll(".form-eliminar-item").forEach(function(form) {{
+        form.addEventListener("submit", function(event) {{
+            const clave = pedirClaveSupervisor();
+            if (!clave) {{
+                event.preventDefault();
+                return;
+            }}
+            form.querySelector('input[name="clave"]').value = clave;
+        }});
+    }});
+
+    document.querySelectorAll(".form-eliminar-orden").forEach(function(form) {{
+        form.addEventListener("submit", function(event) {{
+            if (!confirm("¿Eliminar esta orden completa?")) {{
+                event.preventDefault();
+                return;
+            }}
+            const clave = pedirClaveSupervisor();
+            if (!clave) {{
+                event.preventDefault();
+                return;
+            }}
+            form.querySelector('input[name="clave"]').value = clave;
+        }});
+    }});
+    </script>
     </body>
     </html>
     """
@@ -2995,6 +3039,10 @@ def reimprimir_cocina(orden_id):
 
 @app.route("/eliminar_item/<int:item_id>/<int:orden_id>", methods=["POST"])
 def eliminar_item(item_id, orden_id):
+    clave = request.form.get("clave", "").strip()
+    if clave != CLAVE_SUPERVISOR:
+        return "Clave incorrecta"
+
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
@@ -3013,13 +3061,19 @@ def eliminar_item(item_id, orden_id):
         conn.close()
         return "Orden cerrada, no se puede modificar"
 
-    if estado == "en cocina":
-        clave = request.form.get("clave")
-        if clave != CLAVE_SUPERVISOR:
-            conn.close()
-            return "Clave incorrecta"
+    cursor.execute(
+        """
+        SELECT id
+        FROM orden_items
+        WHERE id=? AND orden_id=?
+        """,
+        (item_id, orden_id),
+    )
+    if not cursor.fetchone():
+        conn.close()
+        return "Producto no encontrado en esta orden"
 
-    cursor.execute("DELETE FROM orden_items WHERE id=?", (item_id,))
+    cursor.execute("DELETE FROM orden_items WHERE id=? AND orden_id=?", (item_id, orden_id))
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -3108,8 +3162,18 @@ def editar_orden(orden_id):
     """
 
 
-@app.route("/eliminar_orden/<int:orden_id>")
+@app.route("/eliminar_orden/<int:orden_id>", methods=["GET", "POST"])
 def eliminar_orden(orden_id):
+    if request.method != "POST":
+        return "Operacion requiere clave de supervisor", 405
+
+    clave = request.form.get("clave", "").strip()
+    if clave != CLAVE_SUPERVISOR:
+        return "Clave incorrecta"
+
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -3126,7 +3190,7 @@ def eliminar_orden(orden_id):
 
     estado = row[0]
 
-    if estado != "abierta":
+    if estado not in ("abierta", "en cocina"):
         conn.close()
         return "No se puede eliminar esta orden"
 
@@ -3217,19 +3281,20 @@ def cobrar(orden_id):
             error = "El descuento no puede ser negativo"
         elif metodo2_val and metodo2_val not in METODOS_PAGO_VALIDOS:
             error = "Metodo de pago 2 invalido"
-        elif metodo2_val and (monto2_val == "" or monto2 <= 0):
-            error = "Si usas pago 2, el monto debe ser mayor a 0"
+        elif metodo2_val and monto2 < 0:
+            error = "El monto del pago 2 no puede ser negativo"
         elif not metodo2_val and monto2 > 0:
             error = "Si colocas monto en pago 2, debes seleccionar el metodo"
         else:
             total_bs_final = max(total_bs - descuento, 0)
+            total_usd_final = (total_bs_final / tasa) if tasa else 0.0
 
             pago1_bs, pago1_usd = convertir_pago_equivalente(metodo1_val, monto1, tasa)
             total_pagado_bs = pago1_bs
             total_pagado_usd = pago1_usd
 
             insertar_pago_1 = bool(metodo1_val and monto1 > 0)
-            insertar_pago_2 = bool(metodo2_val and monto2 > 0)
+            insertar_pago_2 = bool(metodo2_val and monto2 > 0 and pago1_usd + 0.0001 < total_usd_final)
             if insertar_pago_2:
                 pago2_bs, pago2_usd = convertir_pago_equivalente(metodo2_val, monto2, tasa)
                 total_pagado_bs += pago2_bs
@@ -3319,6 +3384,7 @@ def cobrar(orden_id):
     <div class="sep"></div>
     <div class="total">USD: ${round(total_usd, 2)}</div>
     <div class="total">Bs: {round(total_bs, 2)}</div>
+    <div class="total">Tasa: Bs {round(tasa, 2)}</div>
     <div class="total">Total final Bs: {round(total_bs_final, 2)}</div>
     <div class="sep"></div>
     {"<div class='error'>" + error + "</div>" if error else ""}
@@ -3333,17 +3399,17 @@ def cobrar(orden_id):
     <input name="ref1" value="{ref1_val}" placeholder="Referencia">
     <div class="sep"></div>
     <h3>💳 Pago 2 (opcional)</h3>
-    <select name="metodo2">
+    <select name="metodo2" id="metodo2">
         <option value="" {selected(metodo2_val, "")}>-- ninguno --</option>
         <option value="usd" {selected(metodo2_val, "usd")}>Efectivo USD</option>
         <option value="bs_efectivo" {selected(metodo2_val, "bs_efectivo")}>Efectivo Bs</option>
         <option value="bs_pago_movil" {selected(metodo2_val, "bs_pago_movil")}>Pago movil en Bs</option>
     </select>
-    <input name="monto2" type="number" step="0.01" min="0" value="{monto2_val}" placeholder="Monto">
+    <input name="monto2" id="monto2" type="number" step="0.01" min="0" value="{monto2_val}" placeholder="Monto">
     <input name="ref2" value="{ref2_val}" placeholder="Referencia">
     <div class="sep"></div>
     <label>Descuento (Bs)</label>
-    <input name="descuento" type="number" step="0.01" value="{descuento_val}">
+    <input name="descuento" id="descuento" type="number" step="0.01" value="{descuento_val}">
     <button class="btn confirmar">💵 Confirmar pago</button>
     </form>
     <a href="/orden/{orden_id}" class="volver">🏠 Volver</a>
@@ -3351,16 +3417,73 @@ def cobrar(orden_id):
     <script>
     const metodo1 = document.getElementById("metodo1");
     const monto1 = document.getElementById("monto1");
+    const metodo2 = document.getElementById("metodo2");
+    const monto2 = document.getElementById("monto2");
+    const descuento = document.getElementById("descuento");
     const totalUSD = {round(total_usd, 2)};
-    const totalBSFinal = {round(total_bs_final, 2)};
+    const tasa = {round(tasa, 6)};
+
+    function metodoEsUSD(metodo) {{
+        return metodo === "usd";
+    }}
+
+    function metodoEsBs(metodo) {{
+        return metodo === "bs_pago_movil" || metodo === "bs_efectivo" || metodo === "pago_movil";
+    }}
+
+    function numero(valor) {{
+        const n = parseFloat(String(valor || "0").replace(",", "."));
+        return Number.isFinite(n) ? n : 0;
+    }}
+
+    function totalFinalUSD() {{
+        const descuentoBs = Math.max(numero(descuento.value), 0);
+        return Math.max(totalUSD - (tasa ? descuentoBs / tasa : 0), 0);
+    }}
+
+    function totalFinalBs() {{
+        return totalFinalUSD() * tasa;
+    }}
+
+    function pago1EnUSD() {{
+        const valor = Math.max(numero(monto1.value), 0);
+        if (metodoEsUSD(metodo1.value)) {{
+            return valor;
+        }}
+        if (metodoEsBs(metodo1.value)) {{
+            return tasa ? valor / tasa : 0;
+        }}
+        return 0;
+    }}
+
+    function recalcularPago2() {{
+        const restanteUSD = Math.max(totalFinalUSD() - pago1EnUSD(), 0);
+        if (restanteUSD <= 0) {{
+            monto2.value = "0.00";
+            return;
+        }}
+        if (!metodo2.value) {{
+            return;
+        }}
+        if (metodoEsUSD(metodo2.value)) {{
+            monto2.value = restanteUSD.toFixed(2);
+        }} else if (metodoEsBs(metodo2.value)) {{
+            monto2.value = (restanteUSD * tasa).toFixed(2);
+        }}
+    }}
 
     metodo1.addEventListener("change", function() {{
         if (metodo1.value === "usd") {{
             monto1.value = totalUSD.toFixed(2);
         }} else {{
-            monto1.value = totalBSFinal.toFixed(2);
+            monto1.value = totalFinalBs().toFixed(2);
         }}
+        recalcularPago2();
     }});
+    monto1.addEventListener("input", recalcularPago2);
+    metodo2.addEventListener("change", recalcularPago2);
+    descuento.addEventListener("input", recalcularPago2);
+    recalcularPago2();
     </script>
     </body>
     </html>
