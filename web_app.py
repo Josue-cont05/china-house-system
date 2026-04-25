@@ -628,8 +628,17 @@ def texto_numero_orden(numero):
 
 
 def construir_resumen_cierre(cursor):
-    inicio_jornada = obtener_inicio_jornada_actual(cursor)
     tasa = obtener_tasa_actual(cursor)
+
+    cursor.execute(
+        """
+        SELECT MIN(fecha_hora)
+        FROM ordenes
+        WHERE cierre_id IS NULL
+        """
+    )
+    row_inicio = cursor.fetchone()
+    inicio_jornada = row_inicio[0] if row_inicio and row_inicio[0] else "Sin ordenes pendientes"
 
     cursor.execute(
         """
@@ -637,9 +646,7 @@ def construir_resumen_cierre(cursor):
         FROM ordenes
         WHERE cierre_id IS NULL
           AND estado != 'cerrada'
-          AND fecha_hora >= ?
         """,
-        (inicio_jornada,),
     )
     ordenes_activas = int(cursor.fetchone()[0] or 0)
 
@@ -655,11 +662,9 @@ def construir_resumen_cierre(cursor):
         LEFT JOIN orden_items oi ON oi.orden_id = o.id
         WHERE o.cierre_id IS NULL
           AND o.estado = 'cerrada'
-          AND o.fecha_hora >= ?
         GROUP BY o.id, o.numero_orden, o.cliente, o.descuento
         ORDER BY o.id ASC
-        """,
-        (inicio_jornada,),
+        """
     )
     filas_ordenes = cursor.fetchall()
 
@@ -706,10 +711,8 @@ def construir_resumen_cierre(cursor):
         JOIN ordenes o ON p.orden_id = o.id
         WHERE o.cierre_id IS NULL
           AND o.estado = 'cerrada'
-          AND o.fecha_hora >= ?
         ORDER BY o.numero_orden ASC, o.id ASC, p.id ASC
-        """,
-        (inicio_jornada,),
+        """
     )
     filas_pagos = cursor.fetchall()
 
@@ -749,11 +752,9 @@ def construir_resumen_cierre(cursor):
         JOIN ordenes o ON oi.orden_id = o.id
         WHERE o.cierre_id IS NULL
           AND o.estado = 'cerrada'
-          AND o.fecha_hora >= ?
         GROUP BY oi.producto
         ORDER BY cantidad DESC, oi.producto ASC
-        """,
-        (inicio_jornada,),
+        """
     )
     productos = cursor.fetchall()
 
@@ -3892,8 +3893,8 @@ def cierre():
 
     if ordenes_activas > 0:
         mensaje = (
-            f"<h2 style='color:#e67e22;'>Hay {ordenes_activas} ordenes activas. "
-            "Debes cerrarlas o resolverlas antes de cerrar la jornada.</h2>"
+            f"<h2 style='color:#e67e22;'>Hay {ordenes_activas} órdenes activas pendientes, "
+            "debes cerrarlas o eliminarlas antes de cerrar jornada.</h2>"
         )
     elif cantidad_ordenes_cerradas == 0:
         mensaje = "<h2 style='color:#c0392b;'>No hay ordenes cerradas para esta jornada.</h2>"
@@ -4037,7 +4038,8 @@ def cerrar_jornada():
         </head>
         <body style="font-family:Arial; padding:20px;">
         <h1>🔒 No se puede cerrar la jornada</h1>
-        <p>Hay {resumen['ordenes_activas']} ordenes activas pendientes.</p>
+        <p>Hay órdenes activas pendientes, debes cerrarlas o eliminarlas antes de cerrar jornada.</p>
+        <p>Total pendientes: {resumen['ordenes_activas']}</p>
         <a href="/" class="volver">🏠 Volver</a>
         </body>
         </html>
