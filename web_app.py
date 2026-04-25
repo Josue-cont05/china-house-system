@@ -3234,7 +3234,7 @@ def cobrar(orden_id):
         conn.close()
         return "Esta orden ya pertenece a un cierre de jornada"
 
-    if estado == "cerrada":
+    if estado == "cerrada" and o[10] is not None:
         conn.close()
         return "Esta orden ya esta cerrada"
 
@@ -3336,7 +3336,7 @@ def cobrar(orden_id):
                     SET estado='cerrada', descuento=?
                     WHERE id=?
                       AND cierre_id IS NULL
-                      AND estado != 'cerrada'
+                      AND estado IN ('abierta', 'en cocina', 'listo', 'cerrada')
                     """,
                     (descuento, orden_id),
                 )
@@ -3348,7 +3348,7 @@ def cobrar(orden_id):
 
                 conn.commit()
                 conn.close()
-                return redirect("/")
+                return redirect("/cierre")
 
     conn.close()
 
