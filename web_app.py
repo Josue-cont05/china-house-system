@@ -19,6 +19,7 @@ except Exception:
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
 METODOS_PAGO_VALIDOS = {"bs_pago_movil", "pago_movil", "bs_efectivo", "usd"}
+SABORES_REFRESCO = ["Coca Cola", "Chinotto", "Naranja", "Uva", "Frecolita"]
 ETIQUETAS_METODO_PAGO = {
     "bs_pago_movil": "Pago movil en Bs",
     "pago_movil": "Pago movil en Bs",
@@ -222,6 +223,18 @@ def normalizar_metodo_pago(metodo):
     if metodo == "pago_movil":
         return "bs_pago_movil"
     return metodo
+
+
+def es_producto_refresco(nombre):
+    return "refresco" in (nombre or "").lower()
+
+
+def normalizar_sabor_refresco(sabor):
+    sabor_limpio = (sabor or "").strip()
+    for opcion in SABORES_REFRESCO:
+        if sabor_limpio.lower() == opcion.lower():
+            return opcion
+    return ""
 
 
 def etiqueta_metodo_pago(metodo):
@@ -2812,11 +2825,18 @@ def orden(orden_id):
                     ordenados.append(col2[i])
 
             for p in ordenados:
-                html += f"""
-                <a href="/agregar/{orden_id}/{p[0]}">
-                    <button class="btn">{p[1]} - ${p[2]}</button>
-                </a>
-                """
+                if es_producto_refresco(p[1]):
+                    html += f"""
+                    <button class="btn btn-refresco" type="button" data-url="/agregar/{orden_id}/{p[0]}">
+                        {p[1]} - ${p[2]}
+                    </button>
+                    """
+                else:
+                    html += f"""
+                    <a href="/agregar/{orden_id}/{p[0]}">
+                        <button class="btn" type="button">{p[1]} - ${p[2]}</button>
+                    </a>
+                    """
 
             html += "</div>"
 
@@ -2893,6 +2913,39 @@ def orden(orden_id):
         return clave.trim();
     }}
 
+    const saboresRefresco = ["Coca Cola", "Chinotto", "Naranja", "Uva", "Frecolita"];
+
+    document.querySelectorAll(".btn-refresco").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{
+            const mensaje = "Seleccione sabor:\\n" + saboresRefresco.map(function(sabor, idx) {{
+                return (idx + 1) + ". " + sabor;
+            }}).join("\\n");
+            const respuesta = prompt(mensaje);
+            if (respuesta === null) {{
+                return;
+            }}
+
+            const texto = respuesta.trim();
+            const numero = parseInt(texto, 10);
+            let sabor = "";
+
+            if (Number.isFinite(numero) && numero >= 1 && numero <= saboresRefresco.length) {{
+                sabor = saboresRefresco[numero - 1];
+            }} else {{
+                sabor = saboresRefresco.find(function(opcion) {{
+                    return opcion.toLowerCase() === texto.toLowerCase();
+                }}) || "";
+            }}
+
+            if (!sabor) {{
+                alert("Sabor no valido");
+                return;
+            }}
+
+            window.location.href = btn.dataset.url + "?sabor=" + encodeURIComponent(sabor);
+        }});
+    }});
+
     document.querySelectorAll(".form-eliminar-item").forEach(function(form) {{
         form.addEventListener("submit", function(event) {{
             const clave = pedirClaveSupervisor();
@@ -2950,12 +3003,20 @@ def agregar(orden_id, producto_id):
         conn.close()
         return "Producto no encontrado"
 
+    producto_nombre = p[0]
+    if es_producto_refresco(producto_nombre):
+        sabor = normalizar_sabor_refresco(request.args.get("sabor"))
+        if not sabor:
+            conn.close()
+            return "Debes seleccionar un sabor valido para el refresco"
+        producto_nombre = f"{producto_nombre} - {sabor}"
+
     cursor.execute(
         """
         INSERT INTO orden_items (orden_id, producto, precio)
         VALUES (?, ?, ?)
         """,
-        (orden_id, p[0], p[1]),
+        (orden_id, producto_nombre, p[1]),
     )
     conn.commit()
     conn.close()
