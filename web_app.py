@@ -304,6 +304,14 @@ def asegurar_columna_facturar():
     conn.close()
 
 
+def limpiar_facturas_archivadas():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE ordenes SET facturar=0 WHERE cierre_id IS NOT NULL")
+    conn.commit()
+    conn.close()
+
+
 def crear_tablas_cierre_jornada():
     conn = get_connection()
     cursor = conn.cursor()
@@ -1293,6 +1301,7 @@ def init_db():
     asegurar_columna("ordenes", "cierre_id", "INTEGER")
     asegurar_columna("ordenes", "reimpresion_token", "TEXT")
     asegurar_columna_facturar()
+    limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
@@ -4798,6 +4807,7 @@ def facturas_pendientes():
             FROM ordenes o
             LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
+              AND o.cierre_id IS NULL
             """
         )
         ordenes = cursor.fetchall()
