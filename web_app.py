@@ -369,6 +369,7 @@ def crear_usuarios_iniciales():
         ("Josue", "0510"),
         ("Fabian", "2107"),
         ("Oscar", "1810"),
+        ("Isabela", "0212"),
     ]
 
     for nombre, pin in usuarios:
