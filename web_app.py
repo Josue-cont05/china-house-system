@@ -18,16 +18,19 @@ except Exception:
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
-METODOS_PAGO_VALIDOS = {"bs_pago_movil", "pago_movil", "bs_efectivo", "usd"}
+METODOS_PAGO_VALIDOS = {"punto_venta", "bs_pago_movil", "pago_movil", "bs_efectivo", "usd"}
 SABORES_REFRESCO = [
     "Coca Cola",
     "Chinotto",
     "Frescolita",
     "Naranja",
     "Uva",
-
+    "Manzana",
+    "7Up",
+    "Pepsi",
 ]
 ETIQUETAS_METODO_PAGO = {
+    "punto_venta": "Punto de venta",
     "bs_pago_movil": "Pago movil en Bs",
     "pago_movil": "Pago movil en Bs",
     "bs_efectivo": "Efectivo en Bs",
@@ -268,7 +271,7 @@ def convertir_pago_equivalente(metodo, monto, tasa):
     if metodo == "usd":
         return monto * tasa, monto
 
-    if metodo in ("bs_pago_movil", "bs_efectivo"):
+    if metodo in ("punto_venta", "bs_pago_movil", "bs_efectivo"):
         usd = (monto / tasa) if tasa else 0.0
         return monto, usd
 
@@ -749,6 +752,7 @@ def construir_resumen_cierre(cursor):
     )
     filas_pagos = cursor.fetchall()
 
+    total_punto_venta_bs = 0.0
     total_pago_movil_bs = 0.0
     total_efectivo_bs = 0.0
     total_efectivo_usd = 0.0
@@ -758,7 +762,9 @@ def construir_resumen_cierre(cursor):
         metodo = normalizar_metodo_pago(metodo)
         monto = a_float(monto)
 
-        if metodo == "bs_pago_movil":
+        if metodo == "punto_venta":
+            total_punto_venta_bs += monto
+        elif metodo == "bs_pago_movil":
             total_pago_movil_bs += monto
         elif metodo == "bs_efectivo":
             total_efectivo_bs += monto
@@ -792,10 +798,10 @@ def construir_resumen_cierre(cursor):
     productos = cursor.fetchall()
 
     total_cobrado_equiv_bs = (
-        total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
+        total_punto_venta_bs + total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
     )
     total_cobrado_equiv_usd = total_efectivo_usd + (
-        ((total_pago_movil_bs + total_efectivo_bs) / tasa) if tasa else 0.0
+        ((total_punto_venta_bs + total_pago_movil_bs + total_efectivo_bs) / tasa) if tasa else 0.0
     )
     diferencia_usd = total_ventas_usd - total_cobrado_equiv_usd
     diferencia_bs = total_ventas_bs - total_cobrado_equiv_bs
@@ -811,6 +817,7 @@ def construir_resumen_cierre(cursor):
         "total_ventas_usd": round(total_ventas_usd, 2),
         "total_ventas_bs": round(total_ventas_bs, 2),
         "total_ventas": round(total_ventas_bs, 2),
+        "total_punto_venta_bs": round(total_punto_venta_bs, 2),
         "total_pago_movil_bs": round(total_pago_movil_bs, 2),
         "total_efectivo_bs": round(total_efectivo_bs, 2),
         "total_efectivo_usd": round(total_efectivo_usd, 2),
@@ -960,6 +967,7 @@ def construir_reporte_rango(cursor, desde, hasta):
 
     pagos = []
     metodos_pago = defaultdict(lambda: {"cantidad": 0, "total_bs": 0.0, "total_usd": 0.0})
+    total_punto_venta_bs = 0.0
     total_pago_movil_bs = 0.0
     total_efectivo_bs = 0.0
     total_efectivo_usd = 0.0
@@ -969,7 +977,9 @@ def construir_reporte_rango(cursor, desde, hasta):
         monto = a_float(monto)
         equiv_bs, equiv_usd = convertir_pago_equivalente(metodo, monto, tasa)
 
-        if metodo == "bs_pago_movil":
+        if metodo == "punto_venta":
+            total_punto_venta_bs += monto
+        elif metodo == "bs_pago_movil":
             total_pago_movil_bs += monto
         elif metodo == "bs_efectivo":
             total_efectivo_bs += monto
@@ -1014,9 +1024,9 @@ def construir_reporte_rango(cursor, desde, hasta):
         for producto, cantidad in cursor.fetchall()
     ]
 
-    total_equiv_bs = total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
+    total_equiv_bs = total_punto_venta_bs + total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
     total_equiv_usd = total_efectivo_usd + (
-        ((total_pago_movil_bs + total_efectivo_bs) / tasa) if tasa else 0.0
+        ((total_punto_venta_bs + total_pago_movil_bs + total_efectivo_bs) / tasa) if tasa else 0.0
     )
 
     ventas_por_dia_lista = []
@@ -1051,6 +1061,7 @@ def construir_reporte_rango(cursor, desde, hasta):
         "tasa": round(tasa, 2),
         "total_vendido_usd": round(total_vendido_usd, 2),
         "total_vendido_bs": round(total_vendido_bs, 2),
+        "total_punto_venta_bs": round(total_punto_venta_bs, 2),
         "total_pago_movil_bs": round(total_pago_movil_bs, 2),
         "total_efectivo_bs": round(total_efectivo_bs, 2),
         "total_efectivo_usd": round(total_efectivo_usd, 2),
@@ -2995,7 +3006,7 @@ def orden(orden_id):
         return clave.trim();
     }}
 
-    const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", "Otro"];
+    const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", "Manzana", "7Up", "Pepsi", "Otro"];
     const modalRefresco = document.getElementById("modal-refresco");
     const modalRefrescoProducto = document.getElementById("modal-refresco-producto");
     const saboresRefrescoGrid = document.getElementById("sabores-refresco-grid");
@@ -3437,7 +3448,7 @@ def cobrar(orden_id):
     total_bs_final = max(total_bs - descuento_bs, 0)
 
     error = ""
-    metodo1_val = "bs_pago_movil"
+    metodo1_val = "punto_venta"
     monto1_val = f"{round(total_bs_final, 2)}"
     ref1_val = ""
     metodo2_val = ""
@@ -3578,6 +3589,7 @@ def cobrar(orden_id):
     <form method="post">
     <h3>💳 Pago 1</h3>
     <select name="metodo1" id="metodo1" required>
+        <option value="punto_venta" {selected(metodo1_val, "punto_venta")}>Punto de venta</option>
         <option value="bs_pago_movil" {selected(metodo1_val, "bs_pago_movil")}>Pago movil en Bs</option>
         <option value="usd" {selected(metodo1_val, "usd")}>Efectivo USD</option>
         <option value="bs_efectivo" {selected(metodo1_val, "bs_efectivo")}>Efectivo Bs</option>
@@ -3588,9 +3600,10 @@ def cobrar(orden_id):
     <h3>💳 Pago 2 (opcional)</h3>
     <select name="metodo2" id="metodo2">
         <option value="" {selected(metodo2_val, "")}>-- ninguno --</option>
+        <option value="punto_venta" {selected(metodo2_val, "punto_venta")}>Punto de venta</option>
+        <option value="bs_pago_movil" {selected(metodo2_val, "bs_pago_movil")}>Pago movil en Bs</option>
         <option value="usd" {selected(metodo2_val, "usd")}>Efectivo USD</option>
         <option value="bs_efectivo" {selected(metodo2_val, "bs_efectivo")}>Efectivo Bs</option>
-        <option value="bs_pago_movil" {selected(metodo2_val, "bs_pago_movil")}>Pago movil en Bs</option>
     </select>
     <input name="monto2" id="monto2" type="number" step="0.01" min="0" value="{monto2_val}" placeholder="Monto">
     <input name="ref2" value="{ref2_val}" placeholder="Referencia">
@@ -3615,7 +3628,7 @@ def cobrar(orden_id):
     }}
 
     function metodoEsBs(metodo) {{
-        return metodo === "bs_pago_movil" || metodo === "bs_efectivo" || metodo === "pago_movil";
+        return metodo === "punto_venta" || metodo === "bs_pago_movil" || metodo === "bs_efectivo" || metodo === "pago_movil";
     }}
 
     function numero(valor) {{
@@ -3970,6 +3983,7 @@ def reportes():
 
         <div class="metricas">
             <div class="metrica"><small>Total vendido USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
+            <div class="metrica"><small>Punto de venta Bs</small><b>Bs {reporte["total_punto_venta_bs"]}</b></div>
             <div class="metrica"><small>Pago movil Bs</small><b>Bs {reporte["total_pago_movil_bs"]}</b></div>
             <div class="metrica"><small>Efectivo Bs</small><b>Bs {reporte["total_efectivo_bs"]}</b></div>
             <div class="metrica"><small>Efectivo USD</small><b>$ {reporte["total_efectivo_usd"]}</b></div>
@@ -4039,6 +4053,7 @@ def exportar_reporte():
         ["Hasta", reporte["hasta"]],
         ["Tasa", reporte["tasa"]],
         ["Total vendido USD", reporte["total_vendido_usd"]],
+        ["Total punto de venta Bs", reporte["total_punto_venta_bs"]],
         ["Total pago movil Bs", reporte["total_pago_movil_bs"]],
         ["Total efectivo Bs", reporte["total_efectivo_bs"]],
         ["Total efectivo USD", reporte["total_efectivo_usd"]],
@@ -4369,6 +4384,7 @@ def cierre():
 
         <div class="bloque">
             <div class="titulo-bloque">💳 COBRADO</div>
+            <div class="dato"><b>Punto de venta:</b> Bs {round(resumen["total_punto_venta_bs"], 2)}</div>
             <div class="dato"><b>Pago movil en Bs:</b> Bs {round(resumen["total_pago_movil_bs"], 2)}</div>
             <div class="dato"><b>Efectivo en Bs:</b> Bs {round(resumen["total_efectivo_bs"], 2)}</div>
             <div class="dato"><b>Efectivo en USD:</b> $ {round(resumen["total_efectivo_usd"], 2)}</div>
