@@ -3448,7 +3448,7 @@ def cobrar(orden_id):
     total_bs_final = max(total_bs - descuento_bs, 0)
 
     error = ""
-    metodo1_val = "punto_venta"
+    metodo1_val = ""
     monto1_val = f"{round(total_bs_final, 2)}"
     ref1_val = ""
     metodo2_val = ""
@@ -3547,9 +3547,6 @@ def cobrar(orden_id):
 
     conn.close()
 
-    def selected(actual, esperado):
-        return "selected" if actual == esperado else ""
-
     return f"""
     <html>
     <head>
@@ -3568,6 +3565,13 @@ def cobrar(orden_id):
     .confirmar {{ background: linear-gradient(135deg, #15803d, #16a34a); color: white; }}
     .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:15px; border-radius:5px; }}
     .error {{ background:#fdecea; color:#c0392b; padding:12px; border-radius:8px; margin-bottom:12px; }}
+    .metodos-grid {{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; margin:8px 0 10px; }}
+    .metodo-btn {{ min-height:60px; padding:12px; border:2px solid #cbd5e1; border-radius:10px; background:#f8fafc; color:#111827; font-size:16px; font-weight:900; cursor:pointer; box-shadow:0 4px 12px rgba(17,24,39,0.12); transition:background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease; }}
+    .metodo-btn:hover {{ transform:translateY(-1px); border-color:#15803d; }}
+    .metodo-btn.activo {{ border-color:#15803d; background:#15803d; color:white; }}
+    .metodo-btn.sin-metodo {{ background:#e5e7eb; color:#111827; }}
+    .metodo-btn.sin-metodo.activo {{ border-color:#7f8c8d; background:#7f8c8d; color:white; }}
+    @media (max-width: 520px) {{ .metodos-grid {{ grid-template-columns:1fr; }} }}
     </style>
     </head>
     <body>
@@ -3588,23 +3592,25 @@ def cobrar(orden_id):
     {"<div class='error'>" + error + "</div>" if error else ""}
     <form method="post">
     <h3>💳 Pago 1</h3>
-    <select name="metodo1" id="metodo1" required>
-        <option value="punto_venta" {selected(metodo1_val, "punto_venta")}>Punto de venta</option>
-        <option value="bs_pago_movil" {selected(metodo1_val, "bs_pago_movil")}>Pago movil en Bs</option>
-        <option value="usd" {selected(metodo1_val, "usd")}>Efectivo USD</option>
-        <option value="bs_efectivo" {selected(metodo1_val, "bs_efectivo")}>Efectivo Bs</option>
-    </select>
+    <input type="hidden" name="metodo1" id="metodo1" value="{metodo1_val}">
+    <div class="metodos-grid" data-metodo-grupo="metodo1">
+        <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="punto_venta">Punto de venta</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="bs_pago_movil">Pago móvil</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="bs_efectivo">Efectivo Bs</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="usd">Efectivo USD</button>
+    </div>
     <input name="monto1" id="monto1" type="number" step="0.01" min="0.01" value="{monto1_val}" placeholder="Monto" required>
     <input name="ref1" value="{ref1_val}" placeholder="Referencia">
     <div class="sep"></div>
     <h3>💳 Pago 2 (opcional)</h3>
-    <select name="metodo2" id="metodo2">
-        <option value="" {selected(metodo2_val, "")}>-- ninguno --</option>
-        <option value="punto_venta" {selected(metodo2_val, "punto_venta")}>Punto de venta</option>
-        <option value="bs_pago_movil" {selected(metodo2_val, "bs_pago_movil")}>Pago movil en Bs</option>
-        <option value="usd" {selected(metodo2_val, "usd")}>Efectivo USD</option>
-        <option value="bs_efectivo" {selected(metodo2_val, "bs_efectivo")}>Efectivo Bs</option>
-    </select>
+    <input type="hidden" name="metodo2" id="metodo2" value="{metodo2_val}">
+    <div class="metodos-grid" data-metodo-grupo="metodo2">
+        <button type="button" class="metodo-btn sin-metodo" data-metodo-target="metodo2" data-metodo="">Sin método</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="punto_venta">Punto de venta</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="bs_pago_movil">Pago móvil</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="bs_efectivo">Efectivo Bs</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="usd">Efectivo USD</button>
+    </div>
     <input name="monto2" id="monto2" type="number" step="0.01" min="0" value="{monto2_val}" placeholder="Monto">
     <input name="ref2" value="{ref2_val}" placeholder="Referencia">
     <div class="sep"></div>
@@ -3672,16 +3678,38 @@ def cobrar(orden_id):
         }}
     }}
 
-    metodo1.addEventListener("change", function() {{
-        if (metodo1.value === "usd") {{
-            monto1.value = totalUSD.toFixed(2);
-        }} else {{
-            monto1.value = totalFinalBs().toFixed(2);
+    function actualizarBotonesMetodo(targetId) {{
+        const input = document.getElementById(targetId);
+        document.querySelectorAll('[data-metodo-target="' + targetId + '"]').forEach(function(btn) {{
+            btn.classList.toggle("activo", btn.dataset.metodo === input.value);
+        }});
+    }}
+
+    function seleccionarMetodo(targetId, valor) {{
+        const input = document.getElementById(targetId);
+        input.value = valor;
+        actualizarBotonesMetodo(targetId);
+
+        if (targetId === "metodo1") {{
+            if (metodoEsUSD(valor)) {{
+                monto1.value = totalUSD.toFixed(2);
+            }} else if (metodoEsBs(valor)) {{
+                monto1.value = totalFinalBs().toFixed(2);
+            }}
         }}
+
         recalcularPago2();
+    }}
+
+    document.querySelectorAll(".metodo-btn").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{
+            seleccionarMetodo(btn.dataset.metodoTarget, btn.dataset.metodo || "");
+        }});
     }});
+
+    actualizarBotonesMetodo("metodo1");
+    actualizarBotonesMetodo("metodo2");
     monto1.addEventListener("input", recalcularPago2);
-    metodo2.addEventListener("change", recalcularPago2);
     descuento.addEventListener("input", recalcularPago2);
     recalcularPago2();
     </script>
