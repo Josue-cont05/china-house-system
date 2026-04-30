@@ -3,6 +3,7 @@ import datetime
 import html as html_lib
 import io
 import os
+import re
 import sqlite3
 import zipfile
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -538,6 +539,104 @@ def obtener_costo_promedio_producto(cursor, producto):
         return float(total or 0) / float(cantidad)
 
     return 0.0
+
+
+def calcular_costo_promedio_ponderado(stock_anterior, costo_anterior, cantidad, costo_nuevo):
+    stock_anterior = a_float(stock_anterior)
+    costo_anterior = a_float(costo_anterior)
+    cantidad = a_float(cantidad)
+    costo_nuevo = a_float(costo_nuevo)
+    nuevo_stock = stock_anterior + cantidad
+
+    if nuevo_stock <= 0:
+        return costo_anterior
+
+    return ((stock_anterior * costo_anterior) + costo_nuevo) / nuevo_stock
+
+
+def sumar_inventario_con_costo(cursor, producto, cantidad, unidad, costo_total):
+    producto = (producto or "").strip()
+    unidad = (unidad or "unidad").strip() or "unidad"
+    cantidad = a_float(cantidad)
+    costo_total = a_float(costo_total)
+
+    if not producto or cantidad <= 0:
+        return
+
+    cursor.execute(
+        """
+        SELECT id, stock_actual, costo_promedio
+        FROM inventario
+        WHERE lower(nombre) = lower(?)
+        LIMIT 1
+        """,
+        (producto,),
+    )
+    item = cursor.fetchone()
+
+    if item:
+        stock_anterior = a_float(item[1])
+        costo_anterior = a_float(item[2])
+        nuevo_stock = stock_anterior + cantidad
+        nuevo_costo = calcular_costo_promedio_ponderado(
+            stock_anterior,
+            costo_anterior,
+            cantidad,
+            costo_total,
+        )
+        cursor.execute(
+            """
+            UPDATE inventario
+            SET stock_actual=?, unidad=?, costo_promedio=?
+            WHERE id=?
+            """,
+            (nuevo_stock, unidad, nuevo_costo, item[0]),
+        )
+    else:
+        costo_promedio = (costo_total / cantidad) if cantidad else 0.0
+        cursor.execute(
+            """
+            INSERT INTO inventario (nombre, stock_actual, unidad, costo_promedio)
+            VALUES (?, ?, ?, ?)
+            """,
+            (producto, cantidad, unidad, costo_promedio),
+        )
+
+
+def parsear_porciones_detalle(texto):
+    total = 0.0
+    lineas_validas = []
+
+    for linea in (texto or "").splitlines():
+        limpia = linea.strip()
+        if not limpia:
+            continue
+
+        numeros = re.findall(r"\d+(?:[.,]\d+)?", limpia)
+        if len(numeros) >= 2:
+            cantidad = a_float(numeros[0])
+            tamano = a_float(numeros[1])
+            total += cantidad * tamano
+            lineas_validas.append(limpia)
+
+    return total, "\n".join(lineas_validas)
+
+
+def parsear_insumos_extra(texto):
+    total = 0.0
+    lineas_validas = []
+
+    for linea in (texto or "").splitlines():
+        limpia = linea.strip()
+        if not limpia:
+            continue
+
+        numeros = re.findall(r"\d+(?:[.,]\d+)?", limpia)
+        costo = a_float(numeros[-1]) if numeros else 0.0
+        total += costo
+        lineas_validas.append(limpia)
+
+    return total, "\n".join(lineas_validas)
 
 
 def estilos_base():
@@ -1315,6 +1414,12 @@ def init_db():
     crear_tablas_cierre_jornada()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
+    asegurar_columna("producciones", "merma", "REAL DEFAULT 0")
+    asegurar_columna("producciones", "porcentaje_merma", "REAL DEFAULT 0")
+    asegurar_columna("producciones", "costo_unitario_resultado", "REAL DEFAULT 0")
+    asegurar_columna("producciones", "insumos_extra", "TEXT")
+    asegurar_columna("producciones", "costo_insumos_extra", "REAL DEFAULT 0")
+    asegurar_columna("producciones", "porciones_detalle", "TEXT")
     crear_usuarios_iniciales()
     crear_datos_base_inventario()
 
@@ -1834,13 +1939,11 @@ def compras():
             producto_base_id = request.form.get("producto_base_id", "").strip()
             proveedor_id = request.form.get("proveedor_id", "").strip()
 
-            try:
-                cantidad = float(request.form.get("cantidad", 0) or 0)
-            except Exception:
-                cantidad = 0
+            cantidad = a_float(request.form.get("cantidad"))
+            precio_total = a_float(request.form.get("precio_total"))
 
-            if producto_base_id == "" or cantidad <= 0:
-                error = "Debes seleccionar un producto y una cantidad valida"
+            if producto_base_id == "" or cantidad <= 0 or precio_total <= 0:
+                error = "Debes seleccionar un producto, cantidad y precio total validos"
             else:
                 cursor.execute(
                     """
@@ -1877,6 +1980,7 @@ def compras():
                                 "producto": producto_row[0],
                                 "unidad": producto_row[1] if producto_row[1] else "unidad",
                                 "cantidad": cantidad,
+                                "precio_total": precio_total,
                                 "proveedor": proveedor,
                             }
                         )
@@ -1913,41 +2017,20 @@ def compras():
                         (
                             item["producto"],
                             item["cantidad"],
-                            0,
+                            item.get("precio_total", 0),
                             item["proveedor"],
                             fecha,
                             usuario_id,
                         ),
                     )
 
-                    cursor.execute(
-                        """
-                        SELECT id, stock_actual
-                        FROM inventario
-                        WHERE lower(nombre) = lower(?)
-                        """,
-                        (item["producto"],),
+                    sumar_inventario_con_costo(
+                        cursor,
+                        item["producto"],
+                        item["cantidad"],
+                        item["unidad"],
+                        item.get("precio_total", 0),
                     )
-                    inventario_item = cursor.fetchone()
-
-                    if inventario_item:
-                        nuevo_stock = float(inventario_item[1] or 0) + float(item["cantidad"] or 0)
-                        cursor.execute(
-                            """
-                            UPDATE inventario
-                            SET stock_actual=?, unidad=?
-                            WHERE id=?
-                            """,
-                            (nuevo_stock, item["unidad"], inventario_item[0]),
-                        )
-                    else:
-                        cursor.execute(
-                            """
-                            INSERT INTO inventario (nombre, stock_actual, unidad, costo_promedio)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (item["producto"], item["cantidad"], item["unidad"], 0),
-                        )
 
                 conn.commit()
                 session["compras_temporales"] = []
@@ -1977,7 +2060,7 @@ def compras():
     input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
     button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 5px; color: white; cursor: pointer; }
     .error { background: #fdecea; color: #c0392b; padding: 10px; border-radius: 6px; margin-bottom: 10px; }
-    .grid-form { display: grid; grid-template-columns: 2fr 1fr 2fr; gap: 10px; align-items: end; }
+    .grid-form { display: grid; grid-template-columns: 2fr 1fr 1fr 2fr; gap: 10px; align-items: end; }
     .btn-agregar { background: #27ae60; margin-top: 10px; }
     .item-lista { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid #eee; }
     .item-lista:last-child { border-bottom: none; }
@@ -2007,9 +2090,9 @@ def compras():
     if error:
         html += f"<div class='error'>{error}</div>"
 
-    if not productos_base or not proveedores:
+    if not productos_base:
         html += """
-            Debes registrar al menos un producto base y un proveedor antes de cargar compras.
+            Debes registrar al menos un producto base antes de cargar compras.
         </div>
         <h2>Lista temporal</h2>
         """
@@ -2033,6 +2116,10 @@ def compras():
                     <div>
                         <label>Cantidad</label>
                         <input id="cantidad" name="cantidad" type="number" step="0.01" placeholder="0" required autofocus>
+                    </div>
+                    <div>
+                        <label>Precio total</label>
+                        <input name="precio_total" type="number" step="0.01" min="0.01" placeholder="0.00" required>
                     </div>
                     <div>
                         <label>Proveedor</label>
@@ -2064,12 +2151,13 @@ def compras():
         html += "<div class='card'>"
         for idx, compra in enumerate(compras_temporales):
             cantidad_total += float(compra["cantidad"] or 0)
+            precio_total = a_float(compra.get("precio_total"))
             html += f"""
             <div class="item-lista">
                 <div class="detalle-item">
                     <b>{compra["producto"]}</b><br>
                     {round(compra["cantidad"] or 0, 2)} {compra["unidad"]}
-                    <small>Proveedor: {compra["proveedor"] if compra["proveedor"] else 'Sin proveedor'}</small>
+                    <small>Precio total: $ {round(precio_total, 2)} | Costo unitario: $ {round((precio_total / a_float(compra["cantidad"])) if a_float(compra["cantidad"]) else 0, 4)} | Proveedor: {compra["proveedor"] if compra["proveedor"] else 'Sin proveedor'}</small>
                 </div>
                 <form method="post" style="margin:0;">
                     <input type="hidden" name="accion" value="eliminar">
@@ -2104,6 +2192,7 @@ def compras():
                 <b>{compra[0]}</b><br>
                 Cantidad: {round(compra[1] or 0, 2)}<br>
                 Precio total: ${round(compra[2] or 0, 2)}<br>
+                Costo unitario: ${round((a_float(compra[2]) / a_float(compra[1])) if a_float(compra[1]) else 0, 4)}<br>
                 Proveedor: {compra[3] if compra[3] else '-'}<br>
                 Fecha: {compra[4]}
             </div>
@@ -2339,7 +2428,7 @@ def produccion():
 
     cursor.execute(
         """
-        SELECT id, nombre, unidad, stock_actual
+        SELECT id, nombre, unidad, stock_actual, costo_promedio
         FROM inventario
         ORDER BY nombre ASC
         """
@@ -2358,13 +2447,17 @@ def produccion():
     if request.method == "POST":
         producto_origen_id = request.form.get("producto_origen", "").strip()
         producto_resultado_id = request.form.get("producto_resultado", "").strip()
+        cantidad_origen = a_float(request.form.get("cantidad_origen"))
+        cantidad_resultado = a_float(request.form.get("cantidad_resultado"))
+        porciones_total, porciones_detalle = parsear_porciones_detalle(
+            request.form.get("porciones_detalle", "")
+        )
+        costo_insumos_extra, insumos_extra = parsear_insumos_extra(
+            request.form.get("insumos_extra", "")
+        )
 
-        try:
-            cantidad_origen = float(request.form.get("cantidad_origen", 0) or 0)
-            cantidad_resultado = float(request.form.get("cantidad_resultado", 0) or 0)
-        except Exception:
-            cantidad_origen = 0
-            cantidad_resultado = 0
+        if cantidad_resultado <= 0 and porciones_total > 0:
+            cantidad_resultado = porciones_total
 
         if (
             producto_origen_id == ""
@@ -2376,7 +2469,7 @@ def produccion():
         else:
             cursor.execute(
                 """
-                SELECT id, nombre, stock_actual, unidad
+                SELECT id, nombre, stock_actual, unidad, costo_promedio
                 FROM inventario
                 WHERE id=?
                 LIMIT 1
@@ -2402,15 +2495,19 @@ def produccion():
                 error = "Producto resultado no valido"
             elif float(origen[2] or 0) < cantidad_origen:
                 error = "Stock insuficiente para realizar la produccion"
+            elif cantidad_resultado > cantidad_origen:
+                error = "La cantidad resultado no puede ser mayor que la cantidad origen"
             else:
                 producto_origen = origen[1]
                 producto_resultado = resultado_base[1]
                 unidad_resultado = resultado_base[2] if resultado_base[2] else "unidad"
-                costo_promedio_origen = obtener_costo_promedio_producto(cursor, producto_origen)
-                costo_total = costo_promedio_origen * cantidad_origen
+                costo_promedio_origen = a_float(origen[4])
+                costo_total = (costo_promedio_origen * cantidad_origen) + costo_insumos_extra
                 costo_unitario_resultado = (
                     costo_total / cantidad_resultado if cantidad_resultado > 0 else 0
                 )
+                merma = cantidad_origen - cantidad_resultado
+                porcentaje_merma = (merma / cantidad_origen * 100) if cantidad_origen else 0.0
                 fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
                 usuario_id = session.get("usuario_id")
                 nuevo_stock_origen = float(origen[2] or 0) - cantidad_origen
@@ -2424,53 +2521,23 @@ def produccion():
                     (nuevo_stock_origen, origen[0]),
                 )
 
-                cursor.execute(
-                    """
-                    SELECT id, stock_actual
-                    FROM inventario
-                    WHERE lower(nombre) = lower(?)
-                    LIMIT 1
-                    """,
-                    (producto_resultado,),
+                sumar_inventario_con_costo(
+                    cursor,
+                    producto_resultado,
+                    cantidad_resultado,
+                    unidad_resultado,
+                    costo_total,
                 )
-                resultado = cursor.fetchone()
-
-                if resultado:
-                    nuevo_stock_resultado = float(resultado[1] or 0) + cantidad_resultado
-                    cursor.execute(
-                        """
-                        UPDATE inventario
-                        SET stock_actual=?, unidad=?, costo_promedio=?
-                        WHERE id=?
-                        """,
-                        (
-                            nuevo_stock_resultado,
-                            unidad_resultado,
-                            costo_unitario_resultado,
-                            resultado[0],
-                        ),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO inventario (nombre, stock_actual, unidad, costo_promedio)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (
-                            producto_resultado,
-                            cantidad_resultado,
-                            unidad_resultado,
-                            costo_unitario_resultado,
-                        ),
-                    )
 
                 cursor.execute(
                     """
                     INSERT INTO producciones (
                         producto_origen, cantidad_origen, producto_resultado,
-                        cantidad_resultado, costo_total, fecha, usuario_id
+                        cantidad_resultado, costo_total, fecha, usuario_id,
+                        merma, porcentaje_merma, costo_unitario_resultado,
+                        insumos_extra, costo_insumos_extra, porciones_detalle
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         producto_origen,
@@ -2480,6 +2547,12 @@ def produccion():
                         costo_total,
                         fecha,
                         usuario_id,
+                        merma,
+                        porcentaje_merma,
+                        costo_unitario_resultado,
+                        insumos_extra,
+                        costo_insumos_extra,
+                        porciones_detalle,
                     ),
                 )
 
@@ -2489,7 +2562,10 @@ def produccion():
 
     cursor.execute(
         """
-        SELECT producto_origen, cantidad_origen, producto_resultado, cantidad_resultado, costo_total, fecha
+        SELECT producto_origen, cantidad_origen, producto_resultado, cantidad_resultado,
+               costo_total, fecha, COALESCE(merma, 0), COALESCE(porcentaje_merma, 0),
+               COALESCE(costo_unitario_resultado, 0), COALESCE(insumos_extra, ''),
+               COALESCE(costo_insumos_extra, 0), COALESCE(porciones_detalle, '')
         FROM producciones
         ORDER BY id DESC
         LIMIT 20
@@ -2511,6 +2587,8 @@ def produccion():
     button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 5px; background: #27ae60; color: white; cursor: pointer; }
     .error { background: #fdecea; color: #c0392b; padding: 10px; border-radius: 6px; margin-bottom: 10px; }
     .grid-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    textarea { width: 100%; min-height: 90px; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
+    .ayuda { color:#64748b; font-size:13px; margin:2px 0 8px; }
     .volver { display: block; text-align: center; margin-top: 15px; padding: 12px; background: #7f8c8d; color: white; text-decoration: none; border-radius: 5px; }
     @media (max-width: 768px) { .grid-form { grid-template-columns: 1fr; } }
     </style>
@@ -2561,8 +2639,17 @@ def produccion():
                         </select>
                     </div>
                 </div>
+                <label>Cantidad origen</label>
                 <input name="cantidad_origen" type="number" step="0.01" min="0.01" placeholder="Cantidad origen" required>
-                <input name="cantidad_resultado" type="number" step="0.01" min="0.01" placeholder="Cantidad resultado" required>
+                <label>Cantidad resultado</label>
+                <input name="cantidad_resultado" type="number" step="0.01" min="0" placeholder="Cantidad resultado">
+                <div class="ayuda">Puedes dejar cantidad resultado en blanco si cargas porciones abajo.</div>
+                <label>Porciones producidas</label>
+                <textarea name="porciones_detalle" placeholder="Ejemplo:&#10;19 bolsas de 2 kg&#10;1 bolsa de 1 kg"></textarea>
+                <div class="ayuda">El sistema suma cantidad x tamano de cada linea para calcular el resultado.</div>
+                <label>Insumos extra opcionales</label>
+                <textarea name="insumos_extra" placeholder="Ejemplo:&#10;Vinagre, 1.50&#10;Anis, 0.80&#10;Colorante, 0.40"></textarea>
+                <div class="ayuda">Se suma el ultimo numero de cada linea al costo total de produccion.</div>
                 <button type="submit">🏭 Registrar producción</button>
             </form>
         </div>
@@ -2577,15 +2664,24 @@ def produccion():
         """
     else:
         for prod in historial:
-            costo_unitario = (float(prod[4] or 0) / float(prod[3])) if prod[3] else 0
+            costo_unitario = a_float(prod[8]) or ((float(prod[4] or 0) / float(prod[3])) if prod[3] else 0)
+            porciones_html = ""
+            if prod[11]:
+                porciones_html = f"<br>Porciones:<br><pre style='white-space:pre-wrap; margin:6px 0;'>{html_lib.escape(prod[11])}</pre>"
+            insumos_html = ""
+            if prod[9]:
+                insumos_html = f"<br>Insumos extra: $ {round(prod[10] or 0, 2)}<br><pre style='white-space:pre-wrap; margin:6px 0;'>{html_lib.escape(prod[9])}</pre>"
             html += f"""
             <div class="card">
                 <b>{prod[0]}</b> -> <b>{prod[2]}</b><br>
                 Origen: {round(prod[1] or 0, 2)}<br>
                 Resultado: {round(prod[3] or 0, 2)}<br>
+                Merma: {round(prod[6] or 0, 2)} ({round(prod[7] or 0, 2)}%)<br>
                 Costo total: ${round(prod[4] or 0, 2)}<br>
                 Costo unitario resultado: ${round(costo_unitario, 4)}<br>
                 Fecha: {prod[5]}
+                {porciones_html}
+                {insumos_html}
             </div>
             """
 
