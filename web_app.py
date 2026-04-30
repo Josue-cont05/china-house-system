@@ -468,6 +468,43 @@ def usuario_puede_reimprimir_cocina():
     return session.get("usuario") == "Josue"
 
 
+def obtener_emergencias_activas():
+    activas = session.get("emergencias_activas", [])
+    return [str(item) for item in activas]
+
+
+def emergencia_activa(orden_id):
+    return usuario_es_admin_cierre() and str(orden_id) in obtener_emergencias_activas()
+
+
+def activar_emergencia_sesion(orden_id):
+    activas = obtener_emergencias_activas()
+    orden_txt = str(orden_id)
+    if orden_txt not in activas:
+        activas.append(orden_txt)
+    session["emergencias_activas"] = activas
+    session.modified = True
+
+
+def desactivar_emergencia_sesion(orden_id):
+    orden_txt = str(orden_id)
+    activas = [item for item in obtener_emergencias_activas() if item != orden_txt]
+    session["emergencias_activas"] = activas
+    session.modified = True
+
+
+def registrar_auditoria_emergencia(cursor, orden_id, accion, observacion=""):
+    usuario = usuario_activo() or session.get("usuario", "")
+    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """
+        INSERT INTO auditoria_emergencias (orden_id, usuario, fecha, accion, observacion)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (orden_id, usuario, fecha, accion, observacion or ""),
+    )
+
+
 def crear_datos_base_inventario():
     conn = get_connection()
     cursor = conn.cursor()
@@ -1261,6 +1298,7 @@ def proteger_sistema():
         "revertir_orden_cierre",
         "eliminar_orden",
         "produccion",
+        "activar_edicion_emergencia",
     }
 
     if request.endpoint in rutas_publicas:
@@ -1394,6 +1432,19 @@ def init_db():
             nombre TEXT,
             unidad TEXT,
             stock REAL
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS auditoria_emergencias (
+            id {pk_autoincrement_sql()},
+            orden_id INTEGER,
+            usuario TEXT,
+            fecha TEXT,
+            accion TEXT,
+            observacion TEXT
         )
         """
     )
@@ -1843,12 +1894,13 @@ def inventario():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT nombre, stock_actual, unidad
+        SELECT nombre, stock_actual, unidad, costo_promedio
         FROM inventario
         ORDER BY nombre ASC
         """
     )
     productos = cursor.fetchall()
+    valor_total_inventario = sum(a_float(p[1]) * a_float(p[3]) for p in productos)
     conn.close()
 
     html = """
@@ -1862,6 +1914,7 @@ def inventario():
     .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
     .accesos { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
     .btn-acceso { display: block; text-align: center; padding: 16px; background: #34495e; color: white; text-decoration: none; border-radius: 8px; font-size: 18px; }
+    .resumen-inventario { background: #fff7ed; border-left: 5px solid #b91c1c; padding: 14px; border-radius: 8px; margin-bottom: 12px; font-size: 18px; font-weight: bold; }
     .volver { display: block; text-align: center; margin-top: 15px; padding: 12px; background: #7f8c8d; color: white; text-decoration: none; border-radius: 5px; }
     @media (max-width: 768px) { .accesos { grid-template-columns: 1fr; } }
     </style>
@@ -1880,6 +1933,7 @@ def inventario():
             <a href="/productos_base" class="btn-acceso">📦 Productos base</a>
             <a href="/proveedores" class="btn-acceso">🤝 Proveedores</a>
         </div>
+        <div class="resumen-inventario">Valor total inventario: $ {round(valor_total_inventario, 2)}</div>
     """
 
     if not productos:
@@ -1890,11 +1944,16 @@ def inventario():
         """
     else:
         for producto in productos:
+            stock_actual = a_float(producto[1])
+            costo_promedio = a_float(producto[3])
+            valor_total = stock_actual * costo_promedio
             html += f"""
             <div class="card">
                 <b>{producto[0]}</b><br>
-                Stock actual: {round(producto[1] or 0, 2)}<br>
-                Unidad: {producto[2] if producto[2] else '-'}
+                Stock actual: {round(stock_actual, 2)}<br>
+                Unidad: {producto[2] if producto[2] else '-'}<br>
+                Costo promedio: $ {round(costo_promedio, 4)}<br>
+                Valor total: $ {round(valor_total, 2)}
             </div>
             """
 
@@ -2892,6 +2951,10 @@ def orden(orden_id):
     descuento = o[8] if o[8] else 0
     total_bs_final = max(total_bs - descuento, 0)
     bloqueada_por_cierre = o[10] is not None
+    edicion_emergencia_activa = emergencia_activa(orden_id)
+    puede_modificar_orden = (not bloqueada_por_cierre) and (
+        estado != "cerrada" or edicion_emergencia_activa
+    )
 
     boton_reimprimir = ""
     if usuario_puede_reimprimir_cocina() and estado in ("en cocina", "cerrada"):
@@ -2971,7 +3034,13 @@ def orden(orden_id):
     if bloqueada_por_cierre:
         html += f"""
         <div class="info-cierre">
-            Esta orden pertenece al cierre de jornada #{o[10]} y queda en modo consulta.
+            Esta orden ya pertenece a un cierre de jornada. Primero debes revertirla desde reportes.
+        </div>
+        """
+    elif estado == "cerrada" and edicion_emergencia_activa:
+        html += """
+        <div class="info-cierre">
+            Edicion de emergencia activa. Corrige la orden y vuelve a cobrar para actualizar los pagos.
         </div>
         """
 
@@ -2980,7 +3049,7 @@ def orden(orden_id):
         categoria = p[3] if p[3] else "Sin categoria"
         categorias[categoria].append(p)
 
-    if not bloqueada_por_cierre:
+    if puede_modificar_orden:
         for categoria, lista in categorias.items():
             html += f"<div class='categoria'>{categoria}</div>"
             html += "<div class='grid-productos'>"
@@ -3022,12 +3091,29 @@ def orden(orden_id):
             </form>
         """
 
+    boton_editar_orden = ""
+    if puede_modificar_orden:
+        boton_editar_orden = f'<a href="/editar_orden/{orden_id}" class="btn-accion editar">✏️ Editar orden</a>'
+
+    boton_emergencia = ""
+    if usuario_es_admin_cierre() and estado == "cerrada" and not bloqueada_por_cierre:
+        if edicion_emergencia_activa:
+            boton_emergencia = '<div class="btn-accion" style="background:#7f1d1d;">🚨 Emergencia activa</div>'
+        else:
+            boton_emergencia = f"""
+            <form method="post" action="/activar_edicion_emergencia/{orden_id}" class="form-emergencia" style="margin:0;">
+                <input type="hidden" name="clave" value="">
+                <button type="submit" class="btn-accion" style="width:100%; border:none; cursor:pointer; background:#b91c1c;">🚨 Editar emergencia</button>
+            </form>
+            """
+
     html += f"""
     <div class="panel">
         <h2>🧾 Orden {texto_numero_orden(o[1])}</h2>
         <div class="acciones-superiores">
-            <a href="/editar_orden/{orden_id}" class="btn-accion editar">✏️ Editar orden</a>
+            {boton_editar_orden}
             {boton_eliminar_orden}
+            {boton_emergencia}
         </div>
         <p>Tipo: {o[3]}</p>
         <p>Referencia: {o[4]}</p>
@@ -3039,7 +3125,7 @@ def orden(orden_id):
     """
 
     for i in items:
-        if estado == "cerrada" or bloqueada_por_cierre:
+        if not puede_modificar_orden:
             boton_eliminar = ""
         else:
             boton_eliminar = f"""
@@ -3064,11 +3150,15 @@ def orden(orden_id):
         {boton_reimprimir}
     """
 
-    if not bloqueada_por_cierre:
+    if not bloqueada_por_cierre and estado != "cerrada":
         html += f"""
         <a href="/enviar_cocina/{orden_id}" class="btn-accion cocina">🍳 Enviar a cocina</a>
         <a href="/activar_factura/{orden_id}" class="btn-accion" style="background:#8e44ad;">🧾 Facturar</a>
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar"{advertencia_cobro}>💵 Cobrar</a>
+        """
+    elif edicion_emergencia_activa:
+        html += f"""
+        <a href="/cobrar/{orden_id}" class="btn-accion cobrar">💵 Volver a cobrar</a>
         """
 
     if not bloqueada_por_cierre and items and estado in ("abierta", "en cocina", "cerrada"):
@@ -3201,6 +3291,17 @@ def orden(orden_id):
             form.querySelector('input[name="clave"]').value = clave;
         }});
     }});
+
+    document.querySelectorAll(".form-emergencia").forEach(function(form) {{
+        form.addEventListener("submit", function(event) {{
+            const clave = pedirClaveSupervisor();
+            if (!clave) {{
+                event.preventDefault();
+                return;
+            }}
+            form.querySelector('input[name="clave"]').value = clave;
+        }});
+    }});
     </script>
     </body>
     </html>
@@ -3223,7 +3324,7 @@ def agregar(orden_id, producto_id):
         conn.close()
         return "No puedes modificar una orden archivada en cierre de jornada"
 
-    if row[0] == "cerrada":
+    if row[0] == "cerrada" and not emergencia_activa(orden_id):
         conn.close()
         return "No puedes agregar productos a una orden cerrada"
 
@@ -3248,6 +3349,13 @@ def agregar(orden_id, producto_id):
         """,
         (orden_id, producto_nombre, p[1]),
     )
+    if row[0] == "cerrada" and emergencia_activa(orden_id):
+        registrar_auditoria_emergencia(
+            cursor,
+            orden_id,
+            "agregar_producto_emergencia",
+            f"Producto agregado: {producto_nombre} - ${p[1]}",
+        )
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -3351,23 +3459,31 @@ def eliminar_item(item_id, orden_id):
         return "Orden archivada, no se puede modificar"
 
     estado = row[0]
-    if estado == "cerrada":
+    if estado == "cerrada" and not emergencia_activa(orden_id):
         conn.close()
         return "Orden cerrada, no se puede modificar"
 
     cursor.execute(
         """
-        SELECT id
+        SELECT id, producto, precio
         FROM orden_items
         WHERE id=? AND orden_id=?
         """,
         (item_id, orden_id),
     )
-    if not cursor.fetchone():
+    item_row = cursor.fetchone()
+    if not item_row:
         conn.close()
         return "Producto no encontrado en esta orden"
 
     cursor.execute("DELETE FROM orden_items WHERE id=? AND orden_id=?", (item_id, orden_id))
+    if estado == "cerrada" and emergencia_activa(orden_id):
+        registrar_auditoria_emergencia(
+            cursor,
+            orden_id,
+            "eliminar_producto_emergencia",
+            f"Producto eliminado: {item_row[1]} - ${item_row[2]}",
+        )
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -3378,15 +3494,20 @@ def editar_orden(orden_id):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT cierre_id FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
     bloqueo = cursor.fetchone()
     if not bloqueo:
         conn.close()
         return "Orden no encontrada"
 
-    if bloqueo[0] is not None:
+    estado_orden, cierre_id = bloqueo
+    if cierre_id is not None:
         conn.close()
-        return "No se puede editar una orden archivada por cierre de jornada"
+        return "Esta orden ya pertenece a un cierre de jornada. Primero debes revertirla desde reportes."
+
+    if estado_orden == "cerrada" and not emergencia_activa(orden_id):
+        conn.close()
+        return "Orden cerrada, no se puede modificar"
 
     if request.method == "POST":
         tipo = request.form.get("tipo")
@@ -3401,6 +3522,13 @@ def editar_orden(orden_id):
             """,
             (tipo, referencia, cliente, observacion, orden_id),
         )
+        if estado_orden == "cerrada" and emergencia_activa(orden_id):
+            registrar_auditoria_emergencia(
+                cursor,
+                orden_id,
+                "editar_datos_orden_emergencia",
+                "Datos de la orden editados en emergencia",
+            )
         conn.commit()
         conn.close()
         return redirect(f"/orden/{orden_id}")
@@ -3498,6 +3626,53 @@ def eliminar_orden(orden_id):
     return redirect("/")
 
 
+@app.route("/activar_edicion_emergencia/<int:orden_id>", methods=["POST"])
+def activar_edicion_emergencia(orden_id):
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
+    clave = request.form.get("clave", "").strip()
+    if clave != CLAVE_SUPERVISOR:
+        return "Clave incorrecta"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT estado, cierre_id
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    orden_row = cursor.fetchone()
+
+    if not orden_row:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado, cierre_id = orden_row
+    if cierre_id is not None:
+        conn.close()
+        return "Esta orden ya pertenece a un cierre de jornada. Primero debes revertirla desde reportes."
+
+    if estado != "cerrada":
+        conn.close()
+        return "La edicion de emergencia solo aplica a ordenes cobradas"
+
+    registrar_auditoria_emergencia(
+        cursor,
+        orden_id,
+        "activar_edicion_emergencia",
+        "Edicion de emergencia activada por supervisor",
+    )
+    conn.commit()
+    conn.close()
+
+    activar_emergencia_sesion(orden_id)
+    return redirect(f"/orden/{orden_id}")
+
+
 @app.route("/cobrar/<int:orden_id>", methods=["GET", "POST"])
 def cobrar(orden_id):
     conn = get_connection()
@@ -3523,11 +3698,11 @@ def cobrar(orden_id):
 
     if o[10] is not None:
         conn.close()
-        return "Esta orden ya pertenece a un cierre de jornada"
+        return "Esta orden ya pertenece a un cierre de jornada. Primero debes revertirla desde reportes."
 
-    if estado == "cerrada" and o[10] is not None:
+    if estado == "cerrada" and not emergencia_activa(orden_id):
         conn.close()
-        return "Esta orden ya esta cerrada"
+        return "Orden cerrada, no se puede volver a cobrar sin activar edicion de emergencia"
 
     cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
     items = cursor.fetchall()
@@ -3637,8 +3812,18 @@ def cobrar(orden_id):
                     conn.close()
                     return "Esta orden ya fue cerrada o pertenece a un cierre de jornada"
 
+                if estado == "cerrada" and emergencia_activa(orden_id):
+                    registrar_auditoria_emergencia(
+                        cursor,
+                        orden_id,
+                        "volver_a_cobrar_emergencia",
+                        "Pagos reemplazados durante edicion de emergencia",
+                    )
+
                 conn.commit()
                 conn.close()
+                if estado == "cerrada":
+                    desactivar_emergencia_sesion(orden_id)
                 return redirect("/")
 
     conn.close()
