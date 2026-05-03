@@ -253,6 +253,46 @@ def normalizar_sabor_refresco(sabor):
     return sabor_limpio.strip()
 
 
+def normalizar_indicacion_item(indicacion):
+    indicacion = (indicacion or "").strip()
+    indicacion = re.sub(r"\s+", " ", indicacion)
+    return indicacion[:180]
+
+
+def texto_item_con_indicacion(producto, indicacion):
+    indicacion = normalizar_indicacion_item(indicacion)
+    if indicacion:
+        return f"{producto} ({indicacion})"
+    return producto
+
+
+def agrupar_items_comanda(items):
+    grupos = []
+    indices = {}
+
+    for producto, indicacion in items:
+        producto = producto or ""
+        indicacion = normalizar_indicacion_item(indicacion)
+        clave = (producto, indicacion)
+
+        if clave not in indices:
+            indices[clave] = len(grupos)
+            grupos.append(
+                {
+                    "producto": producto,
+                    "indicacion": indicacion,
+                    "cantidad": 0,
+                }
+            )
+
+        grupos[indices[clave]]["cantidad"] += 1
+
+    return [
+        f"{grupo['cantidad']}x {texto_item_con_indicacion(grupo['producto'], grupo['indicacion'])}"
+        for grupo in grupos
+    ]
+
+
 def etiqueta_metodo_pago(metodo):
     return ETIQUETAS_METODO_PAGO.get(normalizar_metodo_pago(metodo), metodo or "-")
 
@@ -1394,7 +1434,8 @@ def init_db():
             id {pk_autoincrement_sql()},
             orden_id INTEGER,
             producto TEXT,
-            precio REAL
+            precio REAL,
+            indicacion TEXT
         )
         """
     )
@@ -1460,6 +1501,7 @@ def init_db():
     asegurar_columna("ordenes", "cierre_id", "INTEGER")
     asegurar_columna("ordenes", "reimpresion_token", "TEXT")
     asegurar_columna("ordenes", "factura_reimpresion_token", "TEXT")
+    asegurar_columna("orden_items", "indicacion", "TEXT")
     asegurar_columna_facturar()
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
@@ -2935,7 +2977,7 @@ def orden(orden_id):
 
     cursor.execute(
         """
-        SELECT producto, precio, id
+        SELECT producto, precio, id, COALESCE(indicacion, '')
         FROM orden_items
         WHERE orden_id=?
         """,
@@ -3013,6 +3055,11 @@ def orden(orden_id):
     .sabor-naranja {{ background:#FFA500; color:#111827; }}
     .sabor-uva {{ background:#6A0DAD; color:white; }}
     .sabor-btn.otro {{ background:#8e44ad; color:white; }}
+    .item-orden {{ display:flex; justify-content:space-between; align-items:flex-start; margin:5px 0; gap:10px; border-bottom:1px solid #e5e7eb; padding:7px 0; }}
+    .item-detalle {{ flex:1; min-width:0; }}
+    .item-indicacion {{ color:#7f1d1d; font-size:14px; margin-top:4px; font-weight:bold; }}
+    .acciones-item {{ display:flex; gap:6px; align-items:center; flex:0 0 auto; }}
+    .btn-item {{ color:white; border:none; border-radius:6px; padding:8px 10px; cursor:pointer; width:auto; min-height:38px; box-shadow:none; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; }}
@@ -3127,18 +3174,35 @@ def orden(orden_id):
     for i in items:
         if not puede_modificar_orden:
             boton_eliminar = ""
+            boton_indicacion = ""
         else:
             boton_eliminar = f"""
             <form method="post" action="/eliminar_item/{i[2]}/{orden_id}" class="form-eliminar-item" style="margin:0;">
                 <input type="hidden" name="clave" value="">
-                <button type="submit" style="background:#c0392b; color:white; border:none; border-radius:6px; padding:8px 12px; cursor:pointer; width:auto;">❌</button>
+                <button type="submit" class="btn-item" style="background:#c0392b;">❌</button>
+            </form>
+            """
+            boton_indicacion = f"""
+            <form method="post" action="/actualizar_indicacion_item/{i[2]}/{orden_id}" class="form-indicacion-item" style="margin:0;" data-indicacion="{html_lib.escape(i[3] or '', quote=True)}">
+                <input type="hidden" name="indicacion" value="">
+                <button type="submit" class="btn-item" style="background:#2980b9;">✏️</button>
             </form>
             """
 
+        indicacion_html = ""
+        if i[3]:
+            indicacion_html = f"<div class='item-indicacion'>(Indicación: {html_lib.escape(i[3])})</div>"
+
         html += f"""
-        <div style='display:flex; justify-content:space-between; margin:5px 0; gap:10px;'>
-            <span>{i[0]} - ${i[1]}</span>
-            {boton_eliminar}
+        <div class="item-orden">
+            <div class="item-detalle">
+                <div>{html_lib.escape(i[0])} - ${i[1]}</div>
+                {indicacion_html}
+            </div>
+            <div class="acciones-item">
+                {boton_indicacion}
+                {boton_eliminar}
+            </div>
         </div>
         """
 
@@ -3274,6 +3338,19 @@ def orden(orden_id):
                 return;
             }}
             form.querySelector('input[name="clave"]').value = clave;
+        }});
+    }});
+
+    document.querySelectorAll(".form-indicacion-item").forEach(function(form) {{
+        form.addEventListener("submit", function(event) {{
+            event.preventDefault();
+            const actual = form.dataset.indicacion || "";
+            const indicacion = prompt("Indicación especial para este plato", actual);
+            if (indicacion === null) {{
+                return;
+            }}
+            form.querySelector('input[name="indicacion"]').value = indicacion.trim();
+            form.submit();
         }});
     }});
 
@@ -3484,6 +3561,65 @@ def eliminar_item(item_id, orden_id):
             "eliminar_producto_emergencia",
             f"Producto eliminado: {item_row[1]} - ${item_row[2]}",
         )
+    conn.commit()
+    conn.close()
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/actualizar_indicacion_item/<int:item_id>/<int:orden_id>", methods=["POST"])
+def actualizar_indicacion_item(item_id, orden_id):
+    indicacion = normalizar_indicacion_item(request.form.get("indicacion", ""))
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return "Orden no encontrada"
+
+    estado, cierre_id = row
+    if cierre_id is not None:
+        conn.close()
+        return "Orden archivada, no se puede modificar"
+
+    if estado not in ("abierta", "en cocina") and not (
+        estado == "cerrada" and emergencia_activa(orden_id)
+    ):
+        conn.close()
+        return "Orden cerrada, no se puede modificar"
+
+    cursor.execute(
+        """
+        SELECT id, producto
+        FROM orden_items
+        WHERE id=? AND orden_id=?
+        """,
+        (item_id, orden_id),
+    )
+    item_row = cursor.fetchone()
+    if not item_row:
+        conn.close()
+        return "Producto no encontrado en esta orden"
+
+    cursor.execute(
+        """
+        UPDATE orden_items
+        SET indicacion=?
+        WHERE id=? AND orden_id=?
+        """,
+        (indicacion, item_id, orden_id),
+    )
+
+    if estado == "cerrada" and emergencia_activa(orden_id):
+        registrar_auditoria_emergencia(
+            cursor,
+            orden_id,
+            "editar_indicacion_emergencia",
+            f"Indicacion actualizada para {item_row[1]}: {indicacion}",
+        )
+
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -4930,10 +5066,18 @@ def pantalla_cocina():
         else:
             color_class = "red"
 
-        cursor.execute("SELECT producto FROM orden_items WHERE orden_id=?", (o[0],))
+        cursor.execute(
+            """
+            SELECT producto, COALESCE(indicacion, '')
+            FROM orden_items
+            WHERE orden_id=?
+            """,
+            (o[0],),
+        )
         items = cursor.fetchall()
         tiene_arroz = any("Arroz chino" in i[0] for i in items)
         tiene_otro = any("Arroz chino" not in i[0] for i in items)
+        lineas_comanda = agrupar_items_comanda(items)
 
         bloque = f"""
         <div class="orden {color_class}">
@@ -4943,8 +5087,8 @@ def pantalla_cocina():
             <p>{int(minutos)} min</p>
         """
 
-        for i in items:
-            bloque += f"<p>- {i[0]}</p>"
+        for linea in lineas_comanda:
+            bloque += f"<p>- {html_lib.escape(linea)}</p>"
 
         bloque += f"""
             <a href="/listo/{o[0]}">
@@ -5016,13 +5160,13 @@ def ordenes_cocina():
         for o in cursor.fetchall():
             cursor.execute(
                 """
-                SELECT producto
+                SELECT producto, COALESCE(indicacion, '')
                 FROM orden_items
                 WHERE orden_id=?
                 """,
                 (o[0],),
             )
-            items = [i[0] for i in cursor.fetchall()]
+            items = agrupar_items_comanda(cursor.fetchall())
 
             evento_impresion = f"{o[0]}-{o[7] if o[7] else 'base'}"
 
