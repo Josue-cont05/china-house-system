@@ -259,19 +259,36 @@ def normalizar_indicacion_item(indicacion):
     return indicacion[:180]
 
 
+def separar_prefijo_cantidad(producto):
+    producto = (producto or "").strip()
+    match = re.match(r"^(\d+)x\s+(.+)$", producto, flags=re.IGNORECASE)
+    if not match:
+        return 1, producto
+
+    cantidad = int(match.group(1))
+    producto_limpio = match.group(2).strip()
+    return max(cantidad, 1), producto_limpio
+
+
+def producto_sin_prefijo_cantidad(producto):
+    _, producto_limpio = separar_prefijo_cantidad(producto)
+    return producto_limpio
+
+
 def texto_item_con_indicacion(producto, indicacion):
+    producto = producto_sin_prefijo_cantidad(producto)
     indicacion = normalizar_indicacion_item(indicacion)
     if indicacion:
         return f"{producto} ({indicacion})"
     return producto
 
 
-def agrupar_items_comanda(items):
+def agrupar_items_comanda(items, incluir_cantidad=True):
     grupos = []
     indices = {}
 
     for producto, indicacion in items:
-        producto = producto or ""
+        cantidad_producto, producto = separar_prefijo_cantidad(producto)
         indicacion = normalizar_indicacion_item(indicacion)
         clave = (producto, indicacion)
 
@@ -285,12 +302,16 @@ def agrupar_items_comanda(items):
                 }
             )
 
-        grupos[indices[clave]]["cantidad"] += 1
+        grupos[indices[clave]]["cantidad"] += cantidad_producto
 
-    return [
-        f"{grupo['cantidad']}x {texto_item_con_indicacion(grupo['producto'], grupo['indicacion'])}"
-        for grupo in grupos
-    ]
+    lineas = []
+    for grupo in grupos:
+        texto = texto_item_con_indicacion(grupo["producto"], grupo["indicacion"])
+        if incluir_cantidad:
+            texto = f"{grupo['cantidad']}x {texto}"
+        lineas.append(texto)
+
+    return lineas
 
 
 def etiqueta_metodo_pago(metodo):
@@ -5166,7 +5187,7 @@ def ordenes_cocina():
                 """,
                 (o[0],),
             )
-            items = agrupar_items_comanda(cursor.fetchall())
+            items = agrupar_items_comanda(cursor.fetchall(), incluir_cantidad=False)
 
             evento_impresion = f"{o[0]}-{o[7] if o[7] else 'base'}"
 
@@ -5228,7 +5249,7 @@ def factura(orden_id):
 
     cursor.execute(
         """
-        SELECT producto, precio
+        SELECT producto, precio, COALESCE(indicacion, '')
         FROM orden_items
         WHERE orden_id=?
         """,
@@ -5268,7 +5289,7 @@ def factura(orden_id):
     for i in items:
         html += f"""
         <div class="item">
-            <span>{i[0]}</span>
+            <span>{html_lib.escape(texto_item_con_indicacion(i[0], i[2]))}</span>
             <span>${i[1]}</span>
         </div>
         """
@@ -5310,7 +5331,7 @@ def facturas_pendientes():
         for o in ordenes:
             cursor.execute(
                 """
-                SELECT producto, precio
+                SELECT producto, precio, COALESCE(indicacion, '')
                 FROM orden_items
                 WHERE orden_id=?
                 """,
@@ -5327,7 +5348,10 @@ def facturas_pendientes():
                     "referencia": o[4],
                     "usuario": o[5] if o[5] else "N/A",
                     "evento_impresion": f"{o[0]}-{o[6] if o[6] else 'base'}",
-                    "items": [f"{i[0]} - ${i[1]}" for i in items],
+                    "items": [
+                        f"{texto_item_con_indicacion(i[0], i[2])} - ${i[1]}"
+                        for i in items
+                    ],
                     "total": sum(i[1] for i in items),
                 }
             )
