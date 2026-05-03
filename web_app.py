@@ -259,8 +259,18 @@ def normalizar_indicacion_item(indicacion):
     return indicacion[:180]
 
 
+def quitar_prefijo_cantidad_visual(texto):
+    texto = (texto or "").strip()
+
+    while True:
+        limpio = re.sub(r"^1x\s+(\d+x\s+.+)$", r"\1", texto, flags=re.IGNORECASE)
+        if limpio == texto:
+            return texto
+        texto = limpio.strip()
+
+
 def separar_prefijo_cantidad(producto):
-    producto = (producto or "").strip()
+    producto = quitar_prefijo_cantidad_visual(producto)
     match = re.match(r"^(\d+)x\s+(.+)$", producto, flags=re.IGNORECASE)
     if not match:
         return 1, producto
@@ -309,7 +319,7 @@ def agrupar_items_comanda(items, incluir_cantidad=True):
         texto = texto_item_con_indicacion(grupo["producto"], grupo["indicacion"])
         if incluir_cantidad:
             texto = f"{grupo['cantidad']}x {texto}"
-        lineas.append(texto)
+        lineas.append(quitar_prefijo_cantidad_visual(texto))
 
     return lineas
 
@@ -340,7 +350,9 @@ def agrupar_items_factura(items):
 
     return [
         {
-            "texto": f"{grupo['cantidad']}x {texto_item_con_indicacion(grupo['producto'], grupo['indicacion'])}",
+            "texto": quitar_prefijo_cantidad_visual(
+                f"{grupo['cantidad']}x {texto_item_con_indicacion(grupo['producto'], grupo['indicacion'])}"
+            ),
             "precio_total": grupo["precio_total"],
         }
         for grupo in grupos
@@ -5142,7 +5154,7 @@ def pantalla_cocina():
         """
 
         for linea in lineas_comanda:
-            bloque += f"<p>- {html_lib.escape(linea)}</p>"
+            bloque += f"<p>- {html_lib.escape(quitar_prefijo_cantidad_visual(linea))}</p>"
 
         bloque += f"""
             <a href="/listo/{o[0]}">
@@ -5220,7 +5232,10 @@ def ordenes_cocina():
                 """,
                 (o[0],),
             )
-            items = agrupar_items_comanda(cursor.fetchall())
+            items = [
+                quitar_prefijo_cantidad_visual(item)
+                for item in agrupar_items_comanda(cursor.fetchall())
+            ]
 
             evento_impresion = f"{o[0]}-{o[7] if o[7] else 'base'}"
 
@@ -5323,7 +5338,7 @@ def factura(orden_id):
     for item in items_agrupados:
         html += f"""
         <div class="item">
-            <span>{html_lib.escape(item["texto"])}</span>
+            <span>{html_lib.escape(quitar_prefijo_cantidad_visual(item["texto"]))}</span>
             <span>${round(item["precio_total"], 2)}</span>
         </div>
         """
@@ -5384,7 +5399,7 @@ def facturas_pendientes():
                     "usuario": o[5] if o[5] else "N/A",
                     "evento_impresion": f"{o[0]}-{o[6] if o[6] else 'base'}",
                     "items": [
-                        f"{item['texto']} - ${round(item['precio_total'], 2)}"
+                        f"{quitar_prefijo_cantidad_visual(item['texto'])} - ${round(item['precio_total'], 2)}"
                         for item in items_agrupados
                     ],
                     "total": sum(i[1] for i in items),
