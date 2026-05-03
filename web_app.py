@@ -314,6 +314,39 @@ def agrupar_items_comanda(items, incluir_cantidad=True):
     return lineas
 
 
+def agrupar_items_factura(items):
+    grupos = []
+    indices = {}
+
+    for producto, precio, indicacion in items:
+        cantidad_producto, producto = separar_prefijo_cantidad(producto)
+        indicacion = normalizar_indicacion_item(indicacion)
+        precio = a_float(precio)
+        clave = (producto, indicacion)
+
+        if clave not in indices:
+            indices[clave] = len(grupos)
+            grupos.append(
+                {
+                    "producto": producto,
+                    "indicacion": indicacion,
+                    "cantidad": 0,
+                    "precio_total": 0.0,
+                }
+            )
+
+        grupos[indices[clave]]["cantidad"] += cantidad_producto
+        grupos[indices[clave]]["precio_total"] += precio
+
+    return [
+        {
+            "texto": f"{grupo['cantidad']}x {texto_item_con_indicacion(grupo['producto'], grupo['indicacion'])}",
+            "precio_total": grupo["precio_total"],
+        }
+        for grupo in grupos
+    ]
+
+
 def etiqueta_metodo_pago(metodo):
     return ETIQUETAS_METODO_PAGO.get(normalizar_metodo_pago(metodo), metodo or "-")
 
@@ -5187,7 +5220,7 @@ def ordenes_cocina():
                 """,
                 (o[0],),
             )
-            items = agrupar_items_comanda(cursor.fetchall(), incluir_cantidad=False)
+            items = agrupar_items_comanda(cursor.fetchall())
 
             evento_impresion = f"{o[0]}-{o[7] if o[7] else 'base'}"
 
@@ -5259,6 +5292,7 @@ def factura(orden_id):
     conn.close()
 
     total = sum(i[1] for i in items)
+    items_agrupados = agrupar_items_factura(items)
     html = f"""
     <html>
     <head>
@@ -5286,11 +5320,11 @@ def factura(orden_id):
     <div class="sep"></div>
     """
 
-    for i in items:
+    for item in items_agrupados:
         html += f"""
         <div class="item">
-            <span>{html_lib.escape(texto_item_con_indicacion(i[0], i[2]))}</span>
-            <span>${i[1]}</span>
+            <span>{html_lib.escape(item["texto"])}</span>
+            <span>${round(item["precio_total"], 2)}</span>
         </div>
         """
 
@@ -5338,6 +5372,7 @@ def facturas_pendientes():
                 (o[0],),
             )
             items = cursor.fetchall()
+            items_agrupados = agrupar_items_factura(items)
 
             resultado.append(
                 {
@@ -5349,8 +5384,8 @@ def facturas_pendientes():
                     "usuario": o[5] if o[5] else "N/A",
                     "evento_impresion": f"{o[0]}-{o[6] if o[6] else 'base'}",
                     "items": [
-                        f"{texto_item_con_indicacion(i[0], i[2])} - ${i[1]}"
-                        for i in items
+                        f"{item['texto']} - ${round(item['precio_total'], 2)}"
+                        for item in items_agrupados
                     ],
                     "total": sum(i[1] for i in items),
                 }
