@@ -14,6 +14,7 @@ TASA_FALLBACK = 515
 
 BASE_DIR = Path(__file__).resolve().parent
 ARCHIVO_IMPRESAS = BASE_DIR / "facturas_impresas.txt"
+ARCHIVO_TASA_CACHE = BASE_DIR / "tasa_cache.txt"
 
 ESC_POS_INICIALIZAR = b"\x1b\x40"
 ESC_POS_AVANCE = b"\n\n\n\n"
@@ -52,6 +53,35 @@ def guardar_impreso(evento_impresion):
         return False
 
 
+def cargar_tasa_cache():
+    try:
+        if not ARCHIVO_TASA_CACHE.exists():
+            return None
+        tasa = a_float(ARCHIVO_TASA_CACHE.read_text(encoding="utf-8").strip(), None)
+        if tasa and tasa > 0:
+            return tasa
+    except Exception as e:
+        print(f"ADVERTENCIA: No se pudo leer tasa cacheada: {e}")
+    return None
+
+
+def guardar_tasa_cache(tasa):
+    try:
+        ARCHIVO_TASA_CACHE.write_text(str(tasa), encoding="utf-8")
+    except Exception as e:
+        print(f"ADVERTENCIA: No se pudo guardar tasa cacheada: {e}")
+
+
+def tasa_de_emergencia():
+    tasa_cache = cargar_tasa_cache()
+    if tasa_cache:
+        print(f"ADVERTENCIA: Usando tasa cacheada: {tasa_cache:g}")
+        return tasa_cache
+
+    print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
+    return TASA_FALLBACK
+
+
 def a_float(valor, default=0.0):
     try:
         if valor is None:
@@ -77,7 +107,7 @@ def obtener_tasa():
     inicio = time.perf_counter()
 
     try:
-        respuesta = session_http.get(URL_TASA, timeout=5)
+        respuesta = session_http.get(URL_TASA, timeout=2)
         duracion = time.perf_counter() - inicio
 
         if respuesta.status_code != 200:
@@ -85,43 +115,42 @@ def obtener_tasa():
                 f"ADVERTENCIA: Error obteniendo tasa desde API: HTTP {respuesta.status_code} "
                 f"en {duracion:.2f}s. Respuesta: {texto_parcial_respuesta(respuesta)}"
             )
-            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
-            return TASA_FALLBACK
+            return tasa_de_emergencia()
 
         try:
             datos = respuesta.json()
         except Exception as e:
             print(f"ADVERTENCIA: /api/tasa no devolvio JSON valido en {duracion:.2f}s: {e}")
             print(f"ADVERTENCIA: Respuesta: {texto_parcial_respuesta(respuesta)}")
-            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
-            return TASA_FALLBACK
+            return tasa_de_emergencia()
 
         if not datos.get("ok"):
             print(f"ADVERTENCIA: /api/tasa respondio error en {duracion:.2f}s: {datos}")
-            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
-            return TASA_FALLBACK
+            return tasa_de_emergencia()
 
         tasa = a_float(datos.get("tasa"))
         if tasa <= 0:
             print(f"ADVERTENCIA: /api/tasa devolvio tasa invalida en {duracion:.2f}s: {datos}")
-            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
-            return TASA_FALLBACK
+            return tasa_de_emergencia()
 
-        print(f"Tasa obtenida desde API: {tasa:g} en {duracion:.2f}s")
+        guardar_tasa_cache(tasa)
         return tasa
 
+    except requests.exceptions.Timeout as e:
+        duracion = time.perf_counter() - inicio
+        print(f"ADVERTENCIA: Render lento consultando /api/tasa en {duracion:.2f}s: {e}")
+        return tasa_de_emergencia()
     except Exception as e:
         duracion = time.perf_counter() - inicio
         print(f"ADVERTENCIA: Error consultando /api/tasa en {duracion:.2f}s: {e}")
-        print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
-        return TASA_FALLBACK
+        return tasa_de_emergencia()
 
 
 def obtener_facturas():
     inicio = time.perf_counter()
 
     try:
-        respuesta = session_http.get(URL_FACTURAS, timeout=8)
+        respuesta = session_http.get(URL_FACTURAS, timeout=3)
         duracion = time.perf_counter() - inicio
 
         if respuesta.status_code != 200:
@@ -142,9 +171,14 @@ def obtener_facturas():
             print(f"ADVERTENCIA: Respuesta de facturas no es una lista en {duracion:.2f}s: {facturas}")
             return []
 
-        print(f"Facturas recibidas: {len(facturas)} en {duracion:.2f}s")
+        if facturas:
+            print(f"Facturas recibidas: {len(facturas)} en {duracion:.2f}s")
         return facturas
 
+    except requests.exceptions.Timeout as e:
+        duracion = time.perf_counter() - inicio
+        print(f"ADVERTENCIA: Render lento buscando facturas en {duracion:.2f}s: {e}")
+        return []
     except Exception as e:
         duracion = time.perf_counter() - inicio
         print(f"ADVERTENCIA: Error conexion facturas en {duracion:.2f}s: {e}")
@@ -241,7 +275,7 @@ def desactivar_factura(factura_id):
     inicio = time.perf_counter()
 
     try:
-        respuesta = session_http.get(f"{URL_DESACTIVAR}/{factura_id}", timeout=8)
+        respuesta = session_http.get(f"{URL_DESACTIVAR}/{factura_id}", timeout=2)
         duracion = time.perf_counter() - inicio
 
         try:
@@ -250,7 +284,7 @@ def desactivar_factura(factura_id):
             datos = None
 
         if respuesta.status_code == 200 and isinstance(datos, dict) and datos.get("ok"):
-            print(f"Factura {factura_id} desactivada en {duracion:.2f}s")
+            print(f"Factura {factura_id} desactivada")
             return True
 
         if datos is not None:
@@ -265,6 +299,10 @@ def desactivar_factura(factura_id):
             )
         return False
 
+    except requests.exceptions.Timeout as e:
+        duracion = time.perf_counter() - inicio
+        print(f"ADVERTENCIA: Render lento desactivando factura {factura_id} en {duracion:.2f}s: {e}")
+        return False
     except Exception as e:
         duracion = time.perf_counter() - inicio
         print(f"ADVERTENCIA: No se pudo desactivar factura {factura_id} en {duracion:.2f}s: {e}")
@@ -371,6 +409,7 @@ def procesar_factura(factura):
     if impresa_correctamente:
         impresos.add(evento_impresion)
         guardar_impreso(evento_impresion)
+        print(f"Factura {factura_id} impresa")
         desactivar_factura(factura_id)
     else:
         print(
@@ -396,16 +435,18 @@ def ejecutar_loop_facturas():
 
     while True:
         try:
-            print("Buscando facturas...")
             facturas = obtener_facturas()
 
             for factura in facturas:
                 procesar_factura(factura)
 
+            if facturas:
+                continue
+
         except Exception as e:
             print(f"ERROR general: {e}")
 
-        time.sleep(3)
+        time.sleep(2)
 
 
 def main():

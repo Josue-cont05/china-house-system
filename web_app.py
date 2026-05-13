@@ -5395,19 +5395,30 @@ def facturas_pendientes():
             """
         )
         ordenes = cursor.fetchall()
-
         resultado = []
 
+        if not ordenes:
+            conn.close()
+            return jsonify(resultado)
+
+        orden_ids = [o[0] for o in ordenes]
+        placeholders = ",".join("?" for _ in orden_ids)
+        cursor.execute(
+            f"""
+            SELECT orden_id, producto, precio, COALESCE(indicacion, '')
+            FROM orden_items
+            WHERE orden_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            orden_ids,
+        )
+
+        items_por_orden = defaultdict(list)
+        for orden_id, producto, precio, indicacion in cursor.fetchall():
+            items_por_orden[orden_id].append((producto, precio, indicacion))
+
         for o in ordenes:
-            cursor.execute(
-                """
-                SELECT producto, precio, COALESCE(indicacion, '')
-                FROM orden_items
-                WHERE orden_id=?
-                """,
-                (o[0],),
-            )
-            items = cursor.fetchall()
+            items = items_por_orden[o[0]]
             items_agrupados = agrupar_items_factura(items)
 
             resultado.append(
@@ -5428,7 +5439,8 @@ def facturas_pendientes():
             )
 
         conn.close()
-        print(f"Facturas pendientes devueltas: {len(resultado)}")
+        if resultado:
+            print(f"Facturas pendientes devueltas: {len(resultado)}")
         return jsonify(resultado)
 
     except Exception as e:
