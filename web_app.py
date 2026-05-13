@@ -1392,7 +1392,14 @@ def generar_xlsx(hojas):
 
 @app.before_request
 def proteger_sistema():
-    rutas_publicas = {"login", "static", "ordenes_cocina", "facturas_pendientes"}
+    rutas_publicas = {
+        "login",
+        "static",
+        "ordenes_cocina",
+        "facturas_pendientes",
+        "desactivar_factura",
+        "api_tasa",
+    }
     rutas_admin = {
         "cierre",
         "cerrar_jornada",
@@ -5357,6 +5364,20 @@ def cerrar_dia():
     return redirect("/cerrar_jornada")
 
 
+@app.route("/api/tasa")
+def api_tasa():
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        tasa = obtener_tasa_actual(cursor)
+        conn.close()
+        print(f"/api/tasa responde tasa={tasa}")
+        return jsonify({"ok": True, "tasa": tasa})
+    except Exception as e:
+        print("ERROR EN API_TASA:", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/facturas_pendientes")
 def facturas_pendientes():
     try:
@@ -5370,6 +5391,7 @@ def facturas_pendientes():
             FROM ordenes o
             LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
+              AND o.estado = 'cerrada'
               AND o.cierre_id IS NULL
             """
         )
@@ -5402,11 +5424,12 @@ def facturas_pendientes():
                         f"{quitar_prefijo_cantidad_visual(item['texto'])} - ${round(item['precio_total'], 2)}"
                         for item in items_agrupados
                     ],
-                    "total": sum(i[1] for i in items),
+                    "total": sum(a_float(i[1]) for i in items),
                 }
             )
 
         conn.close()
+        print(f"/facturas_pendientes devuelve {len(resultado)} facturas")
         return jsonify(resultado)
 
     except Exception as e:
@@ -5466,12 +5489,32 @@ def reimprimir_factura(orden_id):
 
 @app.route("/desactivar_factura/<int:orden_id>")
 def desactivar_factura(orden_id):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE ordenes SET facturar=0 WHERE id=?", (orden_id,))
-    conn.commit()
-    conn.close()
-    return "ok"
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM ordenes WHERE id=?", (orden_id,))
+        factura = cursor.fetchone()
+
+        if not factura:
+            conn.close()
+            return jsonify({"ok": False, "error": "Factura no encontrada"}), 404
+
+        cursor.execute("UPDATE ordenes SET facturar=0 WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+        print(f"/desactivar_factura desactivo factura {orden_id}")
+        return jsonify({"ok": True, "id": orden_id})
+
+    except Exception as e:
+        print("ERROR EN DESACTIVAR_FACTURA:", e)
+        if conn is not None:
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 with app.app_context():
