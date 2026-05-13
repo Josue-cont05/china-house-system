@@ -1,3 +1,4 @@
+import sys
 import time
 from pathlib import Path
 
@@ -14,25 +15,31 @@ TASA_FALLBACK = 515
 BASE_DIR = Path(__file__).resolve().parent
 ARCHIVO_IMPRESAS = BASE_DIR / "facturas_impresas.txt"
 
+ESC_POS_INICIALIZAR = b"\x1b\x40"
+ESC_POS_AVANCE = b"\n\n\n\n"
+ESC_POS_CORTE = b"\x1d\x56\x00"
+
 session_http = requests.Session()
+impresos = set()
+eventos_duplicados_reportados = set()
 
 
 def cargar_impresos():
-    impresos = set()
+    impresos_cargados = set()
 
     if not ARCHIVO_IMPRESAS.exists():
-        return impresos
+        return impresos_cargados
 
     try:
         with ARCHIVO_IMPRESAS.open("r", encoding="utf-8") as archivo:
             for linea in archivo:
                 evento_impresion = linea.strip()
                 if evento_impresion:
-                    impresos.add(evento_impresion)
+                    impresos_cargados.add(evento_impresion)
     except Exception as e:
-        print(f"⚠️ No se pudo cargar {ARCHIVO_IMPRESAS}: {e}")
+        print(f"ADVERTENCIA: No se pudo cargar {ARCHIVO_IMPRESAS}: {e}")
 
-    return impresos
+    return impresos_cargados
 
 
 def guardar_impreso(evento_impresion):
@@ -41,12 +48,8 @@ def guardar_impreso(evento_impresion):
             archivo.write(str(evento_impresion) + "\n")
         return True
     except Exception as e:
-        print(f"⚠️ No se pudo guardar factura impresa en {ARCHIVO_IMPRESAS}: {e}")
+        print(f"ADVERTENCIA: No se pudo guardar factura impresa en {ARCHIVO_IMPRESAS}: {e}")
         return False
-
-
-impresos = cargar_impresos()
-eventos_duplicados_reportados = set()
 
 
 def a_float(valor, default=0.0):
@@ -79,38 +82,38 @@ def obtener_tasa():
 
         if respuesta.status_code != 200:
             print(
-                f"⚠️ Error obteniendo tasa desde API: HTTP {respuesta.status_code} "
+                f"ADVERTENCIA: Error obteniendo tasa desde API: HTTP {respuesta.status_code} "
                 f"en {duracion:.2f}s. Respuesta: {texto_parcial_respuesta(respuesta)}"
             )
-            print(f"⚠️ Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
+            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
             return TASA_FALLBACK
 
         try:
             datos = respuesta.json()
         except Exception as e:
-            print(f"⚠️ /api/tasa no devolvió JSON válido en {duracion:.2f}s: {e}")
-            print(f"⚠️ Respuesta: {texto_parcial_respuesta(respuesta)}")
-            print(f"⚠️ Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
+            print(f"ADVERTENCIA: /api/tasa no devolvio JSON valido en {duracion:.2f}s: {e}")
+            print(f"ADVERTENCIA: Respuesta: {texto_parcial_respuesta(respuesta)}")
+            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
             return TASA_FALLBACK
 
         if not datos.get("ok"):
-            print(f"⚠️ /api/tasa respondió error en {duracion:.2f}s: {datos}")
-            print(f"⚠️ Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
+            print(f"ADVERTENCIA: /api/tasa respondio error en {duracion:.2f}s: {datos}")
+            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
             return TASA_FALLBACK
 
         tasa = a_float(datos.get("tasa"))
         if tasa <= 0:
-            print(f"⚠️ /api/tasa devolvió tasa inválida en {duracion:.2f}s: {datos}")
-            print(f"⚠️ Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
+            print(f"ADVERTENCIA: /api/tasa devolvio tasa invalida en {duracion:.2f}s: {datos}")
+            print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
             return TASA_FALLBACK
 
-        print(f"💱 Tasa obtenida desde API: {tasa:g} en {duracion:.2f}s")
+        print(f"Tasa obtenida desde API: {tasa:g} en {duracion:.2f}s")
         return tasa
 
     except Exception as e:
         duracion = time.perf_counter() - inicio
-        print(f"⚠️ Error consultando /api/tasa en {duracion:.2f}s: {e}")
-        print(f"⚠️ Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
+        print(f"ADVERTENCIA: Error consultando /api/tasa en {duracion:.2f}s: {e}")
+        print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
         return TASA_FALLBACK
 
 
@@ -123,7 +126,7 @@ def obtener_facturas():
 
         if respuesta.status_code != 200:
             print(
-                f"⚠️ Error API facturas: HTTP {respuesta.status_code} en {duracion:.2f}s. "
+                f"ADVERTENCIA: Error API facturas: HTTP {respuesta.status_code} en {duracion:.2f}s. "
                 f"Respuesta: {texto_parcial_respuesta(respuesta)}"
             )
             return []
@@ -131,53 +134,107 @@ def obtener_facturas():
         try:
             facturas = respuesta.json()
         except Exception as e:
-            print(f"⚠️ Respuesta de facturas no es JSON en {duracion:.2f}s: {e}")
-            print(f"⚠️ Respuesta: {texto_parcial_respuesta(respuesta)}")
+            print(f"ADVERTENCIA: Respuesta de facturas no es JSON en {duracion:.2f}s: {e}")
+            print(f"ADVERTENCIA: Respuesta: {texto_parcial_respuesta(respuesta)}")
             return []
 
         if not isinstance(facturas, list):
-            print(f"⚠️ Respuesta de facturas no es una lista en {duracion:.2f}s: {facturas}")
+            print(f"ADVERTENCIA: Respuesta de facturas no es una lista en {duracion:.2f}s: {facturas}")
             return []
 
-        print(f"📥 Facturas recibidas: {len(facturas)} en {duracion:.2f}s")
+        print(f"Facturas recibidas: {len(facturas)} en {duracion:.2f}s")
         return facturas
 
     except Exception as e:
         duracion = time.perf_counter() - inicio
-        print(f"⚠️ Error conexión facturas en {duracion:.2f}s: {e}")
+        print(f"ADVERTENCIA: Error conexion facturas en {duracion:.2f}s: {e}")
         return []
+
+
+def preparar_bytes_impresion(texto):
+    contenido = texto.encode("cp850", errors="replace")
+    return ESC_POS_INICIALIZAR + contenido + ESC_POS_AVANCE + ESC_POS_CORTE
 
 
 def imprimir(texto):
     inicio = time.perf_counter()
-    printer_name = win32print.GetDefaultPrinter()
-    print("🖨️ Usando impresora:", printer_name)
-
     hprinter = None
+    doc_iniciado = False
+    pagina_iniciada = False
 
     try:
-        hprinter = win32print.OpenPrinter(printer_name)
-        win32print.StartDocPrinter(hprinter, 1, ("Factura", None, "RAW"))
-        win32print.StartPagePrinter(hprinter)
-        win32print.WritePrinter(hprinter, texto.encode("cp850", errors="replace"))
-        win32print.EndPagePrinter(hprinter)
-        win32print.EndDocPrinter(hprinter)
+        try:
+            printer_name = win32print.GetDefaultPrinter()
+            print(f"Usando impresora: {printer_name}")
+        except Exception as e:
+            print(f"ERROR GetDefaultPrinter: {e}")
+            return False
+
+        datos = preparar_bytes_impresion(texto)
+        print(f"Bytes enviados a impresora: {len(datos)}")
+
+        try:
+            hprinter = win32print.OpenPrinter(printer_name)
+        except Exception as e:
+            print(f"ERROR OpenPrinter para '{printer_name}': {e}")
+            return False
+
+        try:
+            win32print.StartDocPrinter(hprinter, 1, ("Factura", None, "RAW"))
+            doc_iniciado = True
+        except Exception as e:
+            print(f"ERROR StartDocPrinter: {e}")
+            return False
+
+        try:
+            win32print.StartPagePrinter(hprinter)
+            pagina_iniciada = True
+        except Exception as e:
+            print(f"ERROR StartPagePrinter: {e}")
+            return False
+
+        try:
+            escritos = win32print.WritePrinter(hprinter, datos)
+            if escritos is not None:
+                print(f"WritePrinter reporto bytes escritos: {escritos}")
+        except Exception as e:
+            print(f"ERROR WritePrinter: {e}")
+            return False
+
+        try:
+            win32print.EndPagePrinter(hprinter)
+            pagina_iniciada = False
+        except Exception as e:
+            print(f"ERROR EndPagePrinter: {e}")
+            return False
+
+        try:
+            win32print.EndDocPrinter(hprinter)
+            doc_iniciado = False
+        except Exception as e:
+            print(f"ERROR EndDocPrinter: {e}")
+            return False
 
         duracion = time.perf_counter() - inicio
-        print(f"🖨️ Impresión enviada en {duracion:.2f}s")
+        print(f"Impresion enviada en {duracion:.2f}s")
         return True
-
-    except Exception as e:
-        duracion = time.perf_counter() - inicio
-        print(f"❌ Error imprimiendo en {duracion:.2f}s: {e}")
-        return False
 
     finally:
         if hprinter is not None:
+            if pagina_iniciada:
+                try:
+                    win32print.EndPagePrinter(hprinter)
+                except Exception as e:
+                    print(f"ADVERTENCIA cerrando pagina de impresion: {e}")
+            if doc_iniciado:
+                try:
+                    win32print.EndDocPrinter(hprinter)
+                except Exception as e:
+                    print(f"ADVERTENCIA cerrando documento de impresion: {e}")
             try:
                 win32print.ClosePrinter(hprinter)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"ADVERTENCIA ClosePrinter: {e}")
 
 
 def desactivar_factura(factura_id):
@@ -193,24 +250,24 @@ def desactivar_factura(factura_id):
             datos = None
 
         if respuesta.status_code == 200 and isinstance(datos, dict) and datos.get("ok"):
-            print(f"✅ Factura {factura_id} desactivada en {duracion:.2f}s")
+            print(f"Factura {factura_id} desactivada en {duracion:.2f}s")
             return True
 
         if datos is not None:
             print(
-                f"⚠️ No se pudo desactivar factura {factura_id} en {duracion:.2f}s: "
+                f"ADVERTENCIA: No se pudo desactivar factura {factura_id} en {duracion:.2f}s: "
                 f"HTTP {respuesta.status_code} {datos}"
             )
         else:
             print(
-                f"⚠️ No se pudo desactivar factura {factura_id} en {duracion:.2f}s: "
+                f"ADVERTENCIA: No se pudo desactivar factura {factura_id} en {duracion:.2f}s: "
                 f"HTTP {respuesta.status_code}. Respuesta: {texto_parcial_respuesta(respuesta)}"
             )
         return False
 
     except Exception as e:
         duracion = time.perf_counter() - inicio
-        print(f"⚠️ No se pudo desactivar factura {factura_id} en {duracion:.2f}s: {e}")
+        print(f"ADVERTENCIA: No se pudo desactivar factura {factura_id} en {duracion:.2f}s: {e}")
         return False
 
 
@@ -218,7 +275,7 @@ def parsear_item_factura(item):
     item = str(item or "").strip()
 
     if " - $" not in item:
-        print(f"⚠️ Item sin precio reconocible: {item}")
+        print(f"ADVERTENCIA: Item sin precio reconocible: {item}")
         return item, None
 
     nombre, precio_texto = item.rsplit(" - $", 1)
@@ -226,7 +283,7 @@ def parsear_item_factura(item):
     precio = a_float(precio_texto, None)
 
     if precio is None:
-        print(f"⚠️ Precio no reconocido en item: {item}")
+        print(f"ADVERTENCIA: Precio no reconocido en item: {item}")
         return item, None
 
     return nombre, precio
@@ -254,7 +311,7 @@ def construir_texto_factura(orden, tasa):
     )
 
     if not items:
-        print(f"⚠️ Factura {orden.get('id')} viene sin items")
+        print(f"ADVERTENCIA: Factura {orden.get('id')} viene sin items")
         texto += "Sin items\n"
     else:
         for item in items:
@@ -273,9 +330,21 @@ def construir_texto_factura(orden, tasa):
     return texto
 
 
+def construir_ticket_prueba():
+    return (
+        "\n"
+        "========================\n"
+        "      CHINA HOUSE\n"
+        "========================\n"
+        "PRUEBA DE IMPRESION\n"
+        "Si puedes leer esto, la impresora funciona.\n"
+        "========================\n"
+    )
+
+
 def imprimir_factura(orden):
     factura_id = orden.get("id")
-    print(f"🧾 IMPRIMIENDO FACTURA: {factura_id}")
+    print(f"IMPRIMIENDO FACTURA: {factura_id}")
 
     tasa = obtener_tasa()
     texto = construir_texto_factura(orden, tasa)
@@ -285,14 +354,14 @@ def imprimir_factura(orden):
 def procesar_factura(factura):
     factura_id = factura.get("id")
     if factura_id is None:
-        print(f"⚠️ Factura sin id, se omite: {factura}")
+        print(f"ADVERTENCIA: Factura sin id, se omite: {factura}")
         return
 
     evento_impresion = str(factura.get("evento_impresion") or factura_id)
 
     if evento_impresion in impresos:
         if evento_impresion not in eventos_duplicados_reportados:
-            print(f"⏭️ Evento {evento_impresion} ya impreso, desactivando pendiente")
+            print(f"Evento {evento_impresion} ya impreso, desactivando pendiente")
             eventos_duplicados_reportados.add(evento_impresion)
         desactivar_factura(factura_id)
         return
@@ -305,20 +374,47 @@ def procesar_factura(factura):
         desactivar_factura(factura_id)
     else:
         print(
-            f"⚠️ Evento {evento_impresion} no se marcó como impreso "
-            "porque falló la impresión"
+            f"ADVERTENCIA: Evento {evento_impresion} no se marco como impreso "
+            "porque fallo la impresion"
         )
 
 
-while True:
-    try:
-        print("🔄 Buscando facturas...")
-        facturas = obtener_facturas()
+def ejecutar_modo_prueba():
+    print("Ejecutando prueba de impresion RAW...")
+    ok = imprimir(construir_ticket_prueba())
+    if ok:
+        print("Prueba enviada correctamente al spooler de Windows.")
+        return 0
+    print("La prueba de impresion fallo. Revisa cola, driver, puerto o impresora.")
+    return 1
 
-        for factura in facturas:
-            procesar_factura(factura)
 
-    except Exception as e:
-        print("❌ Error general:", e)
+def ejecutar_loop_facturas():
+    global impresos
 
-    time.sleep(3)
+    impresos = cargar_impresos()
+
+    while True:
+        try:
+            print("Buscando facturas...")
+            facturas = obtener_facturas()
+
+            for factura in facturas:
+                procesar_factura(factura)
+
+        except Exception as e:
+            print(f"ERROR general: {e}")
+
+        time.sleep(3)
+
+
+def main():
+    if "--test-print" in sys.argv:
+        return ejecutar_modo_prueba()
+
+    ejecutar_loop_facturas()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

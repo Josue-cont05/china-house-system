@@ -5391,7 +5391,6 @@ def facturas_pendientes():
             FROM ordenes o
             LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
-              AND o.estado = 'cerrada'
               AND o.cierre_id IS NULL
             """
         )
@@ -5429,7 +5428,7 @@ def facturas_pendientes():
             )
 
         conn.close()
-        print(f"/facturas_pendientes devuelve {len(resultado)} facturas")
+        print(f"Facturas pendientes devueltas: {len(resultado)}")
         return jsonify(resultado)
 
     except Exception as e:
