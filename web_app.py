@@ -8,7 +8,7 @@ import sqlite3
 import zipfile
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from flask import Flask, Response, jsonify, redirect, request, session
+from flask import Flask, Response, g, jsonify, redirect, request, session
 import pytz
 
 try:
@@ -37,6 +37,7 @@ ETIQUETAS_METODO_PAGO = {
     "bs_efectivo": "Efectivo en Bs",
     "usd": "Efectivo en USD",
 }
+ROLES_USUARIO_VALIDOS = ("master", "mesonera", "cocina", "socio")
 
 
 def cargar_configuracion():
@@ -609,7 +610,56 @@ def usuario_activo():
 
 
 def usuario_rol():
-    return session.get("usuario_rol", "mesonera")
+    if hasattr(g, "usuario_rol_actual"):
+        return g.usuario_rol_actual
+
+    usuario_id = session.get("usuario_id")
+    if usuario_id:
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT nombre, COALESCE(rol, 'mesonera')
+                FROM usuarios
+                WHERE id=?
+                """,
+                (usuario_id,),
+            )
+            row = cursor.fetchone()
+            conn.close()
+
+            if row:
+                rol_db = row[1] if row[1] in ROLES_USUARIO_VALIDOS else "mesonera"
+                session["usuario_nombre"] = row[0]
+                session["usuario"] = row[0]
+                session["usuario_rol"] = rol_db
+                g.usuario_rol_actual = rol_db
+                return rol_db
+        except Exception:
+            pass
+
+    rol = session.get("usuario_rol", "")
+    if rol in ROLES_USUARIO_VALIDOS:
+        g.usuario_rol_actual = rol
+        return rol
+
+    roles_por_nombre = {
+        "Josue": "master",
+        "Emmanuel": "master",
+        "Monica": "mesonera",
+        "Gaby": "mesonera",
+        "Julissa": "mesonera",
+        "Oscar": "mesonera",
+        "Ismaldo": "cocina",
+        "Margelis": "cocina",
+        "Fabian": "socio",
+        "Jessica": "socio",
+    }
+    rol = roles_por_nombre.get(session.get("usuario") or session.get("usuario_nombre"), "mesonera")
+    session["usuario_rol"] = rol
+    g.usuario_rol_actual = rol
+    return rol
 
 
 def usuario_es_master():
@@ -1661,6 +1711,8 @@ def proteger_sistema():
         "reimprimir_cocina",
         "cambiar_tasa",
         "usuarios",
+        "crear_usuario",
+        "editar_usuario",
         "activar_edicion_emergencia",
     }
 
@@ -1677,6 +1729,7 @@ def proteger_sistema():
         "nueva_orden",
         "orden",
         "agregar",
+        "enviar_cocina",
         "activar_factura",
         "reimprimir_factura",
         "factura",
@@ -1696,25 +1749,60 @@ def proteger_sistema():
         return redirect("/login")
 
     if request.endpoint in solo_master and not usuario_es_master():
+        print(
+            f"[PERMISO BLOQUEADO] "
+            f"endpoint={request.endpoint} "
+            f"rol={usuario_rol()} "
+            f"path={request.path}"
+        )
         return "Acceso denegado", 403
 
     if request.endpoint in master_socio and not usuario_puede_reportes():
+        print(
+            f"[PERMISO BLOQUEADO] "
+            f"endpoint={request.endpoint} "
+            f"rol={usuario_rol()} "
+            f"path={request.path}"
+        )
         return "Acceso denegado", 403
 
     if request.endpoint in master_cocina:
         if request.endpoint == "inventario" and not usuario_puede_ver_inventario():
+            print(
+                f"[PERMISO BLOQUEADO] "
+                f"endpoint={request.endpoint} "
+                f"rol={usuario_rol()} "
+                f"path={request.path}"
+            )
             return "Acceso denegado", 403
         if request.endpoint == "produccion" and not usuario_puede_produccion():
+            print(
+                f"[PERMISO BLOQUEADO] "
+                f"endpoint={request.endpoint} "
+                f"rol={usuario_rol()} "
+                f"path={request.path}"
+            )
             return "Acceso denegado", 403
 
     if request.endpoint in toma_ordenes and not usuario_puede_tomar_ordenes():
+        print(
+            f"[PERMISO BLOQUEADO] "
+            f"endpoint={request.endpoint} "
+            f"rol={usuario_rol()} "
+            f"path={request.path}"
+        )
         return "Acceso denegado", 403
 
     if request.endpoint in acceso_cocina and usuario_rol() not in (
         "master",
-        "mesonera",
         "cocina",
     ):
+        print(
+            f"[PERMISO BLOQUEADO] "
+            f"endpoint={request.endpoint} "
+            f"rol={usuario_rol()} "
+            f"path={request.path}"
+        )
         return "Acceso denegado", 403
 
 
@@ -1986,6 +2074,8 @@ def login():
             session["usuario"] = usuario[1]
             session["usuario_rol"] = usuario[2] or "mesonera"
             conn.close()
+            if session["usuario_rol"] == "cocina":
+                return redirect("/cocina")
             return redirect("/")
 
         error = "Usuario o PIN incorrecto"
@@ -2044,6 +2134,21 @@ def logout():
     return redirect("/login")
 
 
+def opciones_roles_usuario(rol_actual=""):
+    opciones = []
+    for rol in ROLES_USUARIO_VALIDOS:
+        seleccionado = " selected" if rol == rol_actual else ""
+        opciones.append(f'<option value="{rol}"{seleccionado}>{rol}</option>')
+    return "".join(opciones)
+
+
+def rol_desde_formulario():
+    rol = (request.form.get("rol") or "").strip().lower()
+    if rol not in ROLES_USUARIO_VALIDOS:
+        return ""
+    return rol
+
+
 @app.route("/usuarios")
 def usuarios():
     if not usuario_es_master():
@@ -2053,7 +2158,7 @@ def usuarios():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT nombre, COALESCE(rol, 'mesonera'), pin
+        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin
         FROM usuarios
         ORDER BY rol ASC, nombre ASC
         """
@@ -2062,18 +2167,19 @@ def usuarios():
     conn.close()
 
     filas_html = ""
-    for nombre, rol, pin in filas_usuarios:
+    for usuario_id, nombre, rol, pin in filas_usuarios:
         pin_estado = "Configurado" if pin else "Sin configurar"
         filas_html += f"""
         <tr>
             <td>{html_lib.escape(nombre or '')}</td>
             <td>{html_lib.escape(rol or 'mesonera')}</td>
             <td>{pin_estado}</td>
+            <td><a class="btn-editar" href="/editar_usuario/{usuario_id}">Editar</a></td>
         </tr>
         """
 
     if not filas_html:
-        filas_html = '<tr><td colspan="3">No hay usuarios registrados.</td></tr>'
+        filas_html = '<tr><td colspan="4">No hay usuarios registrados.</td></tr>'
 
     return f"""
     <html>
@@ -2084,10 +2190,13 @@ def usuarios():
     {estilos_base()}
     body {{ margin:0; }}
     .contenido {{ padding:18px; max-width:900px; margin:auto; }}
-    .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; }}
+    .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; margin-bottom:16px; }}
     table {{ width:100%; border-collapse:collapse; }}
     th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
     th {{ background:#fff7ed; color:#7f1d1d; }}
+    .form-grid {{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:10px; align-items:end; }}
+    .btn-editar {{ color:white; background:#1d4ed8; padding:8px 10px; border-radius:6px; text-decoration:none; font-weight:bold; }}
+    @media (max-width: 760px) {{ .form-grid {{ grid-template-columns:1fr; }} }}
     </style>
     </head>
     <body>
@@ -2095,10 +2204,145 @@ def usuarios():
     <div class="contenido">
         <h1>Usuarios</h1>
         <div class="card">
+            <h2>Crear usuario</h2>
+            <form method="post" action="/crear_usuario" class="form-grid">
+                <div>
+                    <label>Nombre</label>
+                    <input name="nombre" required>
+                </div>
+                <div>
+                    <label>PIN</label>
+                    <input name="pin" required>
+                </div>
+                <div>
+                    <label>Rol</label>
+                    <select name="rol" required>{opciones_roles_usuario('mesonera')}</select>
+                </div>
+                <button type="submit">Crear</button>
+            </form>
+        </div>
+        <div class="card">
             <table>
-                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th></tr></thead>
+                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Accion</th></tr></thead>
                 <tbody>{filas_html}</tbody>
             </table>
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/crear_usuario", methods=["POST"])
+def crear_usuario():
+    if not usuario_es_master():
+        return "Acceso denegado", 403
+
+    nombre = (request.form.get("nombre") or "").strip()
+    pin = (request.form.get("pin") or "").strip()
+    rol = rol_desde_formulario()
+
+    if not nombre or not pin or not rol:
+        return "Datos invalidos", 400
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO usuarios (nombre, pin, rol)
+        VALUES (?, ?, ?)
+        """,
+        (nombre, pin, rol),
+    )
+    conn.commit()
+    conn.close()
+    return redirect("/usuarios")
+
+
+@app.route("/editar_usuario/<int:usuario_id>", methods=["GET", "POST"])
+def editar_usuario(usuario_id):
+    if not usuario_es_master():
+        return "Acceso denegado", 403
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nombre = (request.form.get("nombre") or "").strip()
+        pin = (request.form.get("pin") or "").strip()
+        rol = rol_desde_formulario()
+
+        if not nombre or not rol:
+            conn.close()
+            return "Datos invalidos", 400
+
+        if pin:
+            cursor.execute(
+                """
+                UPDATE usuarios
+                SET nombre=?, pin=?, rol=?
+                WHERE id=?
+                """,
+                (nombre, pin, rol, usuario_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE usuarios
+                SET nombre=?, rol=?
+                WHERE id=?
+                """,
+                (nombre, rol, usuario_id),
+            )
+
+        conn.commit()
+        conn.close()
+        return redirect("/usuarios")
+
+    cursor.execute(
+        """
+        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin
+        FROM usuarios
+        WHERE id=?
+        """,
+        (usuario_id,),
+    )
+    usuario = cursor.fetchone()
+    conn.close()
+
+    if not usuario:
+        return "Usuario no encontrado", 404
+
+    pin_estado = "Configurado" if usuario[3] else "Sin configurar"
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; max-width:620px; margin:auto; }}
+    .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/usuarios">Usuarios</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Editar usuario</h1>
+        <div class="card">
+            <form method="post">
+                <label>Nombre</label>
+                <input name="nombre" value="{html_lib.escape(usuario[1] or '', quote=True)}" required>
+                <label>Rol</label>
+                <select name="rol" required>{opciones_roles_usuario(usuario[2] or 'mesonera')}</select>
+                <label>PIN actual</label>
+                <input value="{pin_estado}" disabled>
+                <label>Nuevo PIN</label>
+                <input name="pin" placeholder="Dejar vacio para mantener el PIN actual">
+                <button type="submit">Guardar</button>
+            </form>
         </div>
     </div>
     </body>
@@ -2168,8 +2412,6 @@ def index():
         <a href="/usuarios">Usuarios</a>
         <a href="/cocina">Cocina</a>
         """
-    elif usuario_es_mesonera():
-        menu_links += '<a href="/cocina">Cocina</a>'
     elif usuario_es_socio():
         menu_links += '<a href="/reportes">Reportes</a><a href="/dashboard">Dashboard</a>'
 
@@ -4141,7 +4383,7 @@ def agregar(orden_id, producto_id):
 
 
 @app.route("/enviar_cocina/<int:orden_id>")
-def cocina(orden_id):
+def enviar_cocina(orden_id):
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -5032,7 +5274,7 @@ def revertir_orden_cierre(orden_id):
 
 @app.route("/reportes")
 def reportes():
-    if not usuario_es_admin_cierre():
+    if not usuario_puede_reportes():
         return "Acceso denegado", 403
 
     desde, hasta = fechas_reporte_desde_request()
@@ -5292,7 +5534,7 @@ def exportar_reporte():
 
 @app.route("/dashboard")
 def dashboard():
-    if not usuario_es_admin_cierre():
+    if not usuario_puede_reportes():
         return "Acceso denegado", 403
 
     desde, hasta = fechas_reporte_desde_request()
@@ -5715,7 +5957,7 @@ def pantalla_cocina():
     caliente_html = ""
     total_ordenes = len(ordenes)
     cocina_links = '<a href="/cocina">Cocina</a>'
-    if usuario_es_master() or usuario_es_mesonera():
+    if usuario_es_master():
         cocina_links = '<a href="/">Inicio</a>' + cocina_links
     if usuario_puede_ver_inventario():
         cocina_links += '<a href="/inventario">Inventario</a>'
