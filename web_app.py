@@ -558,6 +558,36 @@ def crear_tablas_inventario():
         """
     )
 
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS recetas (
+            id {pk_autoincrement_sql()},
+            producto_menu TEXT,
+            insumo TEXT,
+            cantidad REAL,
+            unidad TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS movimientos_inventario (
+            id {pk_autoincrement_sql()},
+            producto TEXT,
+            tipo TEXT,
+            cantidad REAL,
+            stock_anterior REAL,
+            stock_nuevo REAL,
+            costo_promedio REAL,
+            referencia TEXT,
+            usuario TEXT,
+            fecha TEXT,
+            observacion TEXT
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -608,6 +638,156 @@ def registrar_auditoria_emergencia(cursor, orden_id, accion, observacion=""):
         VALUES (?, ?, ?, ?, ?)
         """,
         (orden_id, usuario, fecha, accion, observacion or ""),
+    )
+
+
+def registrar_movimiento_inventario(
+    cursor,
+    producto,
+    tipo,
+    cantidad,
+    stock_anterior,
+    stock_nuevo,
+    costo_promedio,
+    referencia,
+    observacion="",
+):
+    usuario = usuario_activo() or session.get("usuario", "")
+    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """
+        INSERT INTO movimientos_inventario (
+            producto, tipo, cantidad, stock_anterior, stock_nuevo,
+            costo_promedio, referencia, usuario, fecha, observacion
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            producto,
+            tipo,
+            a_float(cantidad),
+            a_float(stock_anterior),
+            a_float(stock_nuevo),
+            a_float(costo_promedio),
+            referencia or "",
+            usuario or "",
+            fecha,
+            observacion or "",
+        ),
+    )
+
+
+def descontar_inventario_por_orden(cursor, orden_id):
+    cursor.execute(
+        """
+        SELECT inventario_descontado, numero_orden
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    orden = cursor.fetchone()
+    if not orden:
+        return
+
+    if int(orden[0] or 0) == 1:
+        print(f"Inventario ya descontado para orden {orden_id}")
+        return
+
+    numero_orden = orden[1] if orden[1] is not None else orden_id
+    referencia = f"orden:{numero_orden}"
+
+    cursor.execute(
+        """
+        SELECT producto
+        FROM orden_items
+        WHERE orden_id=?
+        """,
+        (orden_id,),
+    )
+    items = cursor.fetchall()
+
+    for item in items:
+        cantidad_vendida, producto_limpio = separar_prefijo_cantidad(item[0])
+        producto_limpio = producto_limpio.strip()
+
+        cursor.execute(
+            """
+            SELECT insumo, cantidad, unidad
+            FROM recetas
+            WHERE lower(producto_menu)=lower(?)
+            """,
+            (producto_limpio,),
+        )
+        receta = cursor.fetchall()
+
+        if not receta:
+            print(f"WARNING inventario: producto sin receta: {producto_limpio}")
+            continue
+
+        for insumo, cantidad_receta, unidad in receta:
+            cantidad_a_descontar = cantidad_vendida * a_float(cantidad_receta)
+
+            cursor.execute(
+                """
+                SELECT id, stock_actual, costo_promedio
+                FROM inventario
+                WHERE lower(nombre)=lower(?)
+                LIMIT 1
+                """,
+                (insumo,),
+            )
+            inventario_item = cursor.fetchone()
+
+            if inventario_item:
+                inventario_id = inventario_item[0]
+                stock_anterior = a_float(inventario_item[1])
+                costo_promedio = a_float(inventario_item[2])
+            else:
+                inventario_id = None
+                stock_anterior = 0.0
+                costo_promedio = 0.0
+                print(f"WARNING inventario: insumo no existe en inventario: {insumo}")
+
+            stock_nuevo = stock_anterior - cantidad_a_descontar
+
+            if inventario_id is None:
+                cursor.execute(
+                    """
+                    INSERT INTO inventario (nombre, stock_actual, unidad, costo_promedio)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (insumo, stock_nuevo, unidad or "", costo_promedio),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE inventario
+                    SET stock_actual=?
+                    WHERE id=?
+                    """,
+                    (stock_nuevo, inventario_id),
+                )
+
+            registrar_movimiento_inventario(
+                cursor,
+                insumo,
+                "venta",
+                -cantidad_a_descontar,
+                stock_anterior,
+                stock_nuevo,
+                costo_promedio,
+                referencia,
+                f"{cantidad_vendida}x {producto_limpio}",
+            )
+
+    cursor.execute(
+        """
+        UPDATE ordenes
+        SET inventario_descontado=1
+        WHERE id=?
+        """,
+        (orden_id,),
     )
 
 
@@ -1411,6 +1591,9 @@ def proteger_sistema():
         "revertir_orden_cierre",
         "eliminar_orden",
         "produccion",
+        "recetas",
+        "eliminar_receta",
+        "movimientos_inventario",
         "activar_edicion_emergencia",
     }
 
@@ -1574,6 +1757,7 @@ def init_db():
     asegurar_columna("ordenes", "cierre_id", "INTEGER")
     asegurar_columna("ordenes", "reimpresion_token", "TEXT")
     asegurar_columna("ordenes", "factura_reimpresion_token", "TEXT")
+    asegurar_columna("ordenes", "inventario_descontado", "INTEGER DEFAULT 0")
     asegurar_columna("orden_items", "indicacion", "TEXT")
     asegurar_columna_facturar()
     limpiar_facturas_archivadas()
@@ -1799,6 +1983,8 @@ def index():
         <a href="/reportes">📊 Reportes</a>
         <a href="/cerrar_jornada">🔒 Cerrar jornada</a>
         <a href="/produccion">🏭 Producción</a>
+        <a href="/recetas">📋 Recetas</a>
+        <a href="/movimientos_inventario">📦 Movimientos</a>
         """
 
     html += barra_superior(
@@ -2037,7 +2223,13 @@ def inventario():
     <body>
     """
 
-    produccion_link = '<a href="/produccion">🏭 Producción</a>' if usuario_es_admin_cierre() else ""
+    produccion_link = ""
+    if usuario_es_admin_cierre():
+        produccion_link = (
+            '<a href="/produccion">🏭 Producción</a>'
+            '<a href="/recetas">Recetas</a>'
+            '<a href="/movimientos_inventario">Movimientos</a>'
+        )
     html += barra_superior(
         f'<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a>{produccion_link}'
     )
@@ -2079,6 +2271,261 @@ def inventario():
     </html>
     """
     return html
+
+
+@app.route("/recetas", methods=["GET", "POST"])
+def recetas():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    error = ""
+
+    if request.method == "POST":
+        producto_menu = (request.form.get("producto_menu") or "").strip()
+        insumo = (request.form.get("insumo") or "").strip()
+        cantidad = a_float(request.form.get("cantidad"))
+        unidad = (request.form.get("unidad") or "").strip()
+
+        if not producto_menu or not insumo or cantidad <= 0:
+            error = "Debes seleccionar producto, insumo y cantidad valida"
+        else:
+            cursor.execute(
+                """
+                INSERT INTO recetas (producto_menu, insumo, cantidad, unidad)
+                VALUES (?, ?, ?, ?)
+                """,
+                (producto_menu, insumo, cantidad, unidad),
+            )
+            conn.commit()
+            conn.close()
+            return redirect("/recetas")
+
+    cursor.execute(
+        """
+        SELECT nombre
+        FROM productos
+        ORDER BY nombre ASC
+        """
+    )
+    productos_menu = cursor.fetchall()
+
+    cursor.execute(
+        """
+        SELECT nombre, unidad
+        FROM inventario
+        ORDER BY nombre ASC
+        """
+    )
+    insumos = cursor.fetchall()
+
+    cursor.execute(
+        """
+        SELECT id, producto_menu, insumo, cantidad, unidad
+        FROM recetas
+        ORDER BY producto_menu ASC, insumo ASC, id ASC
+        """
+    )
+    recetas_db = cursor.fetchall()
+    conn.close()
+
+    recetas_html = ""
+    producto_actual = None
+    for receta in recetas_db:
+        if receta[1] != producto_actual:
+            if producto_actual is not None:
+                recetas_html += "</tbody></table></div>"
+            producto_actual = receta[1]
+            recetas_html += f"""
+            <div class="card">
+                <h3>{html_lib.escape(producto_actual)}</h3>
+                <table>
+                    <thead>
+                        <tr><th>Insumo</th><th>Cantidad</th><th>Unidad</th><th>Accion</th></tr>
+                    </thead>
+                    <tbody>
+            """
+
+        recetas_html += f"""
+            <tr>
+                <td>{html_lib.escape(receta[2])}</td>
+                <td>{round(a_float(receta[3]), 4)}</td>
+                <td>{html_lib.escape(receta[4] or '')}</td>
+                <td><a class="btn-eliminar" href="/eliminar_receta/{receta[0]}" onclick="return confirm('Eliminar esta linea de receta?')">Eliminar</a></td>
+            </tr>
+        """
+
+    if producto_actual is not None:
+        recetas_html += "</tbody></table></div>"
+    else:
+        recetas_html = '<div class="card">No hay recetas configuradas.</div>'
+
+    opciones_productos = "".join(
+        f"<option value='{html_lib.escape(p[0], quote=True)}'>{html_lib.escape(p[0])}</option>"
+        for p in productos_menu
+    )
+    opciones_insumos = "".join(
+        f"<option value='{html_lib.escape(i[0], quote=True)}' data-unidad='{html_lib.escape(i[1] or '', quote=True)}'>{html_lib.escape(i[0])}</option>"
+        for i in insumos
+    )
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; max-width:1100px; margin:auto; }}
+    .card {{ background:white; padding:18px; border-radius:10px; margin-bottom:14px; box-shadow:var(--sombra); }}
+    .grid-form {{ display:grid; grid-template-columns:2fr 2fr 1fr 1fr auto; gap:10px; align-items:end; }}
+    table {{ width:100%; border-collapse:collapse; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
+    th {{ background:#fff7ed; color:#7f1d1d; }}
+    .btn-eliminar {{ background:#c0392b; color:white; padding:8px 10px; border-radius:6px; text-decoration:none; font-weight:bold; }}
+    .error {{ background:#fdecea; color:#c0392b; padding:10px; border-radius:6px; margin-bottom:10px; }}
+    @media (max-width: 768px) {{ .grid-form {{ grid-template-columns:1fr; }} }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/movimientos_inventario">Movimientos</a>')}
+    <div class="contenido">
+        <h1>Recetas de inventario</h1>
+        <div class="card">
+            {"<div class='error'>" + error + "</div>" if error else ""}
+            <form method="post">
+                <div class="grid-form">
+                    <div>
+                        <label>Producto del menu</label>
+                        <select name="producto_menu" required>
+                            <option value="">Seleccione producto</option>
+                            {opciones_productos}
+                        </select>
+                    </div>
+                    <div>
+                        <label>Insumo de inventario</label>
+                        <select id="insumo" name="insumo" required>
+                            <option value="">Seleccione insumo</option>
+                            {opciones_insumos}
+                        </select>
+                    </div>
+                    <div>
+                        <label>Cantidad</label>
+                        <input name="cantidad" type="number" step="0.0001" min="0.0001" required>
+                    </div>
+                    <div>
+                        <label>Unidad</label>
+                        <input id="unidad" name="unidad">
+                    </div>
+                    <button type="submit">Guardar</button>
+                </div>
+            </form>
+        </div>
+        {recetas_html}
+    </div>
+    <script>
+    const insumo = document.getElementById("insumo");
+    const unidad = document.getElementById("unidad");
+    if (insumo && unidad) {{
+        insumo.addEventListener("change", function() {{
+            const selected = insumo.options[insumo.selectedIndex];
+            unidad.value = selected ? (selected.dataset.unidad || "") : "";
+        }});
+    }}
+    </script>
+    </body>
+    </html>
+    """
+
+
+@app.route("/eliminar_receta/<int:receta_id>")
+def eliminar_receta(receta_id):
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM recetas WHERE id=?", (receta_id,))
+    conn.commit()
+    conn.close()
+    return redirect("/recetas")
+
+
+@app.route("/movimientos_inventario")
+def movimientos_inventario():
+    if not usuario_es_admin_cierre():
+        return "Acceso denegado", 403
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT fecha, producto, tipo, cantidad, stock_anterior, stock_nuevo,
+               referencia, usuario, observacion
+        FROM movimientos_inventario
+        ORDER BY id DESC
+        LIMIT 300
+        """
+    )
+    movimientos = cursor.fetchall()
+    conn.close()
+
+    filas = ""
+    for mov in movimientos:
+        filas += f"""
+        <tr>
+            <td>{html_lib.escape(mov[0] or '')}</td>
+            <td>{html_lib.escape(mov[1] or '')}</td>
+            <td>{html_lib.escape(mov[2] or '')}</td>
+            <td>{round(a_float(mov[3]), 4)}</td>
+            <td>{round(a_float(mov[4]), 4)}</td>
+            <td>{round(a_float(mov[5]), 4)}</td>
+            <td>{html_lib.escape(mov[6] or '')}</td>
+            <td>{html_lib.escape(mov[7] or '')}</td>
+            <td>{html_lib.escape(mov[8] or '')}</td>
+        </tr>
+        """
+
+    if not filas:
+        filas = '<tr><td colspan="9">No hay movimientos registrados.</td></tr>'
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; }}
+    .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; }}
+    table {{ width:100%; border-collapse:collapse; min-width:900px; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
+    th {{ background:#fff7ed; color:#7f1d1d; }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/recetas">Recetas</a>')}
+    <div class="contenido">
+        <h1>Movimientos de inventario</h1>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fecha</th><th>Producto</th><th>Tipo</th><th>Cantidad</th>
+                        <th>Stock anterior</th><th>Stock nuevo</th><th>Referencia</th>
+                        <th>Usuario</th><th>Observacion</th>
+                    </tr>
+                </thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>
+    </div>
+    </body>
+    </html>
+    """
 
 
 @app.route("/compras", methods=["GET", "POST"])
@@ -4028,6 +4475,8 @@ def cobrar(orden_id):
                         "volver_a_cobrar_emergencia",
                         "Pagos reemplazados durante edicion de emergencia",
                     )
+
+                descontar_inventario_por_orden(cursor, orden_id)
 
                 conn.commit()
                 conn.close()
