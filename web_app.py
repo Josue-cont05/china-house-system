@@ -471,25 +471,37 @@ def crear_usuarios_iniciales():
     cursor = conn.cursor()
 
     usuarios = [
-        ("Gaby", "2807"),
-        ("Julissa", "2002"),
-        ("Monica", "1310"),
-        ("Josue", "0510"),
-        ("Fabian", "2107"),
-        ("Oscar", "1810"),
+        ("Josue", "0510", "master", False),
+        ("Emmanuel", "0000", "master", False),
+        ("Monica", "1310", "mesonera", True),
+        ("Gaby", "2807", "mesonera", True),
+        ("Julissa", "2002", "mesonera", True),
+        ("Ismaldo", "0000", "cocina", False),
+        ("Margelis", "0000", "cocina", False),
+        ("Fabian", "2107", "socio", True),
+        ("Jessica", "0000", "socio", False),
+        ("Oscar", "1810", "mesonera", True),
     ]
 
-    for nombre, pin in usuarios:
+    for nombre, pin, rol, actualizar_pin in usuarios:
         cursor.execute("SELECT id FROM usuarios WHERE nombre=?", (nombre,))
         existe = cursor.fetchone()
 
         if existe:
-            cursor.execute("UPDATE usuarios SET pin=? WHERE id=?", (pin, existe[0]))
+            if actualizar_pin:
+                cursor.execute(
+                    "UPDATE usuarios SET pin=?, rol=? WHERE id=?",
+                    (pin, rol, existe[0]),
+                )
+            else:
+                cursor.execute("UPDATE usuarios SET rol=? WHERE id=?", (rol, existe[0]))
         else:
             cursor.execute(
-                "INSERT INTO usuarios (nombre, pin) VALUES (?, ?)",
-                (nombre, pin),
+                "INSERT INTO usuarios (nombre, pin, rol) VALUES (?, ?, ?)",
+                (nombre, pin, rol),
             )
+
+    cursor.execute("UPDATE usuarios SET rol='mesonera' WHERE rol IS NULL OR rol=''")
 
     conn.commit()
     conn.close()
@@ -596,12 +608,57 @@ def usuario_activo():
     return session.get("usuario_nombre", "")
 
 
+def usuario_rol():
+    return session.get("usuario_rol", "mesonera")
+
+
+def usuario_es_master():
+    return usuario_rol() == "master"
+
+
+def usuario_es_mesonera():
+    return usuario_rol() == "mesonera"
+
+
+def usuario_es_cocina():
+    return usuario_rol() == "cocina"
+
+
+def usuario_es_socio():
+    return usuario_rol() == "socio"
+
+
+def usuario_puede_tomar_ordenes():
+    return usuario_rol() in ("master", "mesonera", "socio")
+
+
+def usuario_puede_ver_inventario():
+    return usuario_rol() in ("master", "cocina")
+
+
+def usuario_puede_editar_inventario():
+    return usuario_rol() == "master"
+
+
+def usuario_puede_produccion():
+    # TODO: separar produccion limitada para rol cocina cuando exista la pantalla especifica.
+    return usuario_rol() in ("master", "cocina")
+
+
+def usuario_puede_reportes():
+    return usuario_rol() in ("master", "socio")
+
+
+def usuario_puede_admin_total():
+    return usuario_rol() == "master"
+
+
 def usuario_es_admin_cierre():
-    return session.get("usuario") == "Josue"
+    return usuario_es_master()
 
 
 def usuario_puede_reimprimir_cocina():
-    return session.get("usuario") == "Josue"
+    return usuario_es_master()
 
 
 def obtener_emergencias_activas():
@@ -1572,6 +1629,7 @@ def generar_xlsx(hojas):
 
 @app.before_request
 def proteger_sistema():
+    # Endpoints publicos para login y scripts locales/API.
     rutas_publicas = {
         "login",
         "static",
@@ -1580,22 +1638,56 @@ def proteger_sistema():
         "desactivar_factura",
         "api_tasa",
     }
-    rutas_admin = {
+
+    # Administracion total y operaciones destructivas.
+    solo_master = {
         "cierre",
         "cerrar_jornada",
         "cerrar_dia",
         "exportar",
-        "reportes",
         "exportar_reporte",
-        "dashboard",
         "revertir_orden_cierre",
         "eliminar_orden",
-        "produccion",
         "recetas",
         "eliminar_receta",
         "movimientos_inventario",
+        "compras",
+        "proveedores",
+        "productos_base",
+        "menu",
+        "agregar_producto",
+        "eliminar_producto",
+        "editar_producto",
+        "reimprimir_cocina",
+        "cambiar_tasa",
+        "usuarios",
         "activar_edicion_emergencia",
     }
+
+    # Lectura gerencial sin acciones destructivas para socios.
+    master_socio = {"reportes", "dashboard"}
+
+    # Operacion de inventario/produccion para master y cocina.
+    master_cocina = {"inventario", "produccion"}
+
+    # Flujo de venta y atencion de ordenes.
+    toma_ordenes = {
+        "index",
+        "crear_orden",
+        "nueva_orden",
+        "orden",
+        "agregar",
+        "activar_factura",
+        "reimprimir_factura",
+        "factura",
+        "cobrar",
+        "editar_orden",
+        "actualizar_indicacion_item",
+        "eliminar_item",
+    }
+
+    # Pantalla operativa de cocina.
+    acceso_cocina = {"cocina", "pantalla_cocina", "marcar_listo"}
 
     if request.endpoint in rutas_publicas:
         return
@@ -1603,7 +1695,26 @@ def proteger_sistema():
     if not session.get("usuario_id"):
         return redirect("/login")
 
-    if request.endpoint in rutas_admin and not usuario_es_admin_cierre():
+    if request.endpoint in solo_master and not usuario_es_master():
+        return "Acceso denegado", 403
+
+    if request.endpoint in master_socio and not usuario_puede_reportes():
+        return "Acceso denegado", 403
+
+    if request.endpoint in master_cocina:
+        if request.endpoint == "inventario" and not usuario_puede_ver_inventario():
+            return "Acceso denegado", 403
+        if request.endpoint == "produccion" and not usuario_puede_produccion():
+            return "Acceso denegado", 403
+
+    if request.endpoint in toma_ordenes and not usuario_puede_tomar_ordenes():
+        return "Acceso denegado", 403
+
+    if request.endpoint in acceso_cocina and usuario_rol() not in (
+        "master",
+        "mesonera",
+        "cocina",
+    ):
         return "Acceso denegado", 403
 
 
@@ -1759,6 +1870,7 @@ def init_db():
     asegurar_columna("ordenes", "factura_reimpresion_token", "TEXT")
     asegurar_columna("ordenes", "inventario_descontado", "INTEGER DEFAULT 0")
     asegurar_columna("orden_items", "indicacion", "TEXT")
+    asegurar_columna("usuarios", "rol", "TEXT")
     asegurar_columna_facturar()
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
@@ -1863,7 +1975,7 @@ def login():
         pin = request.form.get("pin", "").strip()
 
         cursor.execute(
-            "SELECT id, nombre FROM usuarios WHERE id=? AND pin=?",
+            "SELECT id, nombre, COALESCE(rol, 'mesonera') FROM usuarios WHERE id=? AND pin=?",
             (usuario_id, pin),
         )
         usuario = cursor.fetchone()
@@ -1872,6 +1984,7 @@ def login():
             session["usuario_id"] = usuario[0]
             session["usuario_nombre"] = usuario[1]
             session["usuario"] = usuario[1]
+            session["usuario_rol"] = usuario[2] or "mesonera"
             conn.close()
             return redirect("/")
 
@@ -1931,6 +2044,68 @@ def logout():
     return redirect("/login")
 
 
+@app.route("/usuarios")
+def usuarios():
+    if not usuario_es_master():
+        return "Acceso denegado", 403
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT nombre, COALESCE(rol, 'mesonera'), pin
+        FROM usuarios
+        ORDER BY rol ASC, nombre ASC
+        """
+    )
+    filas_usuarios = cursor.fetchall()
+    conn.close()
+
+    filas_html = ""
+    for nombre, rol, pin in filas_usuarios:
+        pin_estado = "Configurado" if pin else "Sin configurar"
+        filas_html += f"""
+        <tr>
+            <td>{html_lib.escape(nombre or '')}</td>
+            <td>{html_lib.escape(rol or 'mesonera')}</td>
+            <td>{pin_estado}</td>
+        </tr>
+        """
+
+    if not filas_html:
+        filas_html = '<tr><td colspan="3">No hay usuarios registrados.</td></tr>'
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; max-width:900px; margin:auto; }}
+    .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; }}
+    table {{ width:100%; border-collapse:collapse; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
+    th {{ background:#fff7ed; color:#7f1d1d; }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Usuarios</h1>
+        <div class="card">
+            <table>
+                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th></tr></thead>
+                <tbody>{filas_html}</tbody>
+            </table>
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
+
 @app.route("/")
 def index():
     conn = get_connection()
@@ -1975,28 +2150,30 @@ def index():
     <body>
     """
 
-    links_admin = ""
-    if usuario_es_admin_cierre():
-        links_admin = """
-        <a href="/exportar">📤 Exportar</a>
-        <a href="/cierre">📊 Cierre</a>
-        <a href="/reportes">📊 Reportes</a>
-        <a href="/cerrar_jornada">🔒 Cerrar jornada</a>
-        <a href="/produccion">🏭 Producción</a>
-        <a href="/recetas">📋 Recetas</a>
-        <a href="/movimientos_inventario">📦 Movimientos</a>
+    menu_links = '<a href="/">Inicio</a>'
+    if usuario_es_master():
+        menu_links += """
+        <a href="/cambiar_tasa">Tasa</a>
+        <a href="/exportar">Exportar</a>
+        <a href="/cierre">Cierre</a>
+        <a href="/reportes">Reportes</a>
+        <a href="/dashboard">Dashboard</a>
+        <a href="/cerrar_jornada">Cerrar jornada</a>
+        <a href="/menu">Menu</a>
+        <a href="/inventario">Inventario</a>
+        <a href="/compras">Compras</a>
+        <a href="/produccion">Produccion</a>
+        <a href="/recetas">Recetas</a>
+        <a href="/movimientos_inventario">Movimientos</a>
+        <a href="/usuarios">Usuarios</a>
+        <a href="/cocina">Cocina</a>
         """
+    elif usuario_es_mesonera():
+        menu_links += '<a href="/cocina">Cocina</a>'
+    elif usuario_es_socio():
+        menu_links += '<a href="/reportes">Reportes</a><a href="/dashboard">Dashboard</a>'
 
-    html += barra_superior(
-        f"""
-        <a href="/cambiar_tasa">💱 Tasa</a>
-        {links_admin}
-        <a href="/menu">📋 Menú</a>
-        <a href="/inventario">📦 Inventario</a>
-        <a href="/compras">🛒 Compras</a>
-        <a href="/cocina">🍳 Cocina</a>
-        """
-    )
+    html += barra_superior(menu_links)
 
     boton_cerrar_jornada = ""
     if usuario_es_admin_cierre():
@@ -2230,8 +2407,11 @@ def inventario():
             '<a href="/recetas">Recetas</a>'
             '<a href="/movimientos_inventario">Movimientos</a>'
         )
+    inventario_links = '<a href="/cocina">Cocina</a>'
+    if usuario_es_master():
+        inventario_links = '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a>'
     html += barra_superior(
-        f'<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a>{produccion_link}'
+        f'{inventario_links}{produccion_link}'
     )
     html += """
     <div class="contenido">
@@ -3217,9 +3397,11 @@ def produccion():
     <body>
     """
 
-    html += barra_superior(
-        '<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/compras">🛒 Compras</a>'
-    )
+    produccion_links = '<a href="/cocina">Cocina</a><a href="/inventario">Inventario</a>'
+    if usuario_es_master():
+        produccion_links = '<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/compras">Compras</a>'
+
+    html += barra_superior(produccion_links)
     html += """
     <div class="contenido">
         <h1>🏭 Producción</h1>
@@ -4875,7 +5057,7 @@ def reportes():
     if reporte["ventas_por_orden"]:
         for orden in reporte["ventas_por_orden"]:
             accion_revertir = "-"
-            if orden["cierre_id"] is not None:
+            if orden["cierre_id"] is not None and usuario_es_master():
                 volver_url = f"/reportes?{urlencode({'desde': desde, 'hasta': hasta})}"
                 accion_revertir = f"""
                 <form method="post" action="/revertir_orden_cierre/{orden["orden_id"]}" class="form-revertir-cierre" style="margin:0;">
@@ -4899,8 +5081,11 @@ def reportes():
     else:
         ordenes_html = '<tr><td colspan="8">No hay ordenes cerradas en este rango.</td></tr>'
 
-    export_url = f"/exportar_reporte?{urlencode({'desde': desde, 'hasta': hasta})}"
     dashboard_url = f"/dashboard?{urlencode({'desde': desde, 'hasta': hasta})}"
+    boton_exportar = ""
+    if usuario_es_master():
+        export_url = f"/exportar_reporte?{urlencode({'desde': desde, 'hasta': hasta})}"
+        boton_exportar = f'<a class="btn-link btn-excel" href="{export_url}">📤 Exportar Excel</a>'
 
     return f"""
     <html>
@@ -4944,7 +5129,7 @@ def reportes():
                     <input type="date" name="hasta" value="{hasta}" required>
                 </div>
                 <button type="submit">🔍 Consultar</button>
-                <a class="btn-link btn-excel" href="{export_url}">📤 Exportar Excel</a>
+                {boton_exportar}
             </form>
         </div>
 
@@ -5529,6 +5714,13 @@ def pantalla_cocina():
     arroz_html = ""
     caliente_html = ""
     total_ordenes = len(ordenes)
+    cocina_links = '<a href="/cocina">Cocina</a>'
+    if usuario_es_master() or usuario_es_mesonera():
+        cocina_links = '<a href="/">Inicio</a>' + cocina_links
+    if usuario_puede_ver_inventario():
+        cocina_links += '<a href="/inventario">Inventario</a>'
+    if usuario_puede_produccion():
+        cocina_links += '<a href="/produccion">Produccion</a>'
 
     html = """
     <html>
@@ -5567,7 +5759,7 @@ def pantalla_cocina():
     <div class="topbar">
         <div>Usuario: <b>""" + usuario_activo() + """</b></div>
         <div style="display:flex; gap:8px;">
-            <a href="/">🏠 Inicio</a>
+            """ + cocina_links + """
             <a href="/logout">🚪 Cerrar sesión</a>
         </div>
     </div>
