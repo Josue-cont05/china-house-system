@@ -2174,7 +2174,7 @@ def usuarios():
             <td>{html_lib.escape(nombre or '')}</td>
             <td>{html_lib.escape(rol or 'mesonera')}</td>
             <td>{pin_estado}</td>
-            <td><a class="btn-editar" href="/editar_usuario/{usuario_id}">Editar</a></td>
+            <td><a class="btn-editar" href="/editar_usuario/{usuario_id}">✏️ Editar</a></td>
         </tr>
         """
 
@@ -2200,11 +2200,11 @@ def usuarios():
     </style>
     </head>
     <body>
-    {barra_superior('<a href="/">Inicio</a>')}
+    {barra_superior('<a href="/">🏠 Inicio</a>')}
     <div class="contenido">
-        <h1>Usuarios</h1>
+        <h1>👥 Usuarios</h1>
         <div class="card">
-            <h2>Crear usuario</h2>
+            <h2>➕ Crear usuario</h2>
             <form method="post" action="/crear_usuario" class="form-grid">
                 <div>
                     <label>Nombre</label>
@@ -2218,12 +2218,12 @@ def usuarios():
                     <label>Rol</label>
                     <select name="rol" required>{opciones_roles_usuario('mesonera')}</select>
                 </div>
-                <button type="submit">Crear</button>
+                <button type="submit">➕ Crear</button>
             </form>
         </div>
         <div class="card">
             <table>
-                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Accion</th></tr></thead>
+                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Acción</th></tr></thead>
                 <tbody>{filas_html}</tbody>
             </table>
         </div>
@@ -2328,9 +2328,9 @@ def editar_usuario(usuario_id):
     </style>
     </head>
     <body>
-    {barra_superior('<a href="/usuarios">Usuarios</a><a href="/">Inicio</a>')}
+    {barra_superior('<a href="/usuarios">👥 Usuarios</a><a href="/">🏠 Inicio</a>')}
     <div class="contenido">
-        <h1>Editar usuario</h1>
+        <h1>✏️ Editar usuario</h1>
         <div class="card">
             <form method="post">
                 <label>Nombre</label>
@@ -2341,7 +2341,7 @@ def editar_usuario(usuario_id):
                 <input value="{pin_estado}" disabled>
                 <label>Nuevo PIN</label>
                 <input name="pin" placeholder="Dejar vacio para mantener el PIN actual">
-                <button type="submit">Guardar</button>
+                <button type="submit">💾 Guardar</button>
             </form>
         </div>
     </div>
@@ -2394,26 +2394,26 @@ def index():
     <body>
     """
 
-    menu_links = '<a href="/">Inicio</a>'
+    menu_links = '<a href="/">🏠 Inicio</a>'
     if usuario_es_master():
         menu_links += """
-        <a href="/cambiar_tasa">Tasa</a>
-        <a href="/exportar">Exportar</a>
-        <a href="/cierre">Cierre</a>
-        <a href="/reportes">Reportes</a>
-        <a href="/dashboard">Dashboard</a>
-        <a href="/cerrar_jornada">Cerrar jornada</a>
-        <a href="/menu">Menu</a>
-        <a href="/inventario">Inventario</a>
-        <a href="/compras">Compras</a>
-        <a href="/produccion">Produccion</a>
-        <a href="/recetas">Recetas</a>
-        <a href="/movimientos_inventario">Movimientos</a>
-        <a href="/usuarios">Usuarios</a>
-        <a href="/cocina">Cocina</a>
+        <a href="/cambiar_tasa">💲 Tasa</a>
+        <a href="/exportar">📤 Exportar</a>
+        <a href="/cierre">📦 Cierre</a>
+        <a href="/reportes">📊 Reportes</a>
+        <a href="/dashboard">📈 Dashboard</a>
+        <a href="/cerrar_jornada">🔒 Cerrar jornada</a>
+        <a href="/menu">🍜 Menú</a>
+        <a href="/inventario">📦 Inventario</a>
+        <a href="/compras">🛒 Compras</a>
+        <a href="/produccion">👨‍🍳 Producción</a>
+        <a href="/recetas">🧾 Recetas</a>
+        <a href="/movimientos_inventario">📋 Movimientos</a>
+        <a href="/usuarios">👥 Usuarios</a>
+        <a href="/cocina">🍳 Cocina</a>
         """
     elif usuario_es_socio():
-        menu_links += '<a href="/reportes">Reportes</a><a href="/dashboard">Dashboard</a>'
+        menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
 
     html += barra_superior(menu_links)
 
@@ -2426,7 +2426,7 @@ def index():
     html += f"""
     <div class="contenedor">
         <div class="panel-izq">
-            <h3>🆕 Nueva Orden</h3>
+            <h3>🧾 Nueva orden</h3>
             <form action="/crear_orden" method="post">
                 <label>Tipo</label>
                 <select name="tipo">
@@ -2438,7 +2438,7 @@ def index():
                 <input name="referencia">
                 <label>👤 Cliente</label>
                 <input name="cliente">
-                <button type="submit">🆕 Crear Orden</button>
+                <button type="submit">➕ Crear orden</button>
             </form>
             {boton_cerrar_jornada}
         </div>
@@ -2568,7 +2568,7 @@ def menu():
     html += barra_superior('<a href="/">🏠 Inicio</a>')
     html += """
     <div class="contenido">
-    <h1>📋 Menú</h1>
+    <h1>🍜 Menú</h1>
     <div class="card">
         <form method="post">
             <input name="nombre" placeholder="Nombre del producto" required>
@@ -2645,11 +2645,11 @@ def inventario():
     produccion_link = ""
     if usuario_es_admin_cierre():
         produccion_link = (
-            '<a href="/produccion">🏭 Producción</a>'
-            '<a href="/recetas">Recetas</a>'
-            '<a href="/movimientos_inventario">Movimientos</a>'
+            '<a href="/produccion">👨‍🍳 Producción</a>'
+            '<a href="/recetas">🧾 Recetas</a>'
+            '<a href="/movimientos_inventario">📋 Movimientos</a>'
         )
-    inventario_links = '<a href="/cocina">Cocina</a>'
+    inventario_links = '<a href="/cocina">🍳 Cocina</a>'
     if usuario_es_master():
         inventario_links = '<a href="/">🏠 Inicio</a><a href="/compras">🛒 Compras</a>'
     html += barra_superior(
@@ -2774,7 +2774,7 @@ def recetas():
                 <td>{html_lib.escape(receta[2])}</td>
                 <td>{round(a_float(receta[3]), 4)}</td>
                 <td>{html_lib.escape(receta[4] or '')}</td>
-                <td><a class="btn-eliminar" href="/eliminar_receta/{receta[0]}" onclick="return confirm('Eliminar esta linea de receta?')">Eliminar</a></td>
+                <td><a class="btn-eliminar" href="/eliminar_receta/{receta[0]}" onclick="return confirm('Eliminar esta linea de receta?')">🗑️ Eliminar</a></td>
             </tr>
         """
 
@@ -2812,9 +2812,9 @@ def recetas():
     </style>
     </head>
     <body>
-    {barra_superior('<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/movimientos_inventario">Movimientos</a>')}
+    {barra_superior('<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/movimientos_inventario">📋 Movimientos</a>')}
     <div class="contenido">
-        <h1>Recetas de inventario</h1>
+        <h1>🧾 Recetas de inventario</h1>
         <div class="card">
             {"<div class='error'>" + error + "</div>" if error else ""}
             <form method="post">
@@ -2841,7 +2841,7 @@ def recetas():
                         <label>Unidad</label>
                         <input id="unidad" name="unidad">
                     </div>
-                    <button type="submit">Guardar</button>
+                    <button type="submit">💾 Guardar</button>
                 </div>
             </form>
         </div>
@@ -2929,9 +2929,9 @@ def movimientos_inventario():
     </style>
     </head>
     <body>
-    {barra_superior('<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/recetas">Recetas</a>')}
+    {barra_superior('<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/recetas">🧾 Recetas</a>')}
     <div class="contenido">
-        <h1>Movimientos de inventario</h1>
+        <h1>📋 Movimientos de inventario</h1>
         <div class="card">
             <table>
                 <thead>
@@ -3120,7 +3120,7 @@ def compras():
     <body>
     """
 
-    produccion_link = '<a href="/produccion">🏭 Producción</a>' if usuario_es_admin_cierre() else ""
+    produccion_link = '<a href="/produccion">👨‍🍳 Producción</a>' if usuario_es_admin_cierre() else ""
     html += barra_superior(
         f'<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a>{produccion_link}'
     )
@@ -3639,14 +3639,14 @@ def produccion():
     <body>
     """
 
-    produccion_links = '<a href="/cocina">Cocina</a><a href="/inventario">Inventario</a>'
+    produccion_links = '<a href="/cocina">🍳 Cocina</a><a href="/inventario">📦 Inventario</a>'
     if usuario_es_master():
-        produccion_links = '<a href="/">Inicio</a><a href="/inventario">Inventario</a><a href="/compras">Compras</a>'
+        produccion_links = '<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/compras">🛒 Compras</a>'
 
     html += barra_superior(produccion_links)
     html += """
     <div class="contenido">
-        <h1>🏭 Producción</h1>
+        <h1>👨‍🍳 Producción</h1>
         <div class="card">
     """
 
@@ -3695,10 +3695,10 @@ def produccion():
                 <label>Insumos extra opcionales</label>
                 <textarea name="insumos_extra" placeholder="Ejemplo:&#10;Vinagre, 1.50&#10;Anis, 0.80&#10;Colorante, 0.40"></textarea>
                 <div class="ayuda">Se suma el ultimo numero de cada linea al costo total de produccion.</div>
-                <button type="submit">🏭 Registrar producción</button>
+                <button type="submit">👨‍🍳 Registrar producción</button>
             </form>
         </div>
-        <h2>🏭 Ultimas producciones</h2>
+        <h2>👨‍🍳 Ultimas producciones</h2>
     """
 
     if not historial:
@@ -3833,7 +3833,7 @@ def editar_producto(id):
     </head>
     <body>
     <div class="card">
-    <h1>Editar producto</h1>
+    <h1>✏️ Editar producto</h1>
     <form method="post">
         Nombre: <input name="nombre" value="{p[0]}"><br><br>
         Precio: <input name="precio" value="{p[1]}"><br><br>
@@ -3847,9 +3847,9 @@ def editar_producto(id):
 
     html += """
         </select><br><br>
-        <button>Guardar</button>
+        <button>💾 Guardar</button>
     </form>
-    <a href="/menu">Volver</a>
+    <a href="/menu">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -4643,7 +4643,7 @@ def editar_orden(orden_id):
     </head>
     <body>
     <div class="card">
-    <h2>Editar Orden {texto_numero_orden(o[1])}</h2>
+    <h2>✏️ Editar orden {texto_numero_orden(o[1])}</h2>
     <p><b>Mesonera:</b> {o[6] if o[6] else '-'}</p>
     <form method="POST">
         <label>Mesa / tipo:</label><br>
@@ -4654,10 +4654,10 @@ def editar_orden(orden_id):
         <input name="cliente" value="{o[4] if o[4] else ''}"><br><br>
         <label>Observacion:</label><br>
         <textarea name="observacion" style="height:80px;">{o[5] if o[5] else ''}</textarea><br><br>
-        <button type="submit">Guardar</button>
+        <button type="submit">💾 Guardar</button>
     </form>
     <br>
-    <a href="/orden/{orden_id}">Volver</a>
+    <a href="/orden/{orden_id}">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -4939,7 +4939,7 @@ def cobrar(orden_id):
     </head>
     <body>
     <div class="contenedor">
-    <div class="titulo">💵 COBRAR</div>
+    <div class="titulo">💵 Cobrar</div>
     <div class="numero">Orden {texto_numero_orden(o[1])}</div>
     <div>
     <b>👤 Cliente:</b> {o[5] if o[5] else '-'}<br>
@@ -5104,7 +5104,7 @@ def cambiar_tasa():
     <body style="font-family:Arial; padding:24px;">
     {barra_superior('<a href="/">🏠 Inicio</a>')}
     <div class="card" style="max-width:520px; margin:24px auto; background:white; padding:24px; border-radius:12px;">
-    <h2>💱 Cambiar tasa</h2>
+    <h2>💲 Cambiar tasa</h2>
     <p>Tasa actual: <b>{tasa_actual}</b></p>
     <form method="post">
         <input name="tasa" placeholder="Nueva tasa" style="padding:12px; width:100%;">
@@ -5765,7 +5765,7 @@ def cierre():
     </head>
     <body>
     <div class="card">
-        <h1>📊 Cierre del Dia</h1>
+        <h1>📦 Cierre del Día</h1>
         {mensaje}
 
         <div class="dato"><b>Inicio de jornada:</b> {resumen["inicio_jornada"]}</div>
@@ -5785,7 +5785,7 @@ def cierre():
         </div>
 
         <div class="bloque">
-            <div class="titulo-bloque">💱 TASA</div>
+            <div class="titulo-bloque">💲 TASA</div>
             <div class="dato"><b>Tasa actual:</b> Bs {round(resumen["tasa"], 2)}</div>
         </div>
 
@@ -5956,13 +5956,13 @@ def pantalla_cocina():
     arroz_html = ""
     caliente_html = ""
     total_ordenes = len(ordenes)
-    cocina_links = '<a href="/cocina">Cocina</a>'
+    cocina_links = '<a href="/cocina">🍳 Cocina</a>'
     if usuario_es_master():
-        cocina_links = '<a href="/">Inicio</a>' + cocina_links
+        cocina_links = '<a href="/">🏠 Inicio</a>' + cocina_links
     if usuario_puede_ver_inventario():
-        cocina_links += '<a href="/inventario">Inventario</a>'
+        cocina_links += '<a href="/inventario">📦 Inventario</a>'
     if usuario_puede_produccion():
-        cocina_links += '<a href="/produccion">Produccion</a>'
+        cocina_links += '<a href="/produccion">👨‍🍳 Producción</a>'
 
     html = """
     <html>
