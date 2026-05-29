@@ -25,10 +25,6 @@ SABORES_REFRESCO = [
     "Chinotto",
     "Frescolita",
     "Naranja",
-    "Uva",
-    "Manzana",
-    "7Up",
-    "Pepsi",
 ]
 ETIQUETAS_METODO_PAGO = {
     "punto_venta": "Punto de venta",
@@ -499,16 +495,12 @@ def crear_usuarios_iniciales():
     cursor = conn.cursor()
 
     usuarios = [
-        ("Josue", "0510", "master", False),
-        ("Emmanuel", "0000", "master", False),
+        ("Josue", "2204", "master", False),
+        ("Emmanuel", "2002", "master", False),
         ("Monica", "1310", "mesonera", True),
-        ("Gaby", "2807", "mesonera", True),
-        ("Julissa", "2002", "mesonera", True),
-        ("Ismaldo", "0000", "cocina", False),
-        ("Margelis", "0000", "cocina", False),
-        ("Fabian", "2107", "socio", True),
-        ("Jessica", "0000", "socio", False),
-        ("Oscar", "1810", "mesonera", True),
+        ("Gaby", "2204", "mesonera", True),
+        ("Ismaldo", "2710", "cocina", False),
+        ("Jessica", "0101", "socio", False),
     ]
 
     for nombre, pin, rol, actualizar_pin in usuarios:
@@ -676,11 +668,7 @@ def usuario_rol():
         "Emmanuel": "master",
         "Monica": "mesonera",
         "Gaby": "mesonera",
-        "Julissa": "mesonera",
-        "Oscar": "mesonera",
         "Ismaldo": "cocina",
-        "Margelis": "cocina",
-        "Fabian": "socio",
         "Jessica": "socio",
     }
     rol = roles_por_nombre.get(session.get("usuario") or session.get("usuario_nombre"), "mesonera")
