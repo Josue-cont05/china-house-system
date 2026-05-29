@@ -39,6 +39,29 @@ ETIQUETAS_METODO_PAGO = {
 }
 ROLES_USUARIO_VALIDOS = ("master", "mesonera", "cocina", "socio")
 
+ORDEN_CATEGORIAS_POS = [
+    "Neko Combos",
+    "Neko Dúo",
+    "Neko Clan",
+    "Favoritos de Neko",
+    "Bebidas",
+    "Delivery",
+    "Extras",
+]
+
+COLORES_CATEGORIAS_POS = {
+    "Neko Combos":      "#0d4a32",
+    "Neko Dúo":         "#c2410c",
+    "Neko Clan":        "#1e3a8a",
+    "Favoritos de Neko": "#0f766e",
+    "Bebidas":          "#0284c7",
+    "Delivery":         "#6d28d9",
+    "Extras":           "#374151",
+}
+
+COMBO1_FAVORITOS = ["Pollo Agridulce", "Chop Suey de Vegetales"]
+COMBOS_CON_FAVORITO = {"Neko Combo 1": COMBO1_FAVORITOS}
+
 
 def cargar_configuracion():
     app_env = os.environ.get("APP_ENV", "development").strip().lower()
@@ -239,6 +262,10 @@ def normalizar_metodo_pago(metodo):
 
 def es_producto_refresco(nombre):
     return "refresco" in (nombre or "").lower()
+
+
+def es_combo_con_favorito(nombre):
+    return (nombre or "").strip() in COMBOS_CON_FAVORITO
 
 
 def normalizar_sabor_refresco(sabor):
@@ -1072,69 +1099,93 @@ def parsear_insumos_extra(texto):
 def estilos_base():
     return """
     :root {
-        --rojo-china: #b91c1c;
-        --rojo-oscuro: #7f1d1d;
+        --verde-neko: #1a6b4a;
+        --verde-oscuro: #0d4a32;
+        --naranja: #f97316;
         --dorado: #f59e0b;
-        --verde: #15803d;
+        --crema: #fef3c7;
+        --verde: #16a34a;
         --azul: #1d4ed8;
-        --gris-fondo: #f3f4f6;
-        --texto: #111827;
-        --borde: #e5e7eb;
-        --sombra: 0 10px 26px rgba(17, 24, 39, 0.12);
+        --carbon: #1c1917;
+        --gris-fondo: #f7f5f0;
+        --texto: #1c1917;
+        --borde: #e5e0d8;
+        --sombra: 0 10px 26px rgba(13, 74, 50, 0.10);
     }
     * { box-sizing: border-box; }
     body {
-        font-family: Arial, Helvetica, sans-serif;
+        font-family: 'Segoe UI', Arial, Helvetica, sans-serif;
         color: var(--texto);
         background:
-            radial-gradient(circle at top left, rgba(245, 158, 11, 0.14), transparent 28rem),
-            linear-gradient(180deg, #fff7ed 0%, var(--gris-fondo) 34%, #eef2f7 100%);
+            radial-gradient(circle at top right, rgba(249, 115, 22, 0.10), transparent 28rem),
+            radial-gradient(circle at bottom left, rgba(26, 107, 74, 0.08), transparent 32rem),
+            linear-gradient(180deg, #f0fdf4 0%, var(--gris-fondo) 40%, #fefce8 100%);
+        min-height: 100vh;
     }
     .header {
-        background: linear-gradient(135deg, var(--rojo-oscuro), var(--rojo-china) 58%, #111827);
+        background: linear-gradient(135deg, var(--verde-oscuro) 0%, var(--verde-neko) 55%, #1c4532 100%);
         color: white;
-        padding: 18px 22px;
+        padding: 14px 22px;
         display: flex;
         justify-content: space-between;
         align-items: center;
         gap: 16px;
-        box-shadow: 0 8px 24px rgba(127, 29, 29, 0.28);
+        box-shadow: 0 6px 20px rgba(13, 74, 50, 0.32);
         position: sticky;
         top: 0;
         z-index: 20;
     }
-    .titulo { font-size: 26px; font-weight: 900; letter-spacing: 0; }
-    .menu-top { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .titulo {
+        font-size: 24px;
+        font-weight: 900;
+        letter-spacing: -0.5px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .titulo span.brand-dot { color: var(--naranja); }
+    .menu-top { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
     .menu-top a, .volver, .btn-accion, .btn-ver, .btn-cobrar, .btn-acceso {
         color: white;
         text-decoration: none;
-        font-weight: 800;
+        font-weight: 700;
         border-radius: 8px;
-        min-height: 44px;
+        min-height: 40px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        gap: 6px;
-        box-shadow: 0 3px 10px rgba(17, 24, 39, 0.12);
+        gap: 5px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     }
-    .menu-top a { background: rgba(255, 255, 255, 0.16); padding: 10px 13px; font-size: 14px; }
+    .menu-top a { background: rgba(255, 255, 255, 0.14); padding: 8px 12px; font-size: 13px; transition: background 0.15s; }
     .menu-top a:hover { background: rgba(255, 255, 255, 0.26); }
     .contenido, .contenedor { max-width: 1280px; margin: 0 auto; }
     .card, .panel-izq, .panel-der, .panel, .login-box {
-        border: 1px solid rgba(229, 231, 235, 0.85);
+        border: 1px solid rgba(229, 224, 216, 0.9);
         box-shadow: var(--sombra);
     }
-    h1, h2, h3 { letter-spacing: 0; }
+    h1, h2, h3 { letter-spacing: -0.3px; color: var(--carbon); }
     input, select, textarea {
         border: 1px solid #cbd5e1;
         min-height: 46px;
         background: white;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 15px;
+    }
+    input:focus, select:focus, textarea:focus {
+        outline: 2px solid var(--verde-neko);
+        border-color: var(--verde-neko);
     }
     button, .btn, .btn-agregar, .btn-guardar {
-        font-weight: 900;
+        font-weight: 800;
         min-height: 48px;
-        box-shadow: 0 4px 12px rgba(17, 24, 39, 0.14);
+        box-shadow: 0 4px 12px rgba(13, 74, 50, 0.18);
+        border-radius: 10px;
+        cursor: pointer;
+        transition: transform 0.1s, box-shadow 0.1s;
     }
+    button:active, .btn:active { transform: scale(0.97); }
     @media (min-width: 900px) {
         .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
         .panel-izq { flex: 0 0 360px; }
@@ -1143,7 +1194,7 @@ def estilos_base():
     }
     @media (max-width: 768px) {
         .header { position: static; flex-direction: column; align-items: stretch; }
-        .titulo { font-size: 23px; text-align: center; }
+        .titulo { font-size: 21px; }
         .menu-top { justify-content: stretch; }
         .menu-top a { flex: 1 1 42%; }
     }
@@ -1154,12 +1205,12 @@ def barra_superior(extra_links=""):
     return f"""
     <style>{estilos_base()}</style>
     <div class="header">
-        <div class="titulo">🍜 China House POS</div>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
-            <div style="font-size:14px;">👤 Usuario: <b>{usuario_activo()}</b></div>
+        <div class="titulo">🐱 Neko Wok <span class="brand-dot">·</span> <span style="font-size:14px;font-weight:500;opacity:0.85;">POS</span></div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+            <div style="font-size:13px; opacity:0.85;">👤 <b>{usuario_activo()}</b></div>
             <div class="menu-top">
                 {extra_links}
-                <a href="/logout">🚪 Cerrar sesión</a>
+                <a href="/logout">🚪 Salir</a>
             </div>
         </div>
     </div>
@@ -1972,6 +2023,8 @@ def init_db():
     asegurar_columna("producciones", "porciones_detalle", "TEXT")
     crear_usuarios_iniciales()
     crear_datos_base_inventario()
+    asegurar_columna("categorias", "activo", "INTEGER DEFAULT 1")
+    asegurar_columna("productos", "activo", "INTEGER DEFAULT 1")
 
 
 def cargar_productos():
@@ -2024,6 +2077,100 @@ def cargar_productos():
             "INSERT INTO productos (nombre, precio, categoria_id) VALUES (?, ?, ?)",
             (nombre, precio, categoria_id),
         )
+
+    conn.commit()
+    conn.close()
+
+
+def asegurar_menu_neko_wok():
+    """Inserta categorías y productos Neko Wok si no existen. No elimina datos históricos."""
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT nombre FROM categorias")
+    categorias_existentes = {row[0] for row in cursor.fetchall()}
+
+    for cat in ORDEN_CATEGORIAS_POS:
+        if cat not in categorias_existentes:
+            cursor.execute("INSERT INTO categorias (nombre) VALUES (?)", (cat,))
+
+    conn.commit()
+
+    cursor.execute("SELECT id, nombre FROM categorias")
+    cat_dict = {nombre: cat_id for cat_id, nombre in cursor.fetchall()}
+
+    cursor.execute("SELECT nombre FROM productos")
+    productos_existentes = {row[0] for row in cursor.fetchall()}
+
+    nuevos_productos = [
+        ("Neko Combo 1",             4.80,  "Neko Combos"),
+        ("Neko Combo 2",             5.50,  "Neko Combos"),
+        ("Neko Combo 3",             7.00,  "Neko Combos"),
+        ("Neko Dúo Pollo Cerdo",     8.00,  "Neko Dúo"),
+        ("Neko Dúo Pollo Camarón",   8.00,  "Neko Dúo"),
+        ("Neko Dúo Triple",          9.00,  "Neko Dúo"),
+        ("Neko Clan Pollo Cerdo",   11.00,  "Neko Clan"),
+        ("Neko Clan Pollo Camarón", 11.00,  "Neko Clan"),
+        ("Neko Clan Triple",        13.00,  "Neko Clan"),
+        ("Pollo Agridulce",          5.00,  "Favoritos de Neko"),
+        ("Chop Suey de Vegetales",   4.00,  "Favoritos de Neko"),
+        ("Chop Suey de Pollo",       5.00,  "Favoritos de Neko"),
+        ("Ración de Lumpias (2u)",   4.00,  "Favoritos de Neko"),
+        ("1/2 Ración de Lumpias (1u)", 2.50, "Favoritos de Neko"),
+        ("Refresco Personal",        0.75,  "Bebidas"),
+        ("Refresco 1 Lt",            1.00,  "Bebidas"),
+        ("Refresco 1.5 Lt",          1.50,  "Bebidas"),
+        ("Refresco 2 Lt",            2.00,  "Bebidas"),
+        ("Delivery 0.5",             0.50,  "Delivery"),
+        ("Delivery 1",               1.00,  "Delivery"),
+        ("Delivery 1.5",             1.50,  "Delivery"),
+        ("Delivery 2",               2.00,  "Delivery"),
+        ("Delivery 2.5",             2.50,  "Delivery"),
+        ("Delivery 3",               3.00,  "Delivery"),
+        ("Delivery 3.5",             3.50,  "Delivery"),
+        ("Extra de Salsa",           0.25,  "Extras"),
+    ]
+
+    for nombre, precio, categoria in nuevos_productos:
+        if nombre not in productos_existentes:
+            categoria_id = cat_dict.get(categoria)
+            cursor.execute(
+                "INSERT INTO productos (nombre, precio, categoria_id) VALUES (?, ?, ?)",
+                (nombre, precio, categoria_id),
+            )
+
+    for cat in ORDEN_CATEGORIAS_POS:
+        cursor.execute("UPDATE categorias SET activo=1 WHERE nombre=?", (cat,))
+    for nombre, _, _ in nuevos_productos:
+        cursor.execute("UPDATE productos SET activo=1 WHERE nombre=?", (nombre,))
+
+    conn.commit()
+    conn.close()
+
+
+def desactivar_menu_china_house():
+    """Marca categorías y productos del menú antiguo China House como activo=0. Idempotente."""
+    categorias_antiguas = ["Solo para ti", "Para compartir", "Banquete imperial", "Platos adicionales"]
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("UPDATE categorias SET activo=1 WHERE activo IS NULL")
+    cursor.execute("UPDATE productos SET activo=1 WHERE activo IS NULL")
+
+    for cat_nombre in categorias_antiguas:
+        cursor.execute("UPDATE categorias SET activo=0 WHERE nombre=?", (cat_nombre,))
+
+    placeholders = ",".join("?" * len(categorias_antiguas))
+    cursor.execute(
+        f"""
+        UPDATE productos SET activo=0
+        WHERE categoria_id IN (
+            SELECT id FROM categorias WHERE nombre IN ({placeholders})
+        )
+        """,
+        categorias_antiguas,
+    )
 
     conn.commit()
     conn.close()
@@ -2089,37 +2236,113 @@ def login():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     """ + estilos_base() + """
-    body { font-family: Arial; margin: 0; background: #f5f6fa; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .login-box { background: white; width: 92%; max-width: 420px; padding: 28px; border-radius: 12px; box-shadow: 0 18px 40px rgba(127,29,29,0.18); }
-    h1 { text-align: center; margin-top: 0; }
-    input, select { width: 100%; padding: 14px; margin: 8px 0; border-radius: 6px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
-    button { width: 100%; padding: 15px; background: linear-gradient(135deg, #15803d, #16a34a); color: white; border: none; border-radius: 8px; font-size: 18px; margin-top: 10px; }
-    .error { background: #fdecea; color: #c0392b; padding: 10px; border-radius: 6px; margin-bottom: 10px; text-align: center; }
+    body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background:
+            radial-gradient(circle at 20% 80%, rgba(26, 107, 74, 0.18), transparent 40%),
+            radial-gradient(circle at 80% 20%, rgba(249, 115, 22, 0.12), transparent 38%),
+            linear-gradient(160deg, #0d4a32 0%, #1a6b4a 50%, #1c4532 100%);
+    }
+    .login-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 24px;
+        width: 92%;
+        max-width: 420px;
+    }
+    .brand-logo {
+        text-align: center;
+        color: white;
+    }
+    .brand-logo .brand-icon { font-size: 52px; line-height: 1; }
+    .brand-logo h1 {
+        margin: 8px 0 2px;
+        font-size: 32px;
+        font-weight: 900;
+        letter-spacing: -1px;
+        color: white;
+    }
+    .brand-logo .brand-sub {
+        font-size: 13px;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        color: rgba(255,255,255,0.65);
+        font-weight: 600;
+    }
+    .brand-logo .brand-accent { color: #f97316; }
+    .login-box {
+        background: white;
+        width: 100%;
+        padding: 32px 28px;
+        border-radius: 16px;
+        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.28);
+    }
+    .login-box h2 {
+        margin: 0 0 20px;
+        font-size: 18px;
+        font-weight: 700;
+        color: #1c1917;
+        text-align: center;
+    }
+    label { display: block; font-size: 13px; font-weight: 700; color: #6b7280; margin-bottom: 4px; margin-top: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+    input, select { width: 100%; padding: 13px 16px; border-radius: 10px; border: 1.5px solid #e5e7eb; font-size: 16px; box-sizing: border-box; transition: border-color 0.15s; }
+    input:focus, select:focus { outline: none; border-color: #1a6b4a; box-shadow: 0 0 0 3px rgba(26,107,74,0.12); }
+    .btn-login {
+        width: 100%;
+        padding: 15px;
+        background: linear-gradient(135deg, #0d4a32, #1a6b4a);
+        color: white;
+        border: none;
+        border-radius: 12px;
+        font-size: 17px;
+        font-weight: 800;
+        margin-top: 20px;
+        cursor: pointer;
+        box-shadow: 0 6px 18px rgba(13, 74, 50, 0.35);
+        transition: transform 0.1s, box-shadow 0.1s;
+    }
+    .btn-login:hover { box-shadow: 0 8px 22px rgba(13, 74, 50, 0.45); }
+    .btn-login:active { transform: scale(0.98); }
+    .error { background: #fef2f2; color: #dc2626; padding: 12px 14px; border-radius: 8px; margin-bottom: 4px; text-align: center; font-weight: 600; border: 1px solid #fecaca; }
+    .login-footer { color: rgba(255,255,255,0.45); font-size: 12px; text-align: center; }
     </style>
     </head>
     <body>
-    <div class="login-box">
-        <h1>🔐 Login Mesonera</h1>
+    <div class="login-wrap">
+        <div class="brand-logo">
+            <div class="brand-icon">🐱</div>
+            <h1>Neko <span class="brand-accent">Wok</span></h1>
+            <div class="brand-sub">Sistema POS</div>
+        </div>
+        <div class="login-box">
+            <h2>🔐 Iniciar sesión</h2>
     """
 
     if error:
-        html += f"<div class='error'>{error}</div>"
+        html += f"<div class='error'>⚠️ {error}</div>"
 
     html += """
-        <form method="post">
-            <label>Usuario</label>
-            <select name="usuario_id" required>
+            <form method="post">
+                <label>Usuario</label>
+                <select name="usuario_id" required>
     """
 
     for usuario in usuarios:
         html += f"<option value='{usuario[0]}'>{usuario[1]}</option>"
 
     html += """
-            </select>
-            <label>PIN</label>
-            <input type="password" name="pin" required placeholder="Ingrese PIN">
-            <button type="submit">🔐 Entrar</button>
-        </form>
+                </select>
+                <label>PIN</label>
+                <input type="password" name="pin" required placeholder="••••••">
+                <button class="btn-login" type="submit">Entrar →</button>
+            </form>
+        </div>
+        <div class="login-footer">Neko Wok POS · Sistema de gestión</div>
     </div>
     </body>
     </html>
@@ -2193,7 +2416,7 @@ def usuarios():
     .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; margin-bottom:16px; }}
     table {{ width:100%; border-collapse:collapse; }}
     th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
-    th {{ background:#fff7ed; color:#7f1d1d; }}
+    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
     .form-grid {{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:10px; align-items:end; }}
     .btn-editar {{ color:white; background:#1d4ed8; padding:8px 10px; border-radius:6px; text-decoration:none; font-weight:bold; }}
     @media (max-width: 760px) {{ .form-grid {{ grid-template-columns:1fr; }} }}
@@ -2373,22 +2596,41 @@ def index():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body { font-family: Arial; margin: 0; background: #f5f6fa; }
-    .header { background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-    .titulo { font-size: 22px; font-weight: bold; }
-    .menu-top { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
-    .menu-top a { color: white; text-decoration: none; background: #34495e; padding: 10px; border-radius: 5px; font-size: 13px; flex: 1 1 45%; text-align: center; }
-    .contenedor { display: flex; padding: 10px; gap: 10px; flex-direction: column; }
-    .panel-izq, .panel-der { width: 100%; background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
-    button { width: 100%; padding: 16px; background: #27ae60; color: white; border: none; border-radius: 5px; margin-top: 10px; font-size: 18px; }
-    .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; flex-direction: column; gap: 10px; font-size: 18px; }
-    .estado { padding: 5px 10px; border-radius: 5px; color: white; font-size: 12px; display: inline-block; }
-    .btn-ver, .btn-cobrar { display: block; width: 100%; text-align: center; padding: 10px; border-radius: 5px; text-decoration: none; margin-bottom: 5px; }
-    .btn-ver { background: #3498db; color: white; }
-    .btn-cobrar { background: #27ae60; color: white; }
-    .btn-cierre-jornada { display:block; width:100%; padding:16px; background:#c0392b; color:white; text-decoration:none; text-align:center; border-radius:5px; margin-top:12px; font-size:18px; box-sizing:border-box; }
-    .mesonera { font-size: 14px; color: #555; margin-top: 4px; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }
+    .contenedor { display: flex; padding: 14px; gap: 14px; flex-direction: column; max-width: 1280px; margin: 0 auto; }
+    .panel-izq { background: white; padding: 20px; border-radius: 14px; box-shadow: 0 4px 16px rgba(13,74,50,0.08); }
+    .panel-der { background: transparent; }
+    .panel-izq h3, .panel-der h3 { margin: 0 0 14px; font-size: 16px; font-weight: 800; color: #1c1917; display: flex; align-items: center; gap: 6px; }
+    input, select { width: 100%; padding: 12px 14px; margin: 5px 0 10px; border-radius: 10px; border: 1.5px solid #e5e7eb; font-size: 15px; box-sizing: border-box; background: white; }
+    input:focus, select:focus { outline: none; border-color: #1a6b4a; }
+    .btn-nueva-orden { width: 100%; padding: 15px; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; border: none; border-radius: 12px; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 4px 14px rgba(13,74,50,0.28); }
+    .btn-nueva-orden:hover { box-shadow: 0 6px 18px rgba(13,74,50,0.36); }
+    .card { background: white; padding: 16px; margin-bottom: 10px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.07); display: flex; flex-direction: column; gap: 10px; font-size: 16px; border-left: 4px solid #e5e7eb; }
+    .card.abierta { border-left-color: #f97316; }
+    .card.en-cocina { border-left-color: #1a6b4a; background: #f0fdf4; }
+    .estado { padding: 4px 10px; border-radius: 20px; color: white; font-size: 11px; font-weight: 800; display: inline-block; letter-spacing: 0.5px; text-transform: uppercase; }
+    .btn-ver { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; margin-bottom: 6px; font-weight: 700; background: #1d4ed8; color: white; }
+    .btn-cobrar { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; font-weight: 700; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; }
+    .btn-cierre-jornada { display:block; width:100%; padding:14px; background: linear-gradient(135deg, #7c3aed, #6d28d9); color:white; text-decoration:none; text-align:center; border-radius:12px; margin-top:12px; font-size:16px; font-weight:800; box-sizing:border-box; box-shadow:0 4px 14px rgba(109,40,217,0.28); }
+    .mesonera { font-size: 13px; color: #6b7280; margin-top: 3px; }
+    .seccion-titulo { font-size: 13px; font-weight: 800; color: #6b7280; letter-spacing: 1px; text-transform: uppercase; margin: 16px 0 8px; }
+    .historial-item { background: white; padding: 12px 14px; margin-bottom: 8px; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,0.06); display: flex; justify-content: space-between; align-items: center; }
+    .historial-item a { color: #1a6b4a; text-decoration: none; font-weight: 700; font-size: 14px; }
+    .menu-master { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .menu-card { background: white; border-radius: 12px; padding: 16px 14px; text-decoration: none; color: #1c1917; font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); border: 1.5px solid #e5e0d8; transition: box-shadow 0.15s, transform 0.1s; }
+    .menu-card:hover { box-shadow: 0 6px 18px rgba(13,74,50,0.14); transform: translateY(-1px); }
+    .menu-card .mc-icon { font-size: 22px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; border-radius: 10px; flex-shrink: 0; }
+    .mc-verde { background: #dcfce7; }
+    .mc-naranja { background: #fff7ed; }
+    .mc-azul { background: #eff6ff; }
+    .mc-morado { background: #f5f3ff; }
+    .mc-gris { background: #f8fafc; }
+    @media (min-width: 900px) {
+        .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
+        .panel-izq { flex: 0 0 340px; }
+        .panel-der { flex: 1; }
+        .card { flex-direction: row !important; justify-content: space-between; align-items: center; }
+    }
     </style>
     </head>
     <body>
@@ -2420,86 +2662,110 @@ def index():
     boton_cerrar_jornada = ""
     if usuario_es_admin_cierre():
         boton_cerrar_jornada = (
-            '<a href="/cerrar_jornada" class="btn-cierre-jornada">🔒 Confirmar cierre de jornada</a>'
+            '<a href="/cerrar_jornada" class="btn-cierre-jornada">🔒 Cerrar jornada</a>'
         )
+
+    panel_izq_extra = ""
+    if usuario_es_master():
+        panel_izq_extra = """
+        <div style="margin-top:20px;">
+            <div class="seccion-titulo">Accesos rápidos</div>
+            <div class="menu-master">
+                <a href="/" class="menu-card"><div class="mc-icon mc-verde">🏠</div><span>Inicio</span></a>
+                <a href="/cambiar_tasa" class="menu-card"><div class="mc-icon mc-naranja">💲</div><span>Tasa</span></a>
+                <a href="/exportar" class="menu-card"><div class="mc-icon mc-azul">📤</div><span>Exportar</span></a>
+                <a href="/cierre" class="menu-card"><div class="mc-icon mc-gris">📦</div><span>Cierre</span></a>
+                <a href="/reportes" class="menu-card"><div class="mc-icon mc-azul">📊</div><span>Reportes</span></a>
+                <a href="/dashboard" class="menu-card"><div class="mc-icon mc-verde">📈</div><span>Dashboard</span></a>
+                <a href="/menu" class="menu-card"><div class="mc-icon mc-naranja">🍜</div><span>Menú</span></a>
+                <a href="/inventario" class="menu-card"><div class="mc-icon mc-gris">📦</div><span>Inventario</span></a>
+                <a href="/compras" class="menu-card"><div class="mc-icon mc-naranja">🛒</div><span>Compras</span></a>
+                <a href="/produccion" class="menu-card"><div class="mc-icon mc-verde">👨‍🍳</div><span>Producción</span></a>
+                <a href="/recetas" class="menu-card"><div class="mc-icon mc-azul">🧾</div><span>Recetas</span></a>
+                <a href="/movimientos_inventario" class="menu-card"><div class="mc-icon mc-gris">📋</div><span>Movimientos</span></a>
+                <a href="/usuarios" class="menu-card"><div class="mc-icon mc-morado">👥</div><span>Usuarios</span></a>
+                <a href="/cocina" class="menu-card"><div class="mc-icon mc-naranja">🍳</div><span>Cocina</span></a>
+            </div>
+        </div>
+        """
 
     html += f"""
     <div class="contenedor">
         <div class="panel-izq">
             <h3>🧾 Nueva orden</h3>
             <form action="/crear_orden" method="post">
-                <label>Tipo</label>
+                <label style="font-size:13px;font-weight:700;color:#6b7280;">Tipo</label>
                 <select name="tipo">
-                    <option value="Mesa">Mesa</option>
-                    <option value="Delivery">Delivery</option>
-                    <option value="Para llevar">Pick Up</option>
+                    <option value="Mesa">🪑 Mesa</option>
+                    <option value="Delivery">🛵 Delivery</option>
+                    <option value="Para llevar">🥡 Pick Up</option>
                 </select>
-                <label>Referencia</label>
-                <input name="referencia">
-                <label>👤 Cliente</label>
-                <input name="cliente">
-                <button type="submit">➕ Crear orden</button>
+                <label style="font-size:13px;font-weight:700;color:#6b7280;">Referencia</label>
+                <input name="referencia" placeholder="Ej: Mesa 3, Juan...">
+                <label style="font-size:13px;font-weight:700;color:#6b7280;">👤 Cliente</label>
+                <input name="cliente" placeholder="Nombre del cliente">
+                <button class="btn-nueva-orden" type="submit">➕ Crear orden</button>
             </form>
             {boton_cerrar_jornada}
+            {panel_izq_extra}
         </div>
         <div class="panel-der">
     """
 
-    html += "<h3>🧾 Ordenes activas</h3>"
-    for o in ordenes:
-        if o[6] != "abierta":
-            continue
-        html += f"""
-        <div class="card">
-            <div>
-                <b>Orden {texto_numero_orden(o[1])}</b><br>
-                {o[3]} - {o[4]}<br>
-                Cliente: {o[5] if o[5] else '-'}
-                <div class="mesonera">👩 Mesonera: {o[9] if o[9] else '-'}</div>
-            </div>
-            <div>
-                <span class="estado" style="background:#e74c3c;">ABIERTA</span>
-                <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
-                <a href="/cobrar/{o[0]}" class="btn-cobrar" onclick="return confirm('⚠️ Esta orden aún no ha sido enviada a cocina. ¿Seguro que quieres continuar con el cobro?')">💵 Cobrar</a>
-            </div>
-        </div>
-        """
+    abierta_html = ""
+    cocina_html = ""
+    historial_html = ""
 
-    html += "<h3>🍳 En cocina</h3>"
     for o in ordenes:
-        if o[6] != "en cocina":
-            continue
-        html += f"""
-        <div class="card" style="background:#fff3cd;">
-            <div>
-                <b>Orden {texto_numero_orden(o[1])}</b><br>
-                {o[3]} - {o[4]}<br>
-                Cliente: {o[5] if o[5] else '-'}
-                <div class="mesonera">👩 Mesonera: {o[9] if o[9] else '-'}</div>
+        if o[6] == "abierta":
+            abierta_html += f"""
+            <div class="card abierta">
+                <div>
+                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} · {o[4]}</span><br>
+                    <span style="font-size:15px;">👤 {o[5] if o[5] else '—'}</span>
+                    <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
+                </div>
+                <div style="min-width:160px;">
+                    <span class="estado" style="background:#f97316; margin-bottom:8px;">Abierta</span>
+                    <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
+                    <a href="/cobrar/{o[0]}" class="btn-cobrar" onclick="return confirm('⚠️ Esta orden aún no ha sido enviada a cocina. ¿Continuar?')">💵 Cobrar</a>
+                </div>
             </div>
-            <div>
-                <span class="estado" style="background:#e67e22;">EN COCINA</span>
-                <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
-                <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
+            """
+        elif o[6] == "en cocina":
+            cocina_html += f"""
+            <div class="card en-cocina">
+                <div>
+                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} · {o[4]}</span><br>
+                    <span style="font-size:15px;">👤 {o[5] if o[5] else '—'}</span>
+                    <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
+                </div>
+                <div style="min-width:160px;">
+                    <span class="estado" style="background:#1a6b4a; margin-bottom:8px;">En cocina</span>
+                    <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
+                    <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
+                </div>
             </div>
-        </div>
-        """
+            """
+        elif o[6] == "cerrada":
+            historial_html += f"""
+            <div class="historial-item">
+                <div>
+                    <b>Orden {texto_numero_orden(o[1])}</b> — {o[5] if o[5] else '—'}
+                    <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
+                </div>
+                <a href="/orden/{o[0]}">🔍 Ver</a>
+            </div>
+            """
 
-    html += "<h3>📚 Historial del dia</h3>"
-    for o in ordenes:
-        if o[6] != "cerrada":
-            continue
-        html += f"""
-        <div style="background:#ecf0f1; padding:10px; margin-bottom:8px; border-radius:5px;">
-            <div style="font-weight:bold;">
-                Orden {texto_numero_orden(o[1])} - {o[5] if o[5] else '-'}
-            </div>
-            <div class="mesonera">👩 Mesonera: {o[9] if o[9] else '-'}</div>
-            <div style="margin-top:5px;">
-                <a href="/orden/{o[0]}" style="color:#2980b9; text-decoration:none;">🔍 Ver detalle</a>
-            </div>
-        </div>
-        """
+    if abierta_html:
+        html += f'<div class="seccion-titulo">🟠 Órdenes abiertas</div>{abierta_html}'
+    if cocina_html:
+        html += f'<div class="seccion-titulo">🍳 En cocina</div>{cocina_html}'
+    if historial_html:
+        html += f'<div class="seccion-titulo">📚 Historial del día</div>{historial_html}'
+    if not abierta_html and not cocina_html:
+        html += '<div style="text-align:center;padding:40px;color:#9ca3af;font-size:16px;">Sin órdenes activas</div>'
 
     html += """
         </div>
@@ -2544,22 +2810,23 @@ def menu():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body { font-family: Arial; margin: 0; background: #f5f6fa; }
-    .header { background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-    .titulo { font-size: 22px; font-weight: bold; }
-    .menu-top { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
-    .menu-top a { color: white; text-decoration: none; background: #34495e; padding: 10px; border-radius: 5px; font-size: 13px; flex: 1 1 45%; text-align: center; }
-    .contenido { padding: 10px; }
-    h1 { text-align: center; }
-    .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
-    button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 5px; background: #27ae60; color: white; cursor: pointer; }
-    .producto { background: white; padding: 10px; margin-bottom: 8px; border-radius: 5px; font-size: 16px; }
-    .acciones { margin-top: 8px; display: flex; gap: 10px; }
-    .acciones a { text-decoration: none; color: white; padding: 8px 10px; border-radius: 5px; font-size: 14px; }
-    .editar { background: #2980b9; }
-    .eliminar { background: #c0392b; }
-    .volver { display: block; text-align: center; margin-top: 15px; padding: 12px; background: #7f8c8d; color: white; text-decoration: none; border-radius: 5px; }
+    """ + estilos_base() + """
+    body { margin: 0; }
+    .contenido { padding: 18px; max-width: 960px; margin: 0 auto; }
+    .card { background: white; padding: 20px; margin-bottom: 14px; border-radius: 14px; box-shadow: 0 4px 16px rgba(13,74,50,0.08); border: 1px solid #e5e0d8; }
+    .card h3 { margin: 0 0 14px; font-size: 16px; color: #1c1917; }
+    input, select { width: 100%; padding: 12px 14px; margin: 6px 0 10px; border-radius: 10px; border: 1.5px solid #e5e7eb; font-size: 15px; box-sizing: border-box; }
+    .btn-add { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 12px; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; cursor: pointer; font-weight: 800; box-shadow: 0 4px 14px rgba(13,74,50,0.24); }
+    .productos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+    .producto { background: white; padding: 14px 16px; border-radius: 12px; border: 1.5px solid #e5e0d8; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .producto-nombre { font-size: 16px; font-weight: 700; color: #1c1917; margin-bottom: 2px; }
+    .producto-precio { font-size: 20px; font-weight: 900; color: #1a6b4a; margin-bottom: 4px; }
+    .producto-cat { font-size: 12px; color: #9ca3af; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; background: #f0fdf4; display: inline-block; padding: 2px 8px; border-radius: 20px; margin-bottom: 10px; }
+    .acciones { display: flex; gap: 8px; }
+    .acciones a { text-decoration: none; color: white; padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 700; flex: 1; text-align: center; }
+    .editar { background: #1d4ed8; }
+    .eliminar { background: #dc2626; }
+    .page-title { font-size: 22px; font-weight: 900; color: #1c1917; margin: 0 0 18px; display: flex; align-items: center; gap: 8px; }
     </style>
     </head>
     <body>
@@ -2568,8 +2835,9 @@ def menu():
     html += barra_superior('<a href="/">🏠 Inicio</a>')
     html += """
     <div class="contenido">
-    <h1>🍜 Menú</h1>
+    <div class="page-title">🍜 Menú Neko Wok</div>
     <div class="card">
+        <h3>➕ Agregar producto</h3>
         <form method="post">
             <input name="nombre" placeholder="Nombre del producto" required>
             <input name="precio" type="number" step="0.01" placeholder="Precio USD" required>
@@ -2581,17 +2849,19 @@ def menu():
 
     html += """
             </select>
-            <button>➕ Agregar producto</button>
+            <button class="btn-add">➕ Agregar producto</button>
         </form>
     </div>
-    <h2>🍽️ Productos</h2>
+    <div class="page-title" style="font-size:18px; margin-bottom:12px;">🍽️ Productos</div>
+    <div class="productos-grid">
     """
 
     for p in productos:
         html += f"""
         <div class="producto">
-            {p[1]} - ${p[2]} <br>
-            <small>{p[3] if p[3] else ''}</small>
+            <div class="producto-nombre">{p[1]}</div>
+            <div class="producto-precio">${p[2]}</div>
+            <div class="producto-cat">{p[3] if p[3] else 'Sin categoría'}</div>
             <div class="acciones">
                 <a class="editar" href="/editar_producto/{p[0]}">✏️ Editar</a>
                 <a class="eliminar" href="/eliminar_producto/{p[0]}">🗑️ Eliminar</a>
@@ -2600,7 +2870,8 @@ def menu():
         """
 
     html += """
-    <a href="/" class="volver">🏠 Volver</a>
+    </div>
+    <a href="/" class="volver" style="display:inline-block;margin-top:18px;padding:12px 16px;background:#1a6b4a;color:white;text-decoration:none;border-radius:10px;font-weight:700;">🏠 Volver al inicio</a>
     </div>
     </body>
     </html>
@@ -2629,13 +2900,14 @@ def inventario():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body { font-family: Arial; margin: 0; background: #f5f6fa; }
-    .contenido { padding: 10px; }
-    .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-    .accesos { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-    .btn-acceso { display: block; text-align: center; padding: 16px; background: #34495e; color: white; text-decoration: none; border-radius: 8px; font-size: 18px; }
-    .resumen-inventario { background: #fff7ed; border-left: 5px solid #b91c1c; padding: 14px; border-radius: 8px; margin-bottom: 12px; font-size: 18px; font-weight: bold; }
-    .volver { display: block; text-align: center; margin-top: 15px; padding: 12px; background: #7f8c8d; color: white; text-decoration: none; border-radius: 5px; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }
+    .contenido { padding: 14px; max-width: 960px; margin: 0 auto; }
+    .card { background: white; padding: 18px; margin-bottom: 12px; border-radius: 14px; box-shadow: 0 4px 14px rgba(13,74,50,0.08); border: 1px solid #e5e0d8; }
+    .accesos { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+    .btn-acceso { display: block; text-align: center; padding: 16px; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; text-decoration: none; border-radius: 12px; font-size: 16px; font-weight: 800; box-shadow: 0 3px 10px rgba(13,74,50,0.2); }
+    .btn-acceso:hover { box-shadow: 0 5px 14px rgba(13,74,50,0.3); }
+    .resumen-inventario { background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-left: 5px solid #1a6b4a; padding: 14px; border-radius: 10px; margin-bottom: 12px; font-size: 17px; font-weight: 700; }
+    .volver { display: inline-block; text-align: center; margin-top: 14px; padding: 12px 16px; background: #1a6b4a; color: white; text-decoration: none; border-radius: 10px; font-weight: 700; }
     @media (max-width: 768px) { .accesos { grid-template-columns: 1fr; } }
     </style>
     </head>
@@ -2805,7 +3077,7 @@ def recetas():
     .grid-form {{ display:grid; grid-template-columns:2fr 2fr 1fr 1fr auto; gap:10px; align-items:end; }}
     table {{ width:100%; border-collapse:collapse; }}
     th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
-    th {{ background:#fff7ed; color:#7f1d1d; }}
+    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
     .btn-eliminar {{ background:#c0392b; color:white; padding:8px 10px; border-radius:6px; text-decoration:none; font-weight:bold; }}
     .error {{ background:#fdecea; color:#c0392b; padding:10px; border-radius:6px; margin-bottom:10px; }}
     @media (max-width: 768px) {{ .grid-form {{ grid-template-columns:1fr; }} }}
@@ -2925,7 +3197,7 @@ def movimientos_inventario():
     .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; }}
     table {{ width:100%; border-collapse:collapse; min-width:900px; }}
     th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
-    th {{ background:#fff7ed; color:#7f1d1d; }}
+    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
     </style>
     </head>
     <body>
@@ -3915,6 +4187,8 @@ def orden(orden_id):
         SELECT p.id, p.nombre, p.precio, c.nombre
         FROM productos p
         LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE COALESCE(p.activo, 1) = 1
+          AND COALESCE(c.activo, 1) = 1
         """
     )
     productos = cursor.fetchall()
@@ -3962,51 +4236,47 @@ def orden(orden_id):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body {{ font-family: Arial; margin: 0; background: #f5f6fa; }}
-    .header {{ background: #2c3e50; color: white; padding: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }}
-    .titulo {{ font-size: 22px; font-weight: bold; }}
-    .menu-top {{ display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }}
-    .menu-top a {{ color: white; text-decoration: none; background: #34495e; padding: 10px; border-radius: 5px; font-size: 13px; flex: 1 1 45%; text-align: center; }}
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }}
     .contenedor {{ display: flex; gap: 0; }}
-    .productos {{ width: 60%; padding: 20px; }}
-    .panel {{ width: 40%; padding: 20px; background: #f4f4f4; min-height: calc(100vh - 84px); box-sizing: border-box; }}
-    .btn {{ width: 100%; padding: 15px; margin: 5px 0; background: #27ae60; color: white; border: none; border-radius: 5px; }}
-    .categoria {{ font-weight: bold; margin-top: 15px; background: #333; color: white; padding: 5px; border-radius: 5px; }}
+    .productos {{ width: 60%; padding: 18px; }}
+    .panel {{ width: 40%; padding: 18px; background: white; min-height: calc(100vh - 70px); box-sizing: border-box; border-left: 1px solid #e5e0d8; box-shadow: -4px 0 16px rgba(13,74,50,0.06); }}
+    .btn {{ width: 100%; padding: 14px; margin: 6px 0; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; border: none; border-radius: 10px; font-weight: 800; font-size: 15px; cursor: pointer; }}
+    .categoria {{ font-weight: 800; margin-top: 14px; background: #1c1917; color: white; padding: 8px 12px; border-radius: 10px; font-size: 13px; letter-spacing: 0.5px; }}
     .grid-productos {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }}
-    .acciones-superiores {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }}
-    .btn-accion {{ display: block; padding: 12px; margin: 5px 0; text-align: center; color: white; text-decoration: none; border-radius: 5px; }}
-    .cocina {{ background: #e67e22; }}
-    .cobrar {{ background: #27ae60; }}
-    .editar {{ background: #2980b9; }}
-    .eliminar {{ background: #c0392b; }}
-    .volver {{ background: #7f8c8d; }}
-    .total {{ font-size: 20px; margin-top: 10px; }}
-    .info-cierre {{ background:#fff3cd; border:1px solid #f1c40f; padding:12px; border-radius:8px; margin-bottom:15px; }}
+    .acciones-superiores {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }}
+    .btn-accion {{ display: block; padding: 14px 12px; margin: 5px 0; text-align: center; color: white; text-decoration: none; border-radius: 10px; font-weight: 800; font-size: 15px; }}
+    .cocina {{ background: linear-gradient(135deg, #c2410c, #f97316); }}
+    .cobrar {{ background: linear-gradient(135deg, #0d4a32, #1a6b4a); }}
+    .editar {{ background: linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
+    .eliminar {{ background: linear-gradient(135deg, #991b1b, #dc2626); }}
+    .volver {{ background: #6b7280; }}
+    .total {{ font-size: 20px; margin-top: 12px; font-weight: 800; color: #1c1917; }}
+    .info-cierre {{ background:#fffbeb; border:1px solid #f59e0b; padding:12px; border-radius:10px; margin-bottom:14px; color:#92400e; font-weight:600; }}
     .modal-refresco {{ position:fixed; inset:0; background:rgba(17,24,39,0.62); display:none; align-items:center; justify-content:center; padding:18px; z-index:1000; }}
     .modal-refresco.activo {{ display:flex; }}
-    .modal-contenido {{ width:min(620px, 100%); background:white; border-radius:12px; padding:20px; box-shadow:0 20px 46px rgba(0,0,0,0.28); }}
+    .modal-contenido {{ width:min(620px, 100%); background:white; border-radius:16px; padding:22px; box-shadow:0 24px 50px rgba(0,0,0,0.30); }}
     .modal-top {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }}
-    .modal-top h2 {{ margin:0; color:#7f1d1d; }}
+    .modal-top h2 {{ margin:0; color:#1a6b4a; }}
     .modal-top p {{ margin:5px 0 0; color:#4b5563; }}
-    .cerrar-modal {{ width:auto; min-height:44px; padding:8px 12px; border:none; border-radius:8px; background:#7f8c8d; color:white; cursor:pointer; }}
+    .cerrar-modal {{ width:auto; min-height:44px; padding:8px 14px; border:none; border-radius:8px; background:#6b7280; color:white; cursor:pointer; font-weight:700; }}
     .sabores-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
-    .sabor-btn {{ min-height:68px; padding:14px; border:none; border-radius:10px; background:#27ae60; color:white; font-size:17px; font-weight:900; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 16px rgba(17,24,39,0.18); transition:opacity 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease; }}
-    .sabor-btn:hover {{ opacity:0.88; transform:translateY(-1px); box-shadow:0 10px 22px rgba(17,24,39,0.24); }}
-    .sabor-btn:active {{ transform:translateY(0); box-shadow:0 4px 10px rgba(17,24,39,0.18); }}
-    .sabor-coca-cola {{ background:#E50914; color:white; }}
-    .sabor-chinotto {{ background:#111827; color:white; }}
-    .sabor-frescolita {{ background:#FF4C4C; color:white; }}
-    .sabor-naranja {{ background:#FFA500; color:#111827; }}
-    .sabor-uva {{ background:#6A0DAD; color:white; }}
-    .sabor-btn.otro {{ background:#8e44ad; color:white; }}
-    .item-orden {{ display:flex; justify-content:space-between; align-items:flex-start; margin:5px 0; gap:10px; border-bottom:1px solid #e5e7eb; padding:7px 0; }}
+    .sabor-btn {{ min-height:68px; padding:14px; border:none; border-radius:12px; background:#1a6b4a; color:white; font-size:16px; font-weight:900; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 14px rgba(13,74,50,0.20); transition:opacity 0.16s ease, transform 0.16s ease; }}
+    .sabor-btn:hover {{ opacity:0.90; transform:translateY(-1px); }}
+    .sabor-btn:active {{ transform:translateY(0); }}
+    .sabor-coca-cola {{ background:#E50914; }}
+    .sabor-chinotto {{ background:#111827; }}
+    .sabor-frescolita {{ background:#FF4C4C; }}
+    .sabor-naranja {{ background:#f97316; color:#1c1917; }}
+    .sabor-uva {{ background:#6A0DAD; }}
+    .sabor-btn.otro {{ background:#7c3aed; }}
+    .item-orden {{ display:flex; justify-content:space-between; align-items:flex-start; margin:5px 0; gap:10px; border-bottom:1px solid #e5e7eb; padding:8px 0; }}
     .item-detalle {{ flex:1; min-width:0; }}
-    .item-indicacion {{ color:#7f1d1d; font-size:14px; margin-top:4px; font-weight:bold; }}
+    .item-indicacion {{ color:#1a6b4a; font-size:13px; margin-top:3px; font-weight:700; }}
     .acciones-item {{ display:flex; gap:6px; align-items:center; flex:0 0 auto; }}
-    .btn-item {{ color:white; border:none; border-radius:6px; padding:8px 10px; cursor:pointer; width:auto; min-height:38px; box-shadow:none; }}
+    .btn-item {{ color:white; border:none; border-radius:8px; padding:8px 10px; cursor:pointer; width:auto; min-height:38px; box-shadow:none; font-weight:700; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
-        .productos, .panel {{ width: 100%; min-height: auto; }}
+        .productos, .panel {{ width: 100%; min-height: auto; border-left: none; }}
         .sabores-grid {{ grid-template-columns:1fr 1fr; }}
     }}
     </style>
@@ -4035,38 +4305,42 @@ def orden(orden_id):
         </div>
         """
 
-    categorias = defaultdict(list)
+    cats_dict = defaultdict(list)
     for p in productos:
-        categoria = p[3] if p[3] else "Sin categoria"
-        categorias[categoria].append(p)
+        cat_nombre = p[3] if p[3] else "Sin categoria"
+        cats_dict[cat_nombre].append(p)
+
+    orden_cat_map = {nombre: i for i, nombre in enumerate(ORDEN_CATEGORIAS_POS)}
+    cats_ordenadas = sorted(
+        cats_dict.items(),
+        key=lambda x: (orden_cat_map.get(x[0], 999), x[0]),
+    )
 
     if puede_modificar_orden:
-        for categoria, lista in categorias.items():
-            html += f"<div class='categoria'>{categoria}</div>"
+        for categoria, lista in cats_ordenadas:
+            color_cat = COLORES_CATEGORIAS_POS.get(categoria, "#374151")
+            html += f"<div class='categoria' style='background:{color_cat};'>{categoria}</div>"
             html += "<div class='grid-productos'>"
 
-            mitad = (len(lista) + 1) // 2
-            col1 = lista[:mitad]
-            col2 = lista[mitad:]
-            ordenados = []
-
-            for i in range(mitad):
-                if i < len(col1):
-                    ordenados.append(col1[i])
-                if i < len(col2):
-                    ordenados.append(col2[i])
-
-            for p in ordenados:
+            for p in lista:
+                precio_fmt = f"${p[2]:.2f}".rstrip("0").rstrip(".")
                 if es_producto_refresco(p[1]):
                     html += f"""
                     <button class="btn btn-refresco" type="button" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}">
-                        {p[1]} - ${p[2]}
+                        {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
+                    </button>
+                    """
+                elif p[1] in COMBOS_CON_FAVORITO:
+                    favoritos_data = html_lib.escape(",".join(COMBOS_CON_FAVORITO[p[1]]), quote=True)
+                    html += f"""
+                    <button class="btn btn-combo-favorito" type="button" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-favoritos="{favoritos_data}">
+                        {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
                 else:
                     html += f"""
                     <a href="/agregar/{orden_id}/{p[0]}">
-                        <button class="btn" type="button">{p[1]} - ${p[2]}</button>
+                        <button class="btn" type="button">{p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span></button>
                     </a>
                     """
 
@@ -4089,12 +4363,12 @@ def orden(orden_id):
     boton_emergencia = ""
     if usuario_es_admin_cierre() and estado == "cerrada" and not bloqueada_por_cierre:
         if edicion_emergencia_activa:
-            boton_emergencia = '<div class="btn-accion" style="background:#7f1d1d;">🚨 Emergencia activa</div>'
+            boton_emergencia = '<div class="btn-accion" style="background:linear-gradient(135deg,#991b1b,#dc2626);">🚨 Emergencia activa</div>'
         else:
             boton_emergencia = f"""
             <form method="post" action="/activar_edicion_emergencia/{orden_id}" class="form-emergencia" style="margin:0;">
                 <input type="hidden" name="clave" value="">
-                <button type="submit" class="btn-accion" style="width:100%; border:none; cursor:pointer; background:#b91c1c;">🚨 Editar emergencia</button>
+                <button type="submit" class="btn-accion" style="width:100%; border:none; cursor:pointer; background:linear-gradient(135deg,#991b1b,#dc2626);">🚨 Editar emergencia</button>
             </form>
             """
 
@@ -4189,6 +4463,18 @@ def orden(orden_id):
                 <button id="cerrar-modal-refresco" class="cerrar-modal" type="button">✖</button>
             </div>
             <div id="sabores-refresco-grid" class="sabores-grid"></div>
+        </div>
+    </div>
+    <div id="modal-combo-favorito" class="modal-refresco" aria-hidden="true">
+        <div class="modal-contenido">
+            <div class="modal-top">
+                <div>
+                    <h2>⭐ Elige el favorito</h2>
+                    <p id="modal-combo-nombre">Neko Combo 1</p>
+                </div>
+                <button id="cerrar-modal-combo" class="cerrar-modal" type="button">✖</button>
+            </div>
+            <div id="combo-favoritos-grid" class="sabores-grid"></div>
         </div>
     </div>
     <script>
@@ -4323,6 +4609,59 @@ def orden(orden_id):
             form.querySelector('input[name="clave"]').value = clave;
         }});
     }});
+
+    const modalCombo = document.getElementById("modal-combo-favorito");
+    const modalComboNombre = document.getElementById("modal-combo-nombre");
+    const comboFavoritosGrid = document.getElementById("combo-favoritos-grid");
+    const cerrarModalCombo = document.getElementById("cerrar-modal-combo");
+    let comboSeleccionadoUrl = "";
+
+    function cerrarSelectorCombo() {{
+        comboSeleccionadoUrl = "";
+        modalCombo.classList.remove("activo");
+        modalCombo.setAttribute("aria-hidden", "true");
+    }}
+
+    function agregarComboConFavorito(favorito) {{
+        if (!favorito || !comboSeleccionadoUrl) {{
+            return;
+        }}
+        window.location.href = comboSeleccionadoUrl + "?favorito=" + encodeURIComponent(favorito);
+    }}
+
+    function abrirSelectorCombo(btn) {{
+        comboSeleccionadoUrl = btn.dataset.url;
+        modalComboNombre.textContent = btn.dataset.producto || "Combo";
+        comboFavoritosGrid.innerHTML = "";
+        const favoritosStr = btn.dataset.favoritos || "";
+        const favoritos = favoritosStr.split(",").map(s => s.trim()).filter(Boolean);
+        favoritos.forEach(function(favorito) {{
+            const boton = document.createElement("button");
+            boton.type = "button";
+            boton.className = "sabor-btn";
+            boton.style.background = "#0f766e";
+            boton.textContent = "⭐ " + favorito;
+            boton.addEventListener("click", function() {{
+                agregarComboConFavorito(favorito);
+            }});
+            comboFavoritosGrid.appendChild(boton);
+        }});
+        modalCombo.classList.add("activo");
+        modalCombo.setAttribute("aria-hidden", "false");
+    }}
+
+    document.querySelectorAll(".btn-combo-favorito").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{
+            abrirSelectorCombo(btn);
+        }});
+    }});
+
+    cerrarModalCombo.addEventListener("click", cerrarSelectorCombo);
+    modalCombo.addEventListener("click", function(event) {{
+        if (event.target === modalCombo) {{
+            cerrarSelectorCombo();
+        }}
+    }});
     </script>
     </body>
     </html>
@@ -4362,6 +4701,13 @@ def agregar(orden_id, producto_id):
             conn.close()
             return "Debes seleccionar un sabor valido para el refresco"
         producto_nombre = f"{producto_nombre} - {sabor}"
+    elif producto_nombre in COMBOS_CON_FAVORITO:
+        favorito = (request.args.get("favorito") or "").strip()
+        opciones_validas = COMBOS_CON_FAVORITO[producto_nombre]
+        if favorito not in opciones_validas:
+            conn.close()
+            return "Debes seleccionar un favorito valido para este combo"
+        producto_nombre = f"{producto_nombre} - {favorito}"
 
     cursor.execute(
         """
@@ -4917,9 +5263,9 @@ def cobrar(orden_id):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     {estilos_base()}
-    body {{ font-family: Arial; margin: 0; background: #f5f6fa; }}
-    .contenedor {{ width: 95%; max-width: 720px; margin: 18px auto; background: white; padding: 22px; border-radius: 12px; box-shadow: var(--sombra); }}
-    .titulo {{ text-align: center; font-size: 28px; font-weight: 900; color:#7f1d1d; }}
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }}
+    .contenedor {{ width: 95%; max-width: 720px; margin: 18px auto; background: white; padding: 24px; border-radius: 16px; box-shadow: var(--sombra); border: 1px solid #e5e0d8; }}
+    .titulo {{ text-align: center; font-size: 26px; font-weight: 900; color:#1a6b4a; }}
     .numero {{ text-align: right; font-size: 18px; margin-bottom: 10px; }}
     .sep {{ border-top: 1px dashed #ccc; margin: 15px 0; }}
     .total {{ font-size: 20px; font-weight: bold; text-align: right; }}
@@ -5110,7 +5456,7 @@ def cambiar_tasa():
         <input name="tasa" placeholder="Nueva tasa" style="padding:12px; width:100%;">
         <button style="padding:12px 20px; background:#15803d; color:white; border:none; border-radius:8px;">💾 Guardar</button>
     </form>
-    <a href="/" class="volver" style="background:#2c3e50; margin-top:15px;">🏠 Volver</a>
+    <a href="/" class="volver" style="background:#1a6b4a; margin-top:15px;">🏠 Volver</a>
     </div>
     </body>
     </html>
@@ -5305,7 +5651,7 @@ def reportes():
                 <form method="post" action="/revertir_orden_cierre/{orden["orden_id"]}" class="form-revertir-cierre" style="margin:0;">
                     <input type="hidden" name="clave" value="">
                     <input type="hidden" name="volver" value="{volver_url}">
-                    <button type="submit" style="background:#7f1d1d; color:white; border:none; border-radius:8px; padding:9px 11px; cursor:pointer; width:auto; min-height:38px;">🧨 Revertir orden</button>
+                    <button type="submit" style="background:linear-gradient(135deg,#991b1b,#dc2626); color:white; border:none; border-radius:8px; padding:9px 11px; cursor:pointer; width:auto; min-height:38px; font-weight:700;">🧨 Revertir orden</button>
                 </form>
                 """
             ordenes_html += f"""
@@ -5338,18 +5684,18 @@ def reportes():
     {estilos_base()}
     body {{ margin:0; }}
     .contenido {{ padding:18px; }}
-    .filtros, .metricas, .bloque {{ background:white; border-radius:12px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
+    .filtros, .metricas, .bloque {{ background:white; border-radius:14px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
     .filtros form {{ display:grid; grid-template-columns: 1fr 1fr auto auto; gap:12px; align-items:end; }}
     .metricas {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; }}
-    .metrica {{ background:#f8fafc; border:1px solid #e5e7eb; border-left:5px solid var(--rojo-china); padding:14px; border-radius:8px; }}
-    .metrica small {{ display:block; color:#64748b; font-weight:bold; margin-bottom:6px; }}
-    .metrica b {{ font-size:22px; }}
-    button, .btn-link {{ border:none; border-radius:8px; padding:13px 16px; color:white; background:#15803d; text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; }}
-    .btn-excel {{ background:#1d4ed8; }}
-    .btn-dashboard {{ background:#7f1d1d; }}
-    table {{ width:100%; border-collapse:collapse; background:white; }}
-    th, td {{ border-bottom:1px solid #e5e7eb; padding:11px; text-align:left; }}
-    th {{ background:#fff7ed; color:#7f1d1d; }}
+    .metrica {{ background:linear-gradient(135deg, #f0fdf4, #dcfce7); border:1px solid #bbf7d0; border-left:5px solid var(--verde-neko); padding:14px; border-radius:12px; }}
+    .metrica small {{ display:block; color:#64748b; font-weight:700; margin-bottom:6px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
+    .metrica b {{ font-size:22px; color:var(--carbon); }}
+    button, .btn-link {{ border:none; border-radius:10px; padding:13px 16px; color:white; background:linear-gradient(135deg, #0d4a32, #1a6b4a); text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }}
+    .btn-excel {{ background:linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
+    .btn-dashboard {{ background:linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
+    table {{ width:100%; border-collapse:collapse; background:white; border-radius:10px; overflow:hidden; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:11px 14px; text-align:left; }}
+    th {{ background:#f0fdf4; color:var(--verde-neko); font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
     .tabla-wrap {{ overflow:auto; }}
     @media (max-width: 900px) {{
         .filtros form, .metricas {{ grid-template-columns:1fr; }}
@@ -5523,7 +5869,7 @@ def exportar_reporte():
         ]
     )
 
-    nombre = f"reporte_china_house_{desde}_a_{hasta}.xlsx"
+    nombre = f"reporte_neko_wok_{desde}_a_{hasta}.xlsx"
     respuesta = Response(
         contenido,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -5606,20 +5952,20 @@ def dashboard():
     {estilos_base()}
     body {{ margin:0; }}
     .contenido {{ padding:18px; }}
-    .filtros, .panel-dashboard {{ background:white; border-radius:12px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
+    .filtros, .panel-dashboard {{ background:white; border-radius:14px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
     .filtros form {{ display:grid; grid-template-columns: 1fr 1fr auto auto; gap:12px; align-items:end; }}
     .grid-dashboard {{ display:grid; grid-template-columns: repeat(2, 1fr); gap:16px; }}
     .resumen-top {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; margin-bottom:16px; }}
-    .metrica {{ background:#fff7ed; border-left:5px solid var(--rojo-china); padding:14px; border-radius:8px; }}
-    .metrica small {{ display:block; color:#64748b; font-weight:bold; margin-bottom:6px; }}
-    .metrica b {{ font-size:22px; }}
-    button, .btn-link {{ border:none; border-radius:8px; padding:13px 16px; color:white; background:#15803d; text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; }}
-    .btn-reportes {{ background:#1d4ed8; }}
+    .metrica {{ background:linear-gradient(135deg, #f0fdf4, #dcfce7); border-left:5px solid var(--verde-neko); padding:16px; border-radius:12px; box-shadow:0 2px 8px rgba(26,107,74,0.08); }}
+    .metrica small {{ display:block; color:#64748b; font-weight:700; margin-bottom:6px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
+    .metrica b {{ font-size:22px; color:var(--carbon); }}
+    button, .btn-link {{ border:none; border-radius:10px; padding:13px 16px; color:white; background:linear-gradient(135deg, #0d4a32, #1a6b4a); text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }}
+    .btn-reportes {{ background:linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
     .fila-barra {{ display:grid; grid-template-columns: 240px 1fr; gap:12px; align-items:center; padding:10px 0; border-bottom:1px solid #e5e7eb; }}
     .fila-barra:last-child {{ border-bottom:none; }}
-    .barra {{ height:18px; background:#fee2e2; border-radius:999px; overflow:hidden; }}
-    .barra span {{ display:block; height:100%; background:linear-gradient(90deg, var(--rojo-china), var(--dorado)); }}
-    .vacio {{ color:#64748b; padding:12px 0; }}
+    .barra {{ height:16px; background:#f0fdf4; border-radius:999px; overflow:hidden; }}
+    .barra span {{ display:block; height:100%; background:linear-gradient(90deg, var(--verde-neko), var(--naranja)); border-radius:999px; }}
+    .vacio {{ color:#9ca3af; padding:12px 0; font-size:14px; }}
     @media (max-width: 900px) {{
         .filtros form, .grid-dashboard, .resumen-top, .fila-barra {{ grid-template-columns:1fr; }}
     }}
@@ -5694,13 +6040,13 @@ def cierre():
             "debes cerrarlas o eliminarlas antes de cerrar jornada.</h2>"
         )
     elif cantidad_ordenes_cerradas == 0:
-        mensaje = "<h2 style='color:#c0392b;'>No hay ordenes cerradas para esta jornada.</h2>"
+        mensaje = "<h2 style='color:#dc2626;'>No hay ordenes cerradas para esta jornada.</h2>"
     else:
-        mensaje = "<h2 style='color:green;'>Jornada lista para cierre</h2>"
+        mensaje = "<h2 style='color:#1a6b4a;'>✅ Jornada lista para cierre</h2>"
 
     boton = ""
     if ordenes_activas == 0 and cantidad_ordenes_cerradas > 0:
-        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:#c0392b;">🔒 Confirmar cierre de jornada</a>'
+        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:linear-gradient(135deg,#7c3aed,#6d28d9); color:white; padding:14px 20px; border-radius:12px; font-weight:800; text-decoration:none;">🔒 Confirmar cierre de jornada</a>'
 
     auditoria_html = ""
     if not resumen["auditoria_pagos"]:
@@ -5750,17 +6096,17 @@ def cierre():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     {estilos_base()}
-    body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
-    .card {{ max-width: 980px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: var(--sombra); }}
-    .bloque {{ background: #f8f9fb; padding: 14px; border-radius: 10px; margin-bottom: 14px; }}
-    .titulo-bloque {{ font-size: 18px; font-weight: bold; margin-bottom: 10px; }}
-    .dato {{ margin: 6px 0; font-size: 17px; }}
-    .volver {{ display:inline-block; margin-top:20px; padding:12px 16px; background:#2c3e50; color:white; text-decoration:none; border-radius:6px; }}
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f7f5f0; padding: 20px; }}
+    .card {{ max-width: 980px; margin: auto; background: white; padding: 25px; border-radius: 16px; box-shadow: var(--sombra); border: 1px solid #e5e0d8; }}
+    .bloque {{ background: #f0fdf4; padding: 14px; border-radius: 12px; margin-bottom: 14px; border: 1px solid #bbf7d0; }}
+    .titulo-bloque {{ font-size: 17px; font-weight: 800; margin-bottom: 10px; color: #1a6b4a; }}
+    .dato {{ margin: 6px 0; font-size: 16px; }}
+    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:linear-gradient(135deg,#0d4a32,#1a6b4a); color:white; text-decoration:none; border-radius:10px; font-weight:800; }}
     .tabla-wrap {{ overflow:auto; }}
-    table {{ width:100%; border-collapse: collapse; background:white; }}
-    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
-    th {{ background:#eef2f7; }}
-    .vacio {{ color:#7f8c8d; }}
+    table {{ width:100%; border-collapse: collapse; background:white; border-radius:10px; overflow:hidden; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px 14px; text-align:left; }}
+    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
+    .vacio {{ color:#9ca3af; }}
     </style>
     </head>
     <body>
@@ -5912,10 +6258,10 @@ def cerrar_jornada():
     <style>
     {estilos_base()}
     body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
-    .card {{ max-width: 760px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }}
-    h1 {{ margin-top: 0; }}
-    .total {{ font-size: 22px; font-weight: bold; color: #27ae60; margin-bottom: 8px; }}
-    .volver {{ display:inline-block; margin-top:20px; padding:12px 16px; background:#2c3e50; color:white; text-decoration:none; border-radius:6px; }}
+    .card {{ max-width: 760px; margin: auto; background: white; padding: 28px; border-radius: 16px; box-shadow: 0 8px 24px rgba(13,74,50,0.10); border: 1px solid #e5e0d8; }}
+    h1 {{ margin-top: 0; color: #1a6b4a; }}
+    .total {{ font-size: 20px; font-weight: 800; color: #1a6b4a; margin-bottom: 8px; }}
+    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:linear-gradient(135deg,#0d4a32,#1a6b4a); color:white; text-decoration:none; border-radius:10px; font-weight:800; }}
     </style>
     </head>
     <body>
@@ -5971,19 +6317,25 @@ def pantalla_cocina():
     <meta http-equiv="refresh" content="5">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        """ + estilos_base() + """
-        body { font-family: Arial; background:black; color:white; font-size:22px; margin:0; }
-        .topbar { padding:12px 16px; background:#111; display:flex; justify-content:space-between; align-items:center; gap:10px; }
-        .topbar a { color:white; text-decoration:none; background:#2c3e50; padding:10px 12px; border-radius:5px; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background:#0f0f0f; color:white; font-size:20px; margin:0; }
+        .topbar { padding:10px 16px; background:linear-gradient(135deg, #0d4a32, #1a6b4a); display:flex; justify-content:space-between; align-items:center; gap:10px; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
+        .topbar-brand { font-weight:900; font-size:18px; display:flex; align-items:center; gap:8px; }
+        .topbar-brand span { color:#f97316; }
+        .topbar-user { font-size:14px; opacity:0.8; }
+        .topbar a { color:white; text-decoration:none; background:rgba(255,255,255,0.15); padding:8px 12px; border-radius:8px; font-size:13px; font-weight:700; }
+        .topbar a:hover { background:rgba(255,255,255,0.25); }
         .container { display:flex; }
         .col { width:50%; padding:10px; box-sizing:border-box; }
-        .orden { border:4px solid white; margin:10px; padding:15px; border-radius:10px; }
-        .green { border-color: green; }
-        .orange { border-color: orange; }
-        .red { border-color: red; }
-        .btn { padding:10px; background:green; color:white; border:none; font-size:18px; }
-        .mesonera { color:#f1c40f; font-weight:bold; }
-        h1 { text-align:center; }
+        .col-title { font-size:14px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:#6b7280; padding:8px 10px 4px; }
+        .orden { border:3px solid #374151; margin:8px; padding:16px; border-radius:14px; background:#1a1a1a; }
+        .green { border-color: #22c55e; background:#052e16; }
+        .orange { border-color: #f97316; background:#1c0a00; }
+        .red { border-color: #ef4444; background:#1c0000; animation: pulse-red 1.5s ease-in-out infinite; }
+        @keyframes pulse-red { 0%,100% { border-color:#ef4444; } 50% { border-color:#fca5a5; } }
+        .btn { padding:12px 16px; background:linear-gradient(135deg, #0d4a32, #1a6b4a); color:white; border:none; font-size:16px; font-weight:800; border-radius:10px; cursor:pointer; width:100%; margin-top:10px; }
+        .btn:active { transform:scale(0.97); }
+        .mesonera { color:#f97316; font-weight:700; font-size:16px; }
+        .cocina-header { text-align:center; padding:10px; font-size:14px; font-weight:700; letter-spacing:2px; text-transform:uppercase; color:#4b5563; background:#111; border-bottom:1px solid #1f2937; }
         @media (max-width: 768px) { .container { flex-direction: column; } .col { width:100%; } }
     </style>
     <script>
@@ -5999,16 +6351,19 @@ def pantalla_cocina():
     </head>
     <body>
     <div class="topbar">
-        <div>Usuario: <b>""" + usuario_activo() + """</b></div>
-        <div style="display:flex; gap:8px;">
+        <div class="topbar-brand">🐱 Neko <span>Wok</span> · 🍳 Cocina</div>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <div class="topbar-user">👤 """ + usuario_activo() + """</div>
+            <div style="display:flex; gap:6px;">
             """ + cocina_links + """
-            <a href="/logout">🚪 Cerrar sesión</a>
+            <a href="/logout">🚪 Salir</a>
+            </div>
         </div>
     </div>
-    <h1>🍳 COCINA</h1>
+    <div class="cocina-header">🍳 Estaciones de cocina · Vista en tiempo real</div>
     <div class="container">
         <div class="col">
-            <h2>🍚 ESTACION ARROZ</h2>
+            <div class="col-title">🍚 Estación Arroz</div>
     """
 
     for o in ordenes:
@@ -6062,7 +6417,7 @@ def pantalla_cocina():
     html += """
         </div>
         <div class="col">
-            <h2>🔥 ESTACION CALIENTE</h2>
+            <div class="col-title">🔥 Estación Caliente</div>
     """
     html += caliente_html
     html += f"""
@@ -6414,6 +6769,8 @@ def desactivar_factura(orden_id):
 with app.app_context():
     init_db()
     cargar_productos()
+    asegurar_menu_neko_wok()
+    desactivar_menu_china_house()
 
 
 if __name__ == "__main__":
