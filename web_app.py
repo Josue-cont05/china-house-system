@@ -2450,6 +2450,11 @@ def usuarios():
                 <tbody>{filas_html}</tbody>
             </table>
         </div>
+        <div class="card" style="border:2px solid #f97316;background:#fff7ed;">
+            <h2 style="color:#c2410c;margin-top:0;">⚠️ Zona de peligro</h2>
+            <p style="color:#7c2d12;margin:0 0 14px 0;">Reinicia la base de datos y deja el sistema limpio con solo el menú Neko Wok. Borra órdenes, pagos, cierres e inventario. <b>No se puede deshacer.</b></p>
+            <a href="/reset_neko" style="display:inline-block;background:#dc2626;color:white;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:bold;">⚠️ Reset Neko</a>
+        </div>
     </div>
     </body>
     </html>
@@ -6764,6 +6769,247 @@ def desactivar_factura(orden_id):
             except Exception:
                 pass
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _reset_neko_wok_db():
+    """Borra datos operativos y recrea el menú Neko Wok desde cero. NO borra usuarios ni tasa."""
+    TABLAS_OPERATIVAS = [
+        "orden_items",
+        "pagos",
+        "cierre_detalle",
+        "ordenes",
+        "cierres",
+        "cierres_caja",
+        "compras",
+        "producciones",
+        "movimientos_inventario",
+        "inventario",
+        "recetas",
+        "proveedores",
+        "productos_base",
+        "auditoria_emergencias",
+        "productos",
+        "categorias",
+    ]
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        if es_postgres():
+            tablas_str = ", ".join(TABLAS_OPERATIVAS)
+            cursor.execute(f"TRUNCATE {tablas_str} RESTART IDENTITY CASCADE")
+        else:
+            for tabla in TABLAS_OPERATIVAS:
+                cursor.execute(f"DELETE FROM {tabla}")
+            for tabla in TABLAS_OPERATIVAS:
+                cursor.execute(
+                    "DELETE FROM sqlite_sequence WHERE name=?", (tabla,)
+                )
+
+        # Recrear categorías Neko Wok
+        for cat in ORDEN_CATEGORIAS_POS:
+            cursor.execute("INSERT INTO categorias (nombre, activo) VALUES (?, 1)", (cat,))
+
+        conn.commit()
+
+        # Obtener IDs de categorías recién creadas
+        cursor.execute("SELECT id, nombre FROM categorias")
+        cat_dict = {nombre: cat_id for cat_id, nombre in cursor.fetchall()}
+
+        # Recrear productos Neko Wok
+        productos_neko = [
+            ("Neko Combo 1",               4.80,  "Neko Combos"),
+            ("Neko Combo 2",               5.50,  "Neko Combos"),
+            ("Neko Combo 3",               7.00,  "Neko Combos"),
+            ("Neko Dúo Pollo Cerdo",       8.00,  "Neko Dúo"),
+            ("Neko Dúo Pollo Camarón",     8.00,  "Neko Dúo"),
+            ("Neko Dúo Triple",            9.00,  "Neko Dúo"),
+            ("Neko Clan Pollo Cerdo",     11.00,  "Neko Clan"),
+            ("Neko Clan Pollo Camarón",   11.00,  "Neko Clan"),
+            ("Neko Clan Triple",          13.00,  "Neko Clan"),
+            ("Pollo Agridulce",            5.00,  "Favoritos de Neko"),
+            ("Chop Suey de Vegetales",     4.00,  "Favoritos de Neko"),
+            ("Chop Suey de Pollo",         5.00,  "Favoritos de Neko"),
+            ("Ración de Lumpias (2u)",     4.00,  "Favoritos de Neko"),
+            ("1/2 Ración de Lumpias (1u)", 2.50,  "Favoritos de Neko"),
+            ("Refresco Personal",          0.75,  "Bebidas"),
+            ("Refresco 1 Lt",              1.00,  "Bebidas"),
+            ("Refresco 1.5 Lt",            1.50,  "Bebidas"),
+            ("Refresco 2 Lt",              2.00,  "Bebidas"),
+            ("Delivery 0.5",               0.50,  "Delivery"),
+            ("Delivery 1",                 1.00,  "Delivery"),
+            ("Delivery 1.5",               1.50,  "Delivery"),
+            ("Delivery 2",                 2.00,  "Delivery"),
+            ("Delivery 2.5",               2.50,  "Delivery"),
+            ("Delivery 3",                 3.00,  "Delivery"),
+            ("Delivery 3.5",               3.50,  "Delivery"),
+            ("Extra de Salsa",             0.25,  "Extras"),
+        ]
+
+        for nombre, precio, cat in productos_neko:
+            cursor.execute(
+                "INSERT INTO productos (nombre, precio, categoria_id, activo) VALUES (?, ?, ?, 1)",
+                (nombre, precio, cat_dict.get(cat)),
+            )
+
+        # Recrear productos_base de inventario
+        productos_base = [
+            ("Pollo",    "kg"),
+            ("Cerdo",    "kg"),
+            ("Camaron",  "kg"),
+            ("Arroz",    "kg"),
+            ("Lumpias",  "unidad"),
+            ("Salsa",    "lt"),
+            ("Refresco", "unidad"),
+        ]
+        for nombre, unidad in productos_base:
+            cursor.execute(
+                "INSERT INTO productos_base (nombre, unidad) VALUES (?, ?)",
+                (nombre, unidad),
+            )
+
+        conn.commit()
+        conn.close()
+
+    except Exception:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        raise
+
+
+@app.route("/reset_neko", methods=["GET", "POST"])
+def reset_neko():
+    if not usuario_es_master():
+        return "Acceso denegado", 403
+
+    if request.method == "POST":
+        confirmacion = (request.form.get("confirmacion") or "").strip()
+        if confirmacion != "RESET NEKO WOK":
+            return f"""
+            <html><head><meta charset="UTF-8"><style>{estilos_base()}</style></head>
+            <body>
+            {barra_superior('<a href="/usuarios">👥 Usuarios</a>')}
+            <div style="max-width:600px;margin:40px auto;padding:0 18px;">
+                <div style="background:#fef2f2;border:2px solid #ef4444;border-radius:10px;padding:24px;">
+                    <h2 style="color:#dc2626;margin-top:0;">✖ Confirmación incorrecta</h2>
+                    <p>Debes escribir exactamente: <code>RESET NEKO WOK</code></p>
+                    <a href="/reset_neko" style="color:#1d4ed8;">← Volver</a>
+                </div>
+            </div>
+            </body></html>
+            """, 400
+
+        try:
+            _reset_neko_wok_db()
+        except Exception as exc:
+            return f"""
+            <html><head><meta charset="UTF-8"><style>{estilos_base()}</style></head>
+            <body>
+            {barra_superior('<a href="/usuarios">👥 Usuarios</a>')}
+            <div style="max-width:600px;margin:40px auto;padding:0 18px;">
+                <div style="background:#fef2f2;border:2px solid #ef4444;border-radius:10px;padding:24px;">
+                    <h2 style="color:#dc2626;margin-top:0;">⚠️ Error durante el reset</h2>
+                    <p>Los datos NO fueron modificados (se hizo rollback).</p>
+                    <pre style="background:#fff;padding:12px;border-radius:6px;overflow:auto;font-size:12px;">{html_lib.escape(str(exc))}</pre>
+                    <a href="/reset_neko" style="color:#1d4ed8;">← Volver</a>
+                </div>
+            </div>
+            </body></html>
+            """, 500
+
+        return f"""
+        <html><head><meta charset="UTF-8"><style>{estilos_base()}</style></head>
+        <body>
+        {barra_superior('<a href="/">🏠 Inicio</a>')}
+        <div style="max-width:600px;margin:40px auto;padding:0 18px;">
+            <div style="background:#f0fdf4;border:2px solid #22c55e;border-radius:10px;padding:24px;">
+                <h2 style="color:#15803d;margin-top:0;">✅ Reset completado</h2>
+                <p>El sistema fue reiniciado exitosamente con el menú Neko Wok.</p>
+                <ul>
+                    <li>Órdenes, pagos y cierres anteriores: <b>eliminados</b></li>
+                    <li>Inventario y compras: <b>eliminados</b></li>
+                    <li>Menú Neko Wok: <b>recreado</b></li>
+                    <li>Productos base (inventario): <b>recreados</b></li>
+                    <li>Usuarios y tasa: <b>conservados</b></li>
+                </ul>
+                <a href="/" style="display:inline-block;margin-top:8px;background:#1a6b4a;color:white;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:bold;">🏠 Ir al inicio</a>
+            </div>
+        </div>
+        </body></html>
+        """
+
+    # GET — pantalla de advertencia
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ max-width:660px; margin:40px auto; padding:0 18px; }}
+    .advertencia {{ background:#fff7ed; border:2px solid #f97316; border-radius:12px; padding:28px; }}
+    .advertencia h1 {{ color:#c2410c; margin-top:0; font-size:22px; }}
+    .lista-borrar {{ background:#fef2f2; border-radius:8px; padding:14px 18px; margin:16px 0; }}
+    .lista-borrar li {{ color:#991b1b; margin:4px 0; }}
+    .lista-conservar {{ background:#f0fdf4; border-radius:8px; padding:14px 18px; margin:16px 0; }}
+    .lista-conservar li {{ color:#166534; margin:4px 0; }}
+    input[name="confirmacion"] {{ width:100%; padding:12px; font-size:16px; border:2px solid #f97316; border-radius:8px; margin:10px 0; box-sizing:border-box; font-family:monospace; }}
+    .btn-reset {{ background:#dc2626; color:white; border:none; padding:14px 28px; border-radius:8px; font-size:16px; font-weight:bold; cursor:pointer; width:100%; margin-top:8px; }}
+    .btn-reset:hover {{ background:#b91c1c; }}
+    .btn-cancel {{ display:block; text-align:center; margin-top:14px; color:#6b7280; text-decoration:none; }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/usuarios">👥 Usuarios</a>')}
+    <div class="contenido">
+        <div class="advertencia">
+            <h1>⚠️ Reset Neko Wok — Advertencia</h1>
+            <p><b>Esta acción borrará permanentemente los datos operativos del sistema</b> y dejará la base de datos limpia con solo el menú Neko Wok.</p>
+
+            <p><b>Se borrarán:</b></p>
+            <ul class="lista-borrar">
+                <li>Órdenes (ordenes, orden_items)</li>
+                <li>Pagos (pagos)</li>
+                <li>Cierres de jornada (cierres, cierres_caja, cierre_detalle)</li>
+                <li>Inventario (inventario, movimientos_inventario)</li>
+                <li>Compras y producciones</li>
+                <li>Recetas</li>
+                <li>Proveedores</li>
+                <li>Productos base</li>
+                <li>Auditoría de emergencias</li>
+                <li>Todos los productos y categorías anteriores</li>
+            </ul>
+
+            <p><b>Se conservarán:</b></p>
+            <ul class="lista-conservar">
+                <li>Usuarios y PINs</li>
+                <li>Tasa de cambio actual</li>
+            </ul>
+
+            <p><b>Se recrearán automáticamente:</b></p>
+            <ul class="lista-conservar">
+                <li>Categorías Neko Wok (7 categorías)</li>
+                <li>Productos Neko Wok completos</li>
+                <li>Productos base de inventario</li>
+            </ul>
+
+            <form method="post">
+                <label><b>Escribe exactamente para confirmar:</b><br>
+                <code style="background:#fff;padding:3px 8px;border-radius:4px;font-size:14px;">RESET NEKO WOK</code></label>
+                <input name="confirmacion" type="text" autocomplete="off" placeholder="RESET NEKO WOK">
+                <button class="btn-reset" type="submit">⚠️ Confirmar reset definitivo</button>
+            </form>
+            <a href="/usuarios" class="btn-cancel">← Cancelar y volver</a>
+        </div>
+    </div>
+    </body>
+    </html>
+    """
 
 
 with app.app_context():
