@@ -78,12 +78,14 @@ def imprimir_comanda(orden):
 
     texto = (
         "\n"
-        "========================\n"
-        "      CHINA HOUSE\n"
+        "            /\\_/\\\n"
+        "           ( o.o )\n"
+        "            > ^ <\n"
+        "           NEKO WOK\n"
         "========================\n\n"
         f"{encabezado_reimpresion}"
         f"ORDEN #{numero}\n"
-        f"MESONERA: {str(usuario).upper()}\n\n"
+        f"SERVICIO: {str(usuario).upper()}\n\n"
         f"TIPO: {tipo}\n"
         f"CLIENTE: {cliente}\n"
         f"REF: {referencia}\n"

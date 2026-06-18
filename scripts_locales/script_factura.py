@@ -338,11 +338,13 @@ def construir_texto_factura(orden, tasa):
 
     texto = (
         "\n"
-        "========================\n"
-        "      CHINA HOUSE\n"
+        "            /\\_/\\\n"
+        "           ( o.o )\n"
+        "            > ^ <\n"
+        "          NEKO WOK\n"
         "========================\n\n"
         f"FACTURA - ORDEN #{numero}\n"
-        f"MESONERA: {str(usuario).upper()}\n\n"
+        f"SERVICIO: {str(usuario).upper()}\n\n"
         f"TIPO: {tipo}\n"
         f"CLIENTE: {cliente}\n"
         "------------------------\n\n"
@@ -371,8 +373,10 @@ def construir_texto_factura(orden, tasa):
 def construir_ticket_prueba():
     return (
         "\n"
-        "========================\n"
-        "      CHINA HOUSE\n"
+        "            /\\_/\\\n"
+        "           ( o.o )\n"
+        "            > ^ <\n"
+        "           NEKO WOK\n"
         "========================\n"
         "PRUEBA DE IMPRESION\n"
         "Si puedes leer esto, la impresora funciona.\n"
@@ -432,6 +436,7 @@ def ejecutar_loop_facturas():
     global impresos
 
     impresos = cargar_impresos()
+    print("Script de facturas iniciado. Esperando facturas...")
 
     while True:
         try:
@@ -442,6 +447,8 @@ def ejecutar_loop_facturas():
 
             if facturas:
                 continue
+
+            print("Buscando facturas...")
 
         except Exception as e:
             print(f"ERROR general: {e}")

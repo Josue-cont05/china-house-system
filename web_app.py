@@ -25,6 +25,10 @@ SABORES_REFRESCO = [
     "Chinotto",
     "Frescolita",
     "Naranja",
+    "Uva",
+    "Manzana",
+    "7Up",
+    "Pepsi",
 ]
 ETIQUETAS_METODO_PAGO = {
     "punto_venta": "Punto de venta",
@@ -33,10 +37,11 @@ ETIQUETAS_METODO_PAGO = {
     "bs_efectivo": "Efectivo en Bs",
     "usd": "Efectivo en USD",
 }
-ROLES_USUARIO_VALIDOS = ("master", "mesonera", "cocina", "socio")
+ROLES_USUARIO_VALIDOS = ("master", "mesonera", "cocina", "socio", "mesonera_reportes", "cocina_reportes")
 
 ORDEN_CATEGORIAS_POS = [
     "Neko Combos",
+    "Promociones Neko",
     "Neko Dúo",
     "Neko Clan",
     "Favoritos de Neko",
@@ -47,6 +52,7 @@ ORDEN_CATEGORIAS_POS = [
 
 COLORES_CATEGORIAS_POS = {
     "Neko Combos":      "#0d4a32",
+    "Promociones Neko": "#be123c",
     "Neko Dúo":         "#c2410c",
     "Neko Clan":        "#1e3a8a",
     "Favoritos de Neko": "#0f766e",
@@ -55,8 +61,72 @@ COLORES_CATEGORIAS_POS = {
     "Extras":           "#374151",
 }
 
-COMBO1_FAVORITOS = ["Pollo Agridulce", "Chop Suey de Vegetales"]
-COMBOS_CON_FAVORITO = {"Neko Combo 1": COMBO1_FAVORITOS}
+FAVORITOS_COMBO_1 = [
+    "Pollo Agridulce",
+    "Chop Suey de Pollo",
+]
+COMBOS_PERSONALES = {
+    "Neko Combo 1": {
+        "arroz": "Arroz de pollo",
+        "bebida": "Coca Cola Personal",
+        "favoritos_disponibles": FAVORITOS_COMBO_1,
+        "favoritos_fijos": [],
+    },
+    "Neko Combo 2": {
+        "arroz": "Arroz de pollo",
+        "bebida": "Coca Cola Personal",
+        "favoritos_disponibles": [],
+        "favoritos_fijos": ["Pollo Agridulce", "Chop Suey de Pollo"],
+    },
+    "Neko Combo 3": {
+        "arroz": "Arroz triple",
+        "bebida": "Coca Cola Personal",
+        "favoritos_disponibles": [],
+        "favoritos_fijos": ["Pollo Agridulce", "Chop Suey de Pollo"],
+    },
+}
+COMBOS_CON_FAVORITO = {"Neko Combo 1": FAVORITOS_COMBO_1}
+ARROCES_PROMOCION = ["Pollo + Cerdo", "Pollo + Camarón", "Triple"]
+PROMOCIONES_NEKO = {
+    "Wok para Dos": {"cantidad_arroces": 1, "cantidad_refrescos": 1, "refresco": "Refresco 1 Lt"},
+    "Familiar": {"cantidad_arroces": 1, "cantidad_refrescos": 1, "refresco": "Refresco 1.5 Lt"},
+    "Mega Familiar": {"cantidad_arroces": 2, "cantidad_refrescos": 2, "refresco": "Refresco 1.5 Lt"},
+}
+PROMO_EXTRA_LUMPIAS_NOMBRE = "Promo extra: Ración de Lumpias"
+PROMO_EXTRA_LUMPIAS_PRECIO = 3.00
+
+PRODUCTOS_MENU_NEKO = [
+    ("Neko Combo 1", 5.30, "Neko Combos"),
+    ("Neko Combo 2", 6.00, "Neko Combos"),
+    ("Neko Combo 3", 7.00, "Neko Combos"),
+    ("Wok para Dos", 13.00, "Promociones Neko"),
+    ("Familiar", 20.00, "Promociones Neko"),
+    ("Mega Familiar", 38.00, "Promociones Neko"),
+    ("Neko Dúo Pollo Cerdo", 8.00, "Neko Dúo"),
+    ("Neko Dúo Pollo Camarón", 8.00, "Neko Dúo"),
+    ("Neko Dúo Triple", 9.00, "Neko Dúo"),
+    ("Neko Clan Pollo Cerdo", 11.00, "Neko Clan"),
+    ("Neko Clan Pollo Camarón", 11.00, "Neko Clan"),
+    ("Neko Clan Triple", 13.00, "Neko Clan"),
+    ("Pollo Agridulce", 4.80, "Favoritos de Neko"),
+    ("Chop Suey de Pollo", 5.00, "Favoritos de Neko"),
+    ("Chop Suey de Vegetales", 4.00, "Favoritos de Neko"),
+    ("Ración de Lumpias (2u)", 4.00, "Favoritos de Neko"),
+    ("1/2 Ración de Lumpias (1u)", 2.50, "Favoritos de Neko"),
+    ("Tequeños (5u)", 3.00, "Favoritos de Neko"),
+    ("Ración de Pan Chino (4u)", 1.00, "Favoritos de Neko"),
+    ("Refresco 1 Lt", 1.20, "Bebidas"),
+    ("Refresco 1.5 Lt", 1.80, "Bebidas"),
+    ("Refresco 2 Lt", 2.20, "Bebidas"),
+    ("Delivery 0.5", 0.50, "Delivery"),
+    ("Delivery 1", 1.00, "Delivery"),
+    ("Delivery 1.5", 1.50, "Delivery"),
+    ("Delivery 2", 2.00, "Delivery"),
+    ("Delivery 2.5", 2.50, "Delivery"),
+    ("Delivery 3", 3.00, "Delivery"),
+    ("Delivery 3.5", 3.50, "Delivery"),
+    ("Extra de Salsa", 0.25, "Extras"),
+]
 
 
 def cargar_configuracion():
@@ -280,7 +350,7 @@ def normalizar_sabor_refresco(sabor):
 def normalizar_indicacion_item(indicacion):
     indicacion = (indicacion or "").strip()
     indicacion = re.sub(r"\s+", " ", indicacion)
-    return indicacion[:180]
+    return indicacion[:500]
 
 
 def quitar_prefijo_cantidad_visual(texto):
@@ -491,37 +561,37 @@ def crear_tablas_cierre_jornada():
 
 
 def crear_usuarios_iniciales():
-    conn = get_connection()
-    cursor = conn.cursor()
+    asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
 
-    usuarios = [
-        ("Josue", "2204", "master", False),
-        ("Emmanuel", "2002", "master", False),
-        ("Monica", "1310", "mesonera", True),
-        ("Gaby", "2204", "mesonera", True),
-        ("Ismaldo", "2710", "cocina", False),
-        ("Jessica", "0101", "socio", False),
+    USUARIOS_NEKO_WOK = [
+        ("Josue",   "2204", "master"),
+        ("Monica",  "1310", "master"),
+        ("Gaby",    "2204", "master"),
+        ("Oscar",   "1810", "mesonera"),
+        ("Julissa", "2402", "mesonera"),
+        ("Lili",    "2310", "mesonera"),
     ]
 
-    for nombre, pin, rol, actualizar_pin in usuarios:
-        cursor.execute("SELECT id FROM usuarios WHERE nombre=?", (nombre,))
-        existe = cursor.fetchone()
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE usuarios SET activo=0")
 
+    for nombre, pin, rol in USUARIOS_NEKO_WOK:
+        cursor.execute(
+            "SELECT id FROM usuarios WHERE lower(trim(nombre))=lower(?) ORDER BY id LIMIT 1",
+            (nombre,),
+        )
+        existe = cursor.fetchone()
         if existe:
-            if actualizar_pin:
-                cursor.execute(
-                    "UPDATE usuarios SET pin=?, rol=? WHERE id=?",
-                    (pin, rol, existe[0]),
-                )
-            else:
-                cursor.execute("UPDATE usuarios SET rol=? WHERE id=?", (rol, existe[0]))
+            cursor.execute(
+                "UPDATE usuarios SET nombre=?, pin=?, rol=?, activo=1 WHERE id=?",
+                (nombre, pin, rol, existe[0]),
+            )
         else:
             cursor.execute(
-                "INSERT INTO usuarios (nombre, pin, rol) VALUES (?, ?, ?)",
+                "INSERT INTO usuarios (nombre, pin, rol, activo) VALUES (?, ?, ?, 1)",
                 (nombre, pin, rol),
             )
-
-    cursor.execute("UPDATE usuarios SET rol='mesonera' WHERE rol IS NULL OR rol=''")
 
     conn.commit()
     conn.close()
@@ -664,12 +734,12 @@ def usuario_rol():
         return rol
 
     roles_por_nombre = {
-        "Josue": "master",
+        "Josue":    "master",
         "Emmanuel": "master",
-        "Monica": "mesonera",
-        "Gaby": "mesonera",
-        "Ismaldo": "cocina",
-        "Jessica": "socio",
+        "Monica":   "mesonera_reportes",
+        "Gaby":     "mesonera_reportes",
+        "Jessica":  "cocina_reportes",
+        "Ismaldo":  "cocina_reportes",
     }
     rol = roles_por_nombre.get(session.get("usuario") or session.get("usuario_nombre"), "mesonera")
     session["usuario_rol"] = rol
@@ -694,11 +764,11 @@ def usuario_es_socio():
 
 
 def usuario_puede_tomar_ordenes():
-    return usuario_rol() in ("master", "mesonera", "socio")
+    return usuario_rol() in ("master", "mesonera", "socio", "mesonera_reportes")
 
 
 def usuario_puede_ver_inventario():
-    return usuario_rol() in ("master", "cocina")
+    return usuario_rol() in ("master", "cocina", "cocina_reportes")
 
 
 def usuario_puede_editar_inventario():
@@ -706,12 +776,15 @@ def usuario_puede_editar_inventario():
 
 
 def usuario_puede_produccion():
-    # TODO: separar produccion limitada para rol cocina cuando exista la pantalla especifica.
-    return usuario_rol() in ("master", "cocina")
+    return usuario_rol() in ("master", "cocina", "cocina_reportes")
+
+
+def usuario_puede_ver_cocina():
+    return usuario_rol() in ("master", "cocina", "cocina_reportes")
 
 
 def usuario_puede_reportes():
-    return usuario_rol() in ("master", "socio")
+    return usuario_rol() in ("master", "socio", "mesonera_reportes", "cocina_reportes")
 
 
 def usuario_puede_admin_total():
@@ -1752,7 +1825,9 @@ def proteger_sistema():
         "usuarios",
         "crear_usuario",
         "editar_usuario",
+        "activar_usuario",
         "activar_edicion_emergencia",
+        "reset_neko",
     }
 
     # Lectura gerencial sin acciones destructivas para socios.
@@ -1832,10 +1907,7 @@ def proteger_sistema():
         )
         return "Acceso denegado", 403
 
-    if request.endpoint in acceso_cocina and usuario_rol() not in (
-        "master",
-        "cocina",
-    ):
+    if request.endpoint in acceso_cocina and not usuario_puede_ver_cocina():
         print(
             f"[PERMISO BLOQUEADO] "
             f"endpoint={request.endpoint} "
@@ -1998,6 +2070,7 @@ def init_db():
     asegurar_columna("ordenes", "inventario_descontado", "INTEGER DEFAULT 0")
     asegurar_columna("orden_items", "indicacion", "TEXT")
     asegurar_columna("usuarios", "rol", "TEXT")
+    asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
     asegurar_columna_facturar()
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
@@ -2071,7 +2144,7 @@ def cargar_productos():
 
 
 def asegurar_menu_neko_wok():
-    """Inserta categorías y productos Neko Wok si no existen. No elimina datos históricos."""
+    """Sincroniza el menú Neko Wok sin eliminar productos ni datos históricos."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -2087,51 +2160,41 @@ def asegurar_menu_neko_wok():
     cursor.execute("SELECT id, nombre FROM categorias")
     cat_dict = {nombre: cat_id for cat_id, nombre in cursor.fetchall()}
 
-    cursor.execute("SELECT nombre FROM productos")
-    productos_existentes = {row[0] for row in cursor.fetchall()}
-
-    nuevos_productos = [
-        ("Neko Combo 1",             4.80,  "Neko Combos"),
-        ("Neko Combo 2",             5.50,  "Neko Combos"),
-        ("Neko Combo 3",             7.00,  "Neko Combos"),
-        ("Neko Dúo Pollo Cerdo",     8.00,  "Neko Dúo"),
-        ("Neko Dúo Pollo Camarón",   8.00,  "Neko Dúo"),
-        ("Neko Dúo Triple",          9.00,  "Neko Dúo"),
-        ("Neko Clan Pollo Cerdo",   11.00,  "Neko Clan"),
-        ("Neko Clan Pollo Camarón", 11.00,  "Neko Clan"),
-        ("Neko Clan Triple",        13.00,  "Neko Clan"),
-        ("Pollo Agridulce",          5.00,  "Favoritos de Neko"),
-        ("Chop Suey de Vegetales",   4.00,  "Favoritos de Neko"),
-        ("Chop Suey de Pollo",       5.00,  "Favoritos de Neko"),
-        ("Ración de Lumpias (2u)",   4.00,  "Favoritos de Neko"),
-        ("1/2 Ración de Lumpias (1u)", 2.50, "Favoritos de Neko"),
-        ("Refresco Personal",        0.75,  "Bebidas"),
-        ("Refresco 1 Lt",            1.00,  "Bebidas"),
-        ("Refresco 1.5 Lt",          1.50,  "Bebidas"),
-        ("Refresco 2 Lt",            2.00,  "Bebidas"),
-        ("Delivery 0.5",             0.50,  "Delivery"),
-        ("Delivery 1",               1.00,  "Delivery"),
-        ("Delivery 1.5",             1.50,  "Delivery"),
-        ("Delivery 2",               2.00,  "Delivery"),
-        ("Delivery 2.5",             2.50,  "Delivery"),
-        ("Delivery 3",               3.00,  "Delivery"),
-        ("Delivery 3.5",             3.50,  "Delivery"),
-        ("Extra de Salsa",           0.25,  "Extras"),
+    categorias_menu_controlado = [
+        "Neko Combos", "Promociones Neko", "Neko Dúo", "Neko Clan",
+        "Favoritos de Neko", "Bebidas",
     ]
+    placeholders = ",".join("?" * len(categorias_menu_controlado))
+    cursor.execute(
+        f"""
+        UPDATE productos SET activo=0
+        WHERE categoria_id IN (
+            SELECT id FROM categorias WHERE nombre IN ({placeholders})
+        )
+        """,
+        categorias_menu_controlado,
+    )
 
-    for nombre, precio, categoria in nuevos_productos:
-        if nombre not in productos_existentes:
-            categoria_id = cat_dict.get(categoria)
+    for nombre, precio, categoria in PRODUCTOS_MENU_NEKO:
+        categoria_id = cat_dict.get(categoria)
+        cursor.execute(
+            "SELECT id FROM productos WHERE lower(nombre)=lower(?) ORDER BY id LIMIT 1",
+            (nombre,),
+        )
+        producto = cursor.fetchone()
+        if producto:
             cursor.execute(
-                "INSERT INTO productos (nombre, precio, categoria_id) VALUES (?, ?, ?)",
+                "UPDATE productos SET nombre=?, precio=?, categoria_id=?, activo=1 WHERE id=?",
+                (nombre, precio, categoria_id, producto[0]),
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO productos (nombre, precio, categoria_id, activo) VALUES (?, ?, ?, 1)",
                 (nombre, precio, categoria_id),
             )
 
     for cat in ORDEN_CATEGORIAS_POS:
         cursor.execute("UPDATE categorias SET activo=1 WHERE nombre=?", (cat,))
-    for nombre, _, _ in nuevos_productos:
-        cursor.execute("UPDATE productos SET activo=1 WHERE nombre=?", (nombre,))
-
     conn.commit()
     conn.close()
 
@@ -2188,7 +2251,7 @@ def siguiente_numero():
 def login():
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, nombre FROM usuarios ORDER BY nombre")
+    cursor.execute("SELECT id, nombre FROM usuarios WHERE COALESCE(activo, 1) = 1 ORDER BY nombre")
     usuarios = cursor.fetchall()
 
     error = ""
@@ -2198,7 +2261,11 @@ def login():
         pin = request.form.get("pin", "").strip()
 
         cursor.execute(
-            "SELECT id, nombre, COALESCE(rol, 'mesonera') FROM usuarios WHERE id=? AND pin=?",
+            """
+            SELECT id, nombre, COALESCE(rol, 'mesonera')
+            FROM usuarios
+            WHERE id=? AND pin=? AND COALESCE(activo, 1) = 1
+            """,
             (usuario_id, pin),
         )
         usuario = cursor.fetchone()
@@ -2209,7 +2276,7 @@ def login():
             session["usuario"] = usuario[1]
             session["usuario_rol"] = usuario[2] or "mesonera"
             conn.close()
-            if session["usuario_rol"] == "cocina":
+            if session["usuario_rol"] in ("cocina", "cocina_reportes"):
                 return redirect("/cocina")
             return redirect("/")
 
@@ -2369,28 +2436,48 @@ def usuarios():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin
+        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin, COALESCE(activo, 1)
         FROM usuarios
-        ORDER BY rol ASC, nombre ASC
+        ORDER BY COALESCE(activo, 1) DESC, rol ASC, nombre ASC
         """
     )
     filas_usuarios = cursor.fetchall()
     conn.close()
 
-    filas_html = ""
-    for usuario_id, nombre, rol, pin in filas_usuarios:
+    filas_activos = ""
+    filas_inactivos = ""
+    for usuario_id, nombre, rol, pin, activo in filas_usuarios:
         pin_estado = "Configurado" if pin else "Sin configurar"
-        filas_html += f"""
+        badge_activo = (
+            '<span style="background:#dcfce7;color:#166534;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;">Activo</span>'
+            if activo else
+            '<span style="background:#fee2e2;color:#991b1b;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;">Inactivo</span>'
+        )
+        toggle_label = "Desactivar" if activo else "Activar"
+        toggle_style = "background:#ef4444;" if activo else "background:#16a34a;"
+        fila = f"""
         <tr>
             <td>{html_lib.escape(nombre or '')}</td>
-            <td>{html_lib.escape(rol or 'mesonera')}</td>
+            <td><code style="font-size:13px;">{html_lib.escape(rol or 'mesonera')}</code></td>
             <td>{pin_estado}</td>
-            <td><a class="btn-editar" href="/editar_usuario/{usuario_id}">✏️ Editar</a></td>
+            <td>{badge_activo}</td>
+            <td style="display:flex;gap:6px;flex-wrap:wrap;">
+                <a class="btn-accion btn-editar" href="/editar_usuario/{usuario_id}">✏️ Editar</a>
+                <form method="post" action="/activar_usuario/{usuario_id}" style="margin:0;">
+                    <button type="submit" class="btn-accion" style="{toggle_style}color:white;border:none;cursor:pointer;">{toggle_label}</button>
+                </form>
+            </td>
         </tr>
         """
+        if activo:
+            filas_activos += fila
+        else:
+            filas_inactivos += fila
 
-    if not filas_html:
-        filas_html = '<tr><td colspan="4">No hay usuarios registrados.</td></tr>'
+    if not filas_activos:
+        filas_activos = '<tr><td colspan="5">No hay usuarios activos.</td></tr>'
+    if not filas_inactivos:
+        filas_inactivos = '<tr><td colspan="5">No hay usuarios inactivos.</td></tr>'
 
     return f"""
     <html>
@@ -2400,13 +2487,15 @@ def usuarios():
     <style>
     {estilos_base()}
     body {{ margin:0; }}
-    .contenido {{ padding:18px; max-width:900px; margin:auto; }}
+    .contenido {{ padding:18px; max-width:960px; margin:auto; }}
     .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; margin-bottom:16px; }}
     table {{ width:100%; border-collapse:collapse; }}
-    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; }}
-    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
-    .form-grid {{ display:grid; grid-template-columns:1fr 1fr 1fr auto; gap:10px; align-items:end; }}
-    .btn-editar {{ color:white; background:#1d4ed8; padding:8px 10px; border-radius:6px; text-decoration:none; font-weight:bold; }}
+    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; vertical-align:middle; }}
+    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }}
+    .form-grid {{ display:grid; grid-template-columns:1fr 1fr 1fr 1fr auto; gap:10px; align-items:end; }}
+    .btn-accion {{ display:inline-block; padding:7px 12px; border-radius:6px; text-decoration:none; font-weight:700; font-size:13px; }}
+    .btn-editar {{ color:white; background:#1d4ed8; }}
+    .seccion-titulo {{ font-size:13px; font-weight:800; color:#6b7280; text-transform:uppercase; letter-spacing:0.5px; margin:0 0 12px 0; }}
     @media (max-width: 760px) {{ .form-grid {{ grid-template-columns:1fr; }} }}
     </style>
     </head>
@@ -2427,15 +2516,30 @@ def usuarios():
                 </div>
                 <div>
                     <label>Rol</label>
-                    <select name="rol" required>{opciones_roles_usuario('mesonera')}</select>
+                    <select name="rol" required>{opciones_roles_usuario('mesonera_reportes')}</select>
                 </div>
-                <button type="submit">➕ Crear</button>
+                <div>
+                    <label>Estado</label>
+                    <select name="activo">
+                        <option value="1">Activo</option>
+                        <option value="0">Inactivo</option>
+                    </select>
+                </div>
+                <button type="submit" style="align-self:end;">➕ Crear</button>
             </form>
         </div>
         <div class="card">
+            <p class="seccion-titulo">✅ Usuarios activos</p>
             <table>
-                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Acción</th></tr></thead>
-                <tbody>{filas_html}</tbody>
+                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Estado</th><th>Acciones</th></tr></thead>
+                <tbody>{filas_activos}</tbody>
+            </table>
+        </div>
+        <div class="card">
+            <p class="seccion-titulo">🚫 Usuarios inactivos</p>
+            <table>
+                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Estado</th><th>Acciones</th></tr></thead>
+                <tbody>{filas_inactivos}</tbody>
             </table>
         </div>
         <div class="card" style="border:2px solid #f97316;background:#fff7ed;">
@@ -2457,6 +2561,7 @@ def crear_usuario():
     nombre = (request.form.get("nombre") or "").strip()
     pin = (request.form.get("pin") or "").strip()
     rol = rol_desde_formulario()
+    activo = 1 if request.form.get("activo", "1") == "1" else 0
 
     if not nombre or not pin or not rol:
         return "Datos invalidos", 400
@@ -2465,10 +2570,10 @@ def crear_usuario():
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO usuarios (nombre, pin, rol)
-        VALUES (?, ?, ?)
+        INSERT INTO usuarios (nombre, pin, rol, activo)
+        VALUES (?, ?, ?, ?)
         """,
-        (nombre, pin, rol),
+        (nombre, pin, rol, activo),
     )
     conn.commit()
     conn.close()
@@ -2566,6 +2671,26 @@ def editar_usuario(usuario_id):
     """
 
 
+@app.route("/activar_usuario/<int:usuario_id>", methods=["POST"])
+def activar_usuario(usuario_id):
+    if not usuario_es_master():
+        return "Acceso denegado", 403
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COALESCE(activo, 1) FROM usuarios WHERE id=?", (usuario_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return "Usuario no encontrado", 404
+
+    nuevo_activo = 0 if row[0] else 1
+    cursor.execute("UPDATE usuarios SET activo=? WHERE id=?", (nuevo_activo, usuario_id))
+    conn.commit()
+    conn.close()
+    return redirect("/usuarios")
+
+
 @app.route("/")
 def index():
     conn = get_connection()
@@ -2630,7 +2755,8 @@ def index():
     """
 
     menu_links = '<a href="/">🏠 Inicio</a>'
-    if usuario_es_master():
+    rol_actual = usuario_rol()
+    if rol_actual == "master":
         menu_links += """
         <a href="/cambiar_tasa">💲 Tasa</a>
         <a href="/exportar">📤 Exportar</a>
@@ -2647,8 +2773,18 @@ def index():
         <a href="/usuarios">👥 Usuarios</a>
         <a href="/cocina">🍳 Cocina</a>
         """
-    elif usuario_es_socio():
+    elif rol_actual == "socio":
         menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
+    elif rol_actual == "mesonera_reportes":
+        menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
+    elif rol_actual == "cocina_reportes":
+        menu_links += (
+            '<a href="/cocina">🍳 Cocina</a>'
+            '<a href="/produccion">👨‍🍳 Producción</a>'
+            '<a href="/inventario">📦 Inventario</a>'
+            '<a href="/reportes">📊 Reportes</a>'
+            '<a href="/dashboard">📈 Dashboard</a>'
+        )
 
     html += barra_superior(menu_links)
 
@@ -2659,7 +2795,7 @@ def index():
         )
 
     panel_izq_extra = ""
-    if usuario_es_master():
+    if rol_actual == "master":
         panel_izq_extra = """
         <div style="margin-top:20px;">
             <div class="seccion-titulo">Accesos rápidos</div>
@@ -2678,6 +2814,29 @@ def index():
                 <a href="/movimientos_inventario" class="menu-card"><div class="mc-icon mc-gris">📋</div><span>Movimientos</span></a>
                 <a href="/usuarios" class="menu-card"><div class="mc-icon mc-morado">👥</div><span>Usuarios</span></a>
                 <a href="/cocina" class="menu-card"><div class="mc-icon mc-naranja">🍳</div><span>Cocina</span></a>
+            </div>
+        </div>
+        """
+    elif rol_actual == "mesonera_reportes":
+        panel_izq_extra = """
+        <div style="margin-top:20px;">
+            <div class="seccion-titulo">Accesos rápidos</div>
+            <div class="menu-master">
+                <a href="/reportes" class="menu-card"><div class="mc-icon mc-azul">📊</div><span>Reportes</span></a>
+                <a href="/dashboard" class="menu-card"><div class="mc-icon mc-verde">📈</div><span>Dashboard</span></a>
+            </div>
+        </div>
+        """
+    elif rol_actual == "cocina_reportes":
+        panel_izq_extra = """
+        <div style="margin-top:20px;">
+            <div class="seccion-titulo">Accesos rápidos</div>
+            <div class="menu-master">
+                <a href="/cocina" class="menu-card"><div class="mc-icon mc-naranja">🍳</div><span>Cocina</span></a>
+                <a href="/produccion" class="menu-card"><div class="mc-icon mc-verde">👨‍🍳</div><span>Producción</span></a>
+                <a href="/inventario" class="menu-card"><div class="mc-icon mc-gris">📦</div><span>Inventario</span></a>
+                <a href="/reportes" class="menu-card"><div class="mc-icon mc-azul">📊</div><span>Reportes</span></a>
+                <a href="/dashboard" class="menu-card"><div class="mc-icon mc-verde">📈</div><span>Dashboard</span></a>
             </div>
         </div>
         """
@@ -4323,10 +4482,20 @@ def orden(orden_id):
                         {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
-                elif p[1] in COMBOS_CON_FAVORITO:
-                    favoritos_data = html_lib.escape(",".join(COMBOS_CON_FAVORITO[p[1]]), quote=True)
+                elif p[1] in COMBOS_PERSONALES:
+                    combo = COMBOS_PERSONALES[p[1]]
+                    favoritos_data = html_lib.escape("|".join(combo["favoritos_disponibles"]), quote=True)
+                    cantidad_favoritos = 1 if combo["favoritos_disponibles"] else 0
                     html += f"""
-                    <button class="btn btn-combo-favorito" type="button" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-favoritos="{favoritos_data}">
+                    <button class="btn btn-configurable" type="button" data-tipo="combo" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-favoritos="{favoritos_data}" data-cantidad-favoritos="{cantidad_favoritos}">
+                        {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
+                    </button>
+                    """
+                elif p[1] in PROMOCIONES_NEKO:
+                    promo = PROMOCIONES_NEKO[p[1]]
+                    arroces_data = html_lib.escape("|".join(ARROCES_PROMOCION), quote=True)
+                    html += f"""
+                    <button class="btn btn-configurable" type="button" data-tipo="promocion" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-arroces="{arroces_data}" data-cantidad-arroces="{promo['cantidad_arroces']}" data-cantidad-refrescos="{promo['cantidad_refrescos']}" data-refresco="{promo['refresco']}">
                         {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
@@ -4458,16 +4627,16 @@ def orden(orden_id):
             <div id="sabores-refresco-grid" class="sabores-grid"></div>
         </div>
     </div>
-    <div id="modal-combo-favorito" class="modal-refresco" aria-hidden="true">
+    <div id="modal-configuracion" class="modal-refresco" aria-hidden="true">
         <div class="modal-contenido">
             <div class="modal-top">
                 <div>
-                    <h2>⭐ Elige el favorito</h2>
-                    <p id="modal-combo-nombre">Neko Combo 1</p>
+                    <h2 id="modal-configuracion-titulo">Configurar producto</h2>
+                    <p id="modal-configuracion-producto">Producto</p>
                 </div>
-                <button id="cerrar-modal-combo" class="cerrar-modal" type="button">✖</button>
+                <button id="cerrar-modal-configuracion" class="cerrar-modal" type="button">✖</button>
             </div>
-            <div id="combo-favoritos-grid" class="sabores-grid"></div>
+            <div id="configuracion-opciones-grid" class="sabores-grid"></div>
         </div>
     </div>
     <script>
@@ -4603,57 +4772,128 @@ def orden(orden_id):
         }});
     }});
 
-    const modalCombo = document.getElementById("modal-combo-favorito");
-    const modalComboNombre = document.getElementById("modal-combo-nombre");
-    const comboFavoritosGrid = document.getElementById("combo-favoritos-grid");
-    const cerrarModalCombo = document.getElementById("cerrar-modal-combo");
-    let comboSeleccionadoUrl = "";
+    const modalConfiguracion = document.getElementById("modal-configuracion");
+    const modalConfiguracionTitulo = document.getElementById("modal-configuracion-titulo");
+    const modalConfiguracionProducto = document.getElementById("modal-configuracion-producto");
+    const configuracionOpcionesGrid = document.getElementById("configuracion-opciones-grid");
+    const cerrarModalConfiguracion = document.getElementById("cerrar-modal-configuracion");
+    let configuracionUrl = "";
+    let pasosConfiguracion = [];
+    let pasoConfiguracionActual = 0;
+    let seleccionesConfiguracion = [];
 
-    function cerrarSelectorCombo() {{
-        comboSeleccionadoUrl = "";
-        modalCombo.classList.remove("activo");
-        modalCombo.setAttribute("aria-hidden", "true");
+    function cerrarConfiguracion() {{
+        configuracionUrl = "";
+        pasosConfiguracion = [];
+        pasoConfiguracionActual = 0;
+        seleccionesConfiguracion = [];
+        modalConfiguracion.classList.remove("activo");
+        modalConfiguracion.setAttribute("aria-hidden", "true");
     }}
 
-    function agregarComboConFavorito(favorito) {{
-        if (!favorito || !comboSeleccionadoUrl) {{
+    function terminarConfiguracion() {{
+        const destino = new URL(configuracionUrl, window.location.origin);
+        seleccionesConfiguracion.forEach(function(seleccion) {{
+            destino.searchParams.append(seleccion.parametro, seleccion.valor);
+        }});
+        window.location.href = destino.pathname + destino.search;
+    }}
+
+    function seleccionarOpcionConfiguracion(paso, valor) {{
+        let valorFinal = valor;
+        if (valor === "Otro") {{
+            valorFinal = prompt("Escribe el sabor del refresco");
+            if (valorFinal === null || !valorFinal.trim()) {{
+                return;
+            }}
+            valorFinal = valorFinal.trim();
+        }}
+        if (paso.parametro === "extra_lumpias") {{
+            valorFinal = valor.startsWith("Añadir") ? "1" : "0";
+        }}
+        seleccionesConfiguracion.push({{parametro: paso.parametro, valor: valorFinal}});
+        pasoConfiguracionActual += 1;
+        if (pasoConfiguracionActual >= pasosConfiguracion.length) {{
+            terminarConfiguracion();
             return;
         }}
-        window.location.href = comboSeleccionadoUrl + "?favorito=" + encodeURIComponent(favorito);
+        mostrarPasoConfiguracion();
     }}
 
-    function abrirSelectorCombo(btn) {{
-        comboSeleccionadoUrl = btn.dataset.url;
-        modalComboNombre.textContent = btn.dataset.producto || "Combo";
-        comboFavoritosGrid.innerHTML = "";
-        const favoritosStr = btn.dataset.favoritos || "";
-        const favoritos = favoritosStr.split(",").map(s => s.trim()).filter(Boolean);
-        favoritos.forEach(function(favorito) {{
+    function mostrarPasoConfiguracion() {{
+        const paso = pasosConfiguracion[pasoConfiguracionActual];
+        modalConfiguracionTitulo.textContent = paso.titulo;
+        configuracionOpcionesGrid.innerHTML = "";
+        paso.opciones.forEach(function(opcion) {{
             const boton = document.createElement("button");
             boton.type = "button";
-            boton.className = "sabor-btn";
-            boton.style.background = "#0f766e";
-            boton.textContent = "⭐ " + favorito;
+            boton.className = "sabor-btn" + (opcion === "Otro" ? " otro" : "");
+            boton.textContent = opcion;
             boton.addEventListener("click", function() {{
-                agregarComboConFavorito(favorito);
+                seleccionarOpcionConfiguracion(paso, opcion);
             }});
-            comboFavoritosGrid.appendChild(boton);
+            configuracionOpcionesGrid.appendChild(boton);
         }});
-        modalCombo.classList.add("activo");
-        modalCombo.setAttribute("aria-hidden", "false");
     }}
 
-    document.querySelectorAll(".btn-combo-favorito").forEach(function(btn) {{
-        btn.addEventListener("click", function() {{
-            abrirSelectorCombo(btn);
-        }});
-    }});
+    function abrirConfiguracion(btn) {{
+        configuracionUrl = btn.dataset.url;
+        modalConfiguracionProducto.textContent = btn.dataset.producto || "Producto";
+        pasosConfiguracion = [];
+        seleccionesConfiguracion = [];
+        pasoConfiguracionActual = 0;
+        const sabores = saboresRefresco.slice();
 
-    cerrarModalCombo.addEventListener("click", cerrarSelectorCombo);
-    modalCombo.addEventListener("click", function(event) {{
-        if (event.target === modalCombo) {{
-            cerrarSelectorCombo();
+        if (btn.dataset.tipo === "combo") {{
+            const favoritos = (btn.dataset.favoritos || "").split("|").filter(Boolean);
+            const cantidadFavoritos = Number(btn.dataset.cantidadFavoritos || 0);
+            for (let i = 1; i <= cantidadFavoritos; i += 1) {{
+                pasosConfiguracion.push({{
+                    titulo: "Elige el favorito " + i + " de " + cantidadFavoritos,
+                    parametro: "favorito",
+                    opciones: favoritos
+                }});
+            }}
+        }} else {{
+            const arroces = (btn.dataset.arroces || "").split("|").filter(Boolean);
+            const cantidadArroces = Number(btn.dataset.cantidadArroces || 0);
+            const cantidadRefrescos = Number(btn.dataset.cantidadRefrescos || 0);
+            for (let i = 1; i <= cantidadArroces; i += 1) {{
+                pasosConfiguracion.push({{
+                    titulo: "Elige el arroz " + i + " de " + cantidadArroces,
+                    parametro: "arroz",
+                    opciones: arroces
+                }});
+            }}
+            for (let i = 1; i <= cantidadRefrescos; i += 1) {{
+                pasosConfiguracion.push({{
+                    titulo: "Sabor del " + (btn.dataset.refresco || "refresco") + " " + i + " de " + cantidadRefrescos,
+                    parametro: "sabor",
+                    opciones: sabores
+                }});
+            }}
+            pasosConfiguracion.push({{
+                titulo: "¿Añadir Ración de Lumpias por $3.00?",
+                parametro: "extra_lumpias",
+                opciones: ["Sin extra", "Añadir Ración de Lumpias (+$3.00)"]
+            }});
         }}
+
+        if (!pasosConfiguracion.length) {{
+            window.location.href = configuracionUrl;
+            return;
+        }}
+        mostrarPasoConfiguracion();
+        modalConfiguracion.classList.add("activo");
+        modalConfiguracion.setAttribute("aria-hidden", "false");
+    }}
+
+    document.querySelectorAll(".btn-configurable").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{ abrirConfiguracion(btn); }});
+    }});
+    cerrarModalConfiguracion.addEventListener("click", cerrarConfiguracion);
+    modalConfiguracion.addEventListener("click", function(event) {{
+        if (event.target === modalConfiguracion) {{ cerrarConfiguracion(); }}
     }});
     </script>
     </body>
@@ -4688,27 +4928,79 @@ def agregar(orden_id, producto_id):
         return "Producto no encontrado"
 
     producto_nombre = p[0]
+    indicacion = ""
     if es_producto_refresco(producto_nombre):
         sabor = normalizar_sabor_refresco(request.args.get("sabor"))
         if not sabor:
             conn.close()
             return "Debes seleccionar un sabor valido para el refresco"
-        producto_nombre = f"{producto_nombre} - {sabor}"
-    elif producto_nombre in COMBOS_CON_FAVORITO:
-        favorito = (request.args.get("favorito") or "").strip()
-        opciones_validas = COMBOS_CON_FAVORITO[producto_nombre]
-        if favorito not in opciones_validas:
+        indicacion = f"Sabor: {sabor}"
+    elif producto_nombre in COMBOS_PERSONALES:
+        combo = COMBOS_PERSONALES[producto_nombre]
+        favoritos = [(valor or "").strip() for valor in request.args.getlist("favorito")]
+        favoritos_disponibles = combo["favoritos_disponibles"]
+        cantidad_favoritos = 1 if favoritos_disponibles else 0
+        if len(favoritos) != cantidad_favoritos or any(
+            favorito not in favoritos_disponibles for favorito in favoritos
+        ):
             conn.close()
-            return "Debes seleccionar un favorito valido para este combo"
-        producto_nombre = f"{producto_nombre} - {favorito}"
+            return "Debes seleccionar todos los favoritos validos para este combo"
+        detalles = [f"Arroz: {combo['arroz']}"]
+        detalles.extend(f"Favorito {i}: {favorito}" for i, favorito in enumerate(favoritos, 1))
+        detalles.extend(
+            f"Acompañante fijo {i}: {favorito}"
+            for i, favorito in enumerate(combo["favoritos_fijos"], 1)
+        )
+        detalles.append(f"Bebida fija: {combo['bebida']}")
+        indicacion = "; ".join(detalles)
+    elif producto_nombre in PROMOCIONES_NEKO:
+        promo = PROMOCIONES_NEKO[producto_nombre]
+        arroces = [(valor or "").strip() for valor in request.args.getlist("arroz")]
+        sabores = request.args.getlist("sabor")
+        extra_lumpias = (request.args.get("extra_lumpias") or "0").strip()
+        if len(arroces) != promo["cantidad_arroces"] or any(
+            arroz not in ARROCES_PROMOCION for arroz in arroces
+        ):
+            conn.close()
+            return "Debes seleccionar todos los arroces validos para esta promocion"
+        sabores_normalizados = [normalizar_sabor_refresco(sabor) for sabor in sabores]
+        if len(sabores_normalizados) != promo["cantidad_refrescos"] or any(
+            not sabor for sabor in sabores_normalizados
+        ):
+            conn.close()
+            return "Debes seleccionar todos los sabores de refresco"
+        if extra_lumpias not in {"0", "1"}:
+            conn.close()
+            return "La selección del extra de lumpias no es valida"
+        detalles = [f"Arroz {i}: {arroz}" for i, arroz in enumerate(arroces, 1)]
+        detalles.extend(
+            f"{promo['refresco']} {i}: {sabor}"
+            for i, sabor in enumerate(sabores_normalizados, 1)
+        )
+        indicacion = "; ".join(detalles)
+
+    indicacion = normalizar_indicacion_item(indicacion)
 
     cursor.execute(
         """
-        INSERT INTO orden_items (orden_id, producto, precio)
-        VALUES (?, ?, ?)
+        INSERT INTO orden_items (orden_id, producto, precio, indicacion)
+        VALUES (?, ?, ?, ?)
         """,
-        (orden_id, producto_nombre, p[1]),
+        (orden_id, producto_nombre, p[1], indicacion),
     )
+    if producto_nombre in PROMOCIONES_NEKO and extra_lumpias == "1":
+        cursor.execute(
+            """
+            INSERT INTO orden_items (orden_id, producto, precio, indicacion)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                orden_id,
+                PROMO_EXTRA_LUMPIAS_NOMBRE,
+                PROMO_EXTRA_LUMPIAS_PRECIO,
+                normalizar_indicacion_item(f"Agregado con: {producto_nombre}"),
+            ),
+        )
     if row[0] == "cerrada" and emergencia_activa(orden_id):
         registrar_auditoria_emergencia(
             cursor,
@@ -6806,34 +7098,7 @@ def _reset_neko_wok_db():
         cat_dict = {nombre: cat_id for cat_id, nombre in cursor.fetchall()}
 
         # Recrear productos Neko Wok
-        productos_neko = [
-            ("Neko Combo 1",               4.80,  "Neko Combos"),
-            ("Neko Combo 2",               5.50,  "Neko Combos"),
-            ("Neko Combo 3",               7.00,  "Neko Combos"),
-            ("Neko Dúo Pollo Cerdo",       8.00,  "Neko Dúo"),
-            ("Neko Dúo Pollo Camarón",     8.00,  "Neko Dúo"),
-            ("Neko Dúo Triple",            9.00,  "Neko Dúo"),
-            ("Neko Clan Pollo Cerdo",     11.00,  "Neko Clan"),
-            ("Neko Clan Pollo Camarón",   11.00,  "Neko Clan"),
-            ("Neko Clan Triple",          13.00,  "Neko Clan"),
-            ("Pollo Agridulce",            5.00,  "Favoritos de Neko"),
-            ("Chop Suey de Vegetales",     4.00,  "Favoritos de Neko"),
-            ("Chop Suey de Pollo",         5.00,  "Favoritos de Neko"),
-            ("Ración de Lumpias (2u)",     4.00,  "Favoritos de Neko"),
-            ("1/2 Ración de Lumpias (1u)", 2.50,  "Favoritos de Neko"),
-            ("Refresco Personal",          0.75,  "Bebidas"),
-            ("Refresco 1 Lt",              1.00,  "Bebidas"),
-            ("Refresco 1.5 Lt",            1.50,  "Bebidas"),
-            ("Refresco 2 Lt",              2.00,  "Bebidas"),
-            ("Delivery 0.5",               0.50,  "Delivery"),
-            ("Delivery 1",                 1.00,  "Delivery"),
-            ("Delivery 1.5",               1.50,  "Delivery"),
-            ("Delivery 2",                 2.00,  "Delivery"),
-            ("Delivery 2.5",               2.50,  "Delivery"),
-            ("Delivery 3",                 3.00,  "Delivery"),
-            ("Delivery 3.5",               3.50,  "Delivery"),
-            ("Extra de Salsa",             0.25,  "Extras"),
-        ]
+        productos_neko = PRODUCTOS_MENU_NEKO
 
         for nombre, precio, cat in productos_neko:
             cursor.execute(
