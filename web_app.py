@@ -387,6 +387,58 @@ def texto_item_con_indicacion(producto, indicacion):
     return producto
 
 
+NOMBRES_COCINA_SIMPLIFICADOS = {
+    "Neko Combo 1": "COMBO 1",
+    "Neko Combo 2": "COMBO 2",
+    "Neko Combo 3": "COMBO 3",
+    "Wok para Dos": "WOK PARA DOS",
+    "Familiar": "FAMILIAR",
+    "Mega Familiar": "MEGA FAMILIAR",
+}
+
+
+def nombre_producto_cocina(producto):
+    producto = producto_sin_prefijo_cantidad(producto)
+    return NOMBRES_COCINA_SIMPLIFICADOS.get(producto, producto)
+
+
+def indicacion_operativa_cocina(producto, indicacion):
+    producto = producto_sin_prefijo_cantidad(producto)
+    indicacion = normalizar_indicacion_item(indicacion)
+    if not indicacion:
+        return ""
+
+    partes = [parte.strip() for parte in indicacion.split(";") if parte.strip()]
+
+    if producto in COMBOS_PERSONALES:
+        favoritos = []
+        for parte in partes:
+            etiqueta, separador, valor = parte.partition(":")
+            if separador and etiqueta.strip().lower().startswith("favorito"):
+                favoritos.append(f"Favorito: {valor.strip()}")
+        return "; ".join(favoritos)
+
+    if producto in PROMOCIONES_NEKO:
+        arroces = []
+        for parte in partes:
+            etiqueta, separador, valor = parte.partition(":")
+            if not separador:
+                continue
+            etiqueta_limpia = etiqueta.strip()
+            valor_limpio = valor.strip()
+            if not etiqueta_limpia.lower().startswith("arroz"):
+                continue
+            if producto != "Mega Familiar" and etiqueta_limpia.lower() == "arroz 1":
+                etiqueta_limpia = "Arroz"
+            arroces.append(f"{etiqueta_limpia}: {valor_limpio}")
+        return "; ".join(arroces)
+
+    if producto == PROMO_EXTRA_LUMPIAS_NOMBRE:
+        return ""
+
+    return indicacion
+
+
 def agrupar_items_comanda(items, incluir_cantidad=True):
     grupos = []
     indices = {}
@@ -394,14 +446,15 @@ def agrupar_items_comanda(items, incluir_cantidad=True):
     for producto, indicacion in items:
         cantidad_producto, producto = separar_prefijo_cantidad(producto)
         indicacion = normalizar_indicacion_item(indicacion)
-        clave = (producto, indicacion)
+        indicacion_cocina = indicacion_operativa_cocina(producto, indicacion)
+        clave = (producto, indicacion_cocina)
 
         if clave not in indices:
             indices[clave] = len(grupos)
             grupos.append(
                 {
                     "producto": producto,
-                    "indicacion": indicacion,
+                    "indicacion": indicacion_cocina,
                     "cantidad": 0,
                 }
             )
@@ -410,7 +463,9 @@ def agrupar_items_comanda(items, incluir_cantidad=True):
 
     lineas = []
     for grupo in grupos:
-        texto = texto_item_con_indicacion(grupo["producto"], grupo["indicacion"])
+        texto = nombre_producto_cocina(grupo["producto"])
+        if grupo["indicacion"]:
+            texto = f"{texto} ({grupo['indicacion']})"
         if incluir_cantidad:
             texto = f"{grupo['cantidad']}x {texto}"
         lineas.append(quitar_prefijo_cantidad_visual(texto))
