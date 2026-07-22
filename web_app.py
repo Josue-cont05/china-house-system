@@ -2,6 +2,7 @@ from collections import defaultdict
 import datetime
 import html as html_lib
 import io
+import json
 import os
 import re
 import sqlite3
@@ -16,28 +17,16 @@ try:
 except Exception:
     psycopg2 = None
 
+from app.shared.constants.system import (
+    ETIQUETAS_METODO_PAGO,
+    METODOS_PAGO_VALIDOS,
+    ROLES_USUARIO_VALIDOS,
+    SABORES_REFRESCO,
+)
+
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
-METODOS_PAGO_VALIDOS = {"punto_venta", "bs_pago_movil", "pago_movil", "bs_efectivo", "usd"}
-SABORES_REFRESCO = [
-    "Coca Cola",
-    "Chinotto",
-    "Frescolita",
-    "Naranja",
-    "Uva",
-    "Manzana",
-    "7Up",
-    "Pepsi",
-]
-ETIQUETAS_METODO_PAGO = {
-    "punto_venta": "Punto de venta",
-    "bs_pago_movil": "Pago movil en Bs",
-    "pago_movil": "Pago movil en Bs",
-    "bs_efectivo": "Efectivo en Bs",
-    "usd": "Efectivo en USD",
-}
-ROLES_USUARIO_VALIDOS = ("master", "mesonera", "cocina", "socio", "mesonera_reportes", "cocina_reportes")
 
 ORDEN_CATEGORIAS_POS = [
     "Neko Combos",
@@ -86,12 +75,46 @@ COMBOS_PERSONALES = {
     },
 }
 COMBOS_CON_FAVORITO = {"Neko Combo 1": FAVORITOS_COMBO_1}
+COMBOS_JSON = {
+    "Neko Combo 1": "combo1",
+    "Neko Combo 2": "combo2",
+    "Neko Combo 3": "combo3",
+}
+ACOMPANANTES_COMBO = [
+    "Pollo Agridulce",
+    "Pollo BBQ",
+    "Pollo BBQ/Agridulce",
+    "Chop Suey",
+    "Lumpia",
+]
+BEBIDAS_COMBO = [
+    "Coca Cola",
+    "Frescolita",
+    "Chinotto",
+    "Agua de Manzana",
+]
+COMBOS_CANTIDAD_ACOMPANANTES = {
+    "Neko Combo 1": 1,
+    "Neko Combo 2": 2,
+    "Neko Combo 3": 2,
+}
+POLLOS_PROMOCION = [
+    "Pollo BBQ",
+    "Pollo Agridulce",
+    "Pollo BBQ/Agridulce",
+]
 ARROCES_PROMOCION = ["Pollo + Cerdo", "Pollo + Camarón", "Triple"]
 PROMOCIONES_NEKO = {
     "Wok para Dos": {"cantidad_arroces": 1, "cantidad_refrescos": 1, "refresco": "Refresco 1 Lt"},
     "Familiar": {"cantidad_arroces": 1, "cantidad_refrescos": 1, "refresco": "Refresco 1.5 Lt"},
     "Mega Familiar": {"cantidad_arroces": 2, "cantidad_refrescos": 2, "refresco": "Refresco 1.5 Lt"},
 }
+PROMOCIONES_JSON = {
+    "Wok para Dos": "wok_para_dos",
+    "Familiar": "familiar",
+    "Mega Familiar": "mega_familiar",
+}
+PROMOCIONES_CON_POLLO = {"Familiar", "Mega Familiar"}
 PROMO_EXTRA_LUMPIAS_NOMBRE = "Promo extra: Ración de Lumpias"
 PROMO_EXTRA_LUMPIAS_PRECIO = 3.00
 
@@ -353,6 +376,120 @@ def normalizar_indicacion_item(indicacion):
     return indicacion[:500]
 
 
+def deserializar_indicacion(indicacion):
+    texto = (indicacion or "").strip()
+    if not texto or not texto.startswith("{"):
+        return None
+    try:
+        datos = json.loads(texto)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(datos, dict):
+        return None
+    if datos.get("version") != 1:
+        return None
+    return datos
+
+
+def es_indicacion_json(indicacion):
+    return deserializar_indicacion(indicacion) is not None
+
+
+def serializar_indicacion(datos):
+    if not isinstance(datos, dict):
+        return ""
+    datos = dict(datos)
+    datos.setdefault("version", 1)
+    return json.dumps(datos, ensure_ascii=False, separators=(",", ":"))
+
+
+def datos_combo_desde_indicacion(producto, indicacion):
+    producto = producto_sin_prefijo_cantidad(producto)
+    datos = deserializar_indicacion(indicacion)
+    if not datos or datos.get("tipo") != "combo":
+        return None
+    if COMBOS_JSON.get(producto) != datos.get("producto"):
+        return None
+    acompanantes = datos.get("acompanantes")
+    bebida = datos.get("bebida")
+    if not isinstance(acompanantes, list) or not isinstance(bebida, str):
+        return None
+    lineas = [str(valor).strip() for valor in acompanantes if str(valor).strip()]
+    bebida = bebida.strip()
+    if bebida:
+        lineas.append(bebida)
+    if not lineas:
+        return None
+    return {"datos": datos, "lineas": lineas}
+
+
+def texto_descripcion_combo_orden(producto, indicacion):
+    combo = datos_combo_desde_indicacion(producto, indicacion)
+    if not combo:
+        return ""
+    return "\n".join(f"• {linea}" for linea in combo["lineas"])
+
+
+def texto_descripcion_combo_cocina(producto, indicacion):
+    combo = datos_combo_desde_indicacion(producto, indicacion)
+    if not combo:
+        return ""
+    return "\n".join(f"• {linea}" for linea in combo["lineas"])
+
+
+def texto_descripcion_combo_factura(producto, indicacion):
+    combo = datos_combo_desde_indicacion(producto, indicacion)
+    if not combo:
+        return ""
+    return "\n".join(f"• {linea}" for linea in combo["lineas"])
+
+
+def datos_promocion_desde_indicacion(producto, indicacion):
+    producto = producto_sin_prefijo_cantidad(producto)
+    datos = deserializar_indicacion(indicacion)
+    if not datos or datos.get("tipo") != "promocion":
+        return None
+    if PROMOCIONES_JSON.get(producto) != datos.get("producto"):
+        return None
+    pollo = datos.get("pollo")
+    arroces = datos.get("arroces")
+    bebidas = datos.get("bebidas")
+    if pollo is not None and not isinstance(pollo, str):
+        return None
+    if not isinstance(arroces, list) or not isinstance(bebidas, list):
+        return None
+    lineas = []
+    pollo = (pollo or "").strip()
+    if pollo:
+        lineas.append(pollo)
+    lineas.extend(f"Arroz {str(arroz).strip()}" for arroz in arroces if str(arroz).strip())
+    lineas.extend(str(bebida).strip() for bebida in bebidas if str(bebida).strip())
+    if not lineas:
+        return None
+    return {"datos": datos, "lineas": lineas}
+
+
+def texto_descripcion_promocion_orden(producto, indicacion):
+    promocion = datos_promocion_desde_indicacion(producto, indicacion)
+    if not promocion:
+        return ""
+    return "\n".join(f"• {linea}" for linea in promocion["lineas"])
+
+
+def texto_descripcion_promocion_cocina(producto, indicacion):
+    promocion = datos_promocion_desde_indicacion(producto, indicacion)
+    if not promocion:
+        return ""
+    return "\n".join(f"• {linea}" for linea in promocion["lineas"])
+
+
+def texto_descripcion_promocion_factura(producto, indicacion):
+    promocion = datos_promocion_desde_indicacion(producto, indicacion)
+    if not promocion:
+        return ""
+    return "\n".join(f"• {linea}" for linea in promocion["lineas"])
+
+
 def quitar_prefijo_cantidad_visual(texto):
     texto = (texto or "").strip()
 
@@ -388,9 +525,9 @@ def texto_item_con_indicacion(producto, indicacion):
 
 
 NOMBRES_COCINA_SIMPLIFICADOS = {
-    "Neko Combo 1": "COMBO 1",
-    "Neko Combo 2": "COMBO 2",
-    "Neko Combo 3": "COMBO 3",
+    "Neko Combo 1": "COMBO #1",
+    "Neko Combo 2": "COMBO #2",
+    "Neko Combo 3": "COMBO #3",
     "Wok para Dos": "WOK PARA DOS",
     "Familiar": "FAMILIAR",
     "Mega Familiar": "MEGA FAMILIAR",
@@ -411,6 +548,9 @@ def indicacion_operativa_cocina(producto, indicacion):
     partes = [parte.strip() for parte in indicacion.split(";") if parte.strip()]
 
     if producto in COMBOS_PERSONALES:
+        descripcion_combo = texto_descripcion_combo_cocina(producto, indicacion)
+        if descripcion_combo:
+            return descripcion_combo
         favoritos = []
         for parte in partes:
             etiqueta, separador, valor = parte.partition(":")
@@ -419,6 +559,9 @@ def indicacion_operativa_cocina(producto, indicacion):
         return "; ".join(favoritos)
 
     if producto in PROMOCIONES_NEKO:
+        descripcion_promocion = texto_descripcion_promocion_cocina(producto, indicacion)
+        if descripcion_promocion:
+            return descripcion_promocion
         arroces = []
         for parte in partes:
             etiqueta, separador, valor = parte.partition(":")
@@ -464,6 +607,11 @@ def agrupar_items_comanda(items, incluir_cantidad=True):
     lineas = []
     for grupo in grupos:
         texto = nombre_producto_cocina(grupo["producto"])
+        if grupo["indicacion"] and "\n" in grupo["indicacion"]:
+            if incluir_cantidad and grupo["cantidad"] > 1:
+                texto = f"{grupo['cantidad']}x {texto}"
+            lineas.append(f"{texto}\n{grupo['indicacion']}")
+            continue
         if grupo["indicacion"]:
             texto = f"{texto} ({grupo['indicacion']})"
         if incluir_cantidad:
@@ -497,15 +645,23 @@ def agrupar_items_factura(items):
         grupos[indices[clave]]["cantidad"] += cantidad_producto
         grupos[indices[clave]]["precio_total"] += precio
 
-    return [
-        {
-            "texto": quitar_prefijo_cantidad_visual(
-                f"{grupo['cantidad']}x {texto_item_con_indicacion(grupo['producto'], grupo['indicacion'])}"
-            ),
-            "precio_total": grupo["precio_total"],
-        }
-        for grupo in grupos
-    ]
+    resultado = []
+    for grupo in grupos:
+        descripcion = (
+            texto_descripcion_combo_factura(grupo["producto"], grupo["indicacion"])
+            or texto_descripcion_promocion_factura(grupo["producto"], grupo["indicacion"])
+        )
+        if descripcion:
+            texto = f"{grupo['cantidad']}x {producto_sin_prefijo_cantidad(grupo['producto'])}\n{descripcion}"
+        else:
+            texto = f"{grupo['cantidad']}x {texto_item_con_indicacion(grupo['producto'], grupo['indicacion'])}"
+        resultado.append(
+            {
+                "texto": quitar_prefijo_cantidad_visual(texto),
+                "precio_total": grupo["precio_total"],
+            }
+        )
+    return resultado
 
 
 def etiqueta_metodo_pago(metodo):
@@ -619,17 +775,14 @@ def crear_usuarios_iniciales():
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
 
     USUARIOS_NEKO_WOK = [
-        ("Josue",   "2204", "master"),
-        ("Monica",  "1310", "master"),
-        ("Gaby",    "2204", "master"),
-        ("Oscar",   "1810", "mesonera"),
-        ("Julissa", "2402", "mesonera"),
-        ("Lili",    "2310", "mesonera"),
+        ("Emmanuel", "0000", "master"),
+        ("Ismaldo", "0000", "master"),
+        ("Jonayker", "0000", "produccion"),
+        ("Juan Luis", "0000", "produccion"),
     ]
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE usuarios SET activo=0")
 
     for nombre, pin, rol in USUARIOS_NEKO_WOK:
         cursor.execute(
@@ -794,7 +947,9 @@ def usuario_rol():
         "Monica":   "mesonera_reportes",
         "Gaby":     "mesonera_reportes",
         "Jessica":  "cocina_reportes",
-        "Ismaldo":  "cocina_reportes",
+        "Ismaldo":  "master",
+        "Jonayker": "produccion",
+        "Juan Luis": "produccion",
     }
     rol = roles_por_nombre.get(session.get("usuario") or session.get("usuario_nombre"), "mesonera")
     session["usuario_rol"] = rol
@@ -818,6 +973,10 @@ def usuario_es_socio():
     return usuario_rol() == "socio"
 
 
+def usuario_es_produccion():
+    return usuario_rol() == "produccion"
+
+
 def usuario_puede_tomar_ordenes():
     return usuario_rol() in ("master", "mesonera", "socio", "mesonera_reportes")
 
@@ -831,7 +990,7 @@ def usuario_puede_editar_inventario():
 
 
 def usuario_puede_produccion():
-    return usuario_rol() in ("master", "cocina", "cocina_reportes")
+    return usuario_rol() in ("master", "cocina", "cocina_reportes", "produccion")
 
 
 def usuario_puede_ver_cocina():
@@ -1215,38 +1374,46 @@ def parsear_insumos_extra(texto):
 def estilos_base():
     return """
     :root {
-        --verde-neko: #1a6b4a;
-        --verde-oscuro: #0d4a32;
-        --naranja: #f97316;
+        --fondo-principal: #0F1115;
+        --panel: #181B20;
+        --panel-secundario: #20242B;
+        --tarjeta: #20242B;
+        --verde-neko: #3DDC84;
+        --verde-oscuro: #2AC96F;
+        --hover-neko: #2AC96F;
+        --naranja: #F59E0B;
         --dorado: #f59e0b;
         --crema: #fef3c7;
-        --verde: #16a34a;
-        --azul: #1d4ed8;
-        --carbon: #1c1917;
-        --gris-fondo: #f7f5f0;
-        --texto: #1c1917;
-        --borde: #e5e0d8;
-        --sombra: 0 10px 26px rgba(13, 74, 50, 0.10);
+        --verde: #3DDC84;
+        --azul: #2563EB;
+        --rojo: #DC2626;
+        --carbon: #F4F4F4;
+        --gris-fondo: #0F1115;
+        --texto: #F4F4F4;
+        --texto-secundario: #B0B6BE;
+        --borde: #31363F;
+        --sombra: 0 10px 24px rgba(0, 0, 0, 0.22);
+        --sombra-suave: 0 1px 2px rgba(0, 0, 0, 0.20), 0 8px 20px rgba(0, 0, 0, 0.14);
     }
     * { box-sizing: border-box; }
     body {
         font-family: 'Segoe UI', Arial, Helvetica, sans-serif;
         color: var(--texto);
         background:
-            radial-gradient(circle at top right, rgba(249, 115, 22, 0.10), transparent 28rem),
-            radial-gradient(circle at bottom left, rgba(26, 107, 74, 0.08), transparent 32rem),
-            linear-gradient(180deg, #f0fdf4 0%, var(--gris-fondo) 40%, #fefce8 100%);
+            radial-gradient(circle at top right, rgba(61, 220, 132, 0.035), transparent 28rem),
+            linear-gradient(180deg, var(--fondo-principal) 0%, #11141A 100%);
         min-height: 100vh;
     }
     .header {
-        background: linear-gradient(135deg, var(--verde-oscuro) 0%, var(--verde-neko) 55%, #1c4532 100%);
-        color: white;
+        background: rgba(24, 27, 32, 0.96);
+        color: var(--texto);
         padding: 14px 22px;
         display: flex;
         justify-content: space-between;
         align-items: center;
         gap: 16px;
-        box-shadow: 0 6px 20px rgba(13, 74, 50, 0.32);
+        border-bottom: 1px solid var(--borde);
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.20);
         position: sticky;
         top: 0;
         z-index: 20;
@@ -1254,12 +1421,14 @@ def estilos_base():
     .titulo {
         font-size: 24px;
         font-weight: 900;
-        letter-spacing: -0.5px;
+        letter-spacing: 0;
         display: flex;
         align-items: center;
         gap: 8px;
+        color: var(--verde-neko);
+        text-shadow: 0 0 10px rgba(61, 220, 132, 0.14);
     }
-    .titulo span.brand-dot { color: var(--naranja); }
+    .titulo span.brand-dot { color: var(--verde-neko); }
     .menu-top { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
     .menu-top a, .volver, .btn-accion, .btn-ver, .btn-cobrar, .btn-acceso {
         color: white;
@@ -1271,37 +1440,48 @@ def estilos_base():
         align-items: center;
         justify-content: center;
         gap: 5px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
     }
-    .menu-top a { background: rgba(255, 255, 255, 0.14); padding: 8px 12px; font-size: 13px; transition: background 0.15s; }
-    .menu-top a:hover { background: rgba(255, 255, 255, 0.26); }
+    .menu-top a { background: var(--panel-secundario); border: 1px solid var(--borde); padding: 8px 12px; font-size: 13px; transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease; }
+    .menu-top a:hover { background: #262B33; border-color: #3C4350; color: var(--texto); }
     .contenido, .contenedor { max-width: 1280px; margin: 0 auto; }
     .card, .panel-izq, .panel-der, .panel, .login-box {
-        border: 1px solid rgba(229, 224, 216, 0.9);
-        box-shadow: var(--sombra);
+        background: var(--panel);
+        color: var(--texto);
+        border: 1px solid var(--borde);
+        box-shadow: var(--sombra-suave);
     }
     h1, h2, h3 { letter-spacing: -0.3px; color: var(--carbon); }
     input, select, textarea {
-        border: 1px solid #cbd5e1;
+        border: 1px solid var(--borde);
         min-height: 46px;
-        background: white;
+        background: var(--panel-secundario);
+        color: var(--texto);
         border-radius: 8px;
         padding: 10px 14px;
         font-size: 15px;
     }
+    input::placeholder, textarea::placeholder { color: #7F8791; }
     input:focus, select:focus, textarea:focus {
-        outline: 2px solid var(--verde-neko);
+        outline: none;
         border-color: var(--verde-neko);
+        box-shadow: 0 0 0 3px rgba(61, 220, 132, 0.12);
     }
     button, .btn, .btn-agregar, .btn-guardar {
         font-weight: 800;
         min-height: 48px;
-        box-shadow: 0 4px 12px rgba(13, 74, 50, 0.18);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
         border-radius: 10px;
         cursor: pointer;
-        transition: transform 0.1s, box-shadow 0.1s;
+        transition: background 0.18s ease, border-color 0.18s ease, transform 0.1s, box-shadow 0.18s ease;
     }
+    button:hover, .btn:hover, .btn-agregar:hover, .btn-guardar:hover { box-shadow: 0 8px 18px rgba(0, 0, 0, 0.20); }
     button:active, .btn:active { transform: scale(0.97); }
+    table { color: var(--texto); }
+    th { background: var(--panel-secundario); color: var(--verde-neko); border-bottom: 1px solid var(--borde); }
+    td { border-bottom: 1px solid var(--borde); }
+    tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.025); }
+    tbody tr:hover { background: rgba(255, 255, 255, 0.055); }
     @media (min-width: 900px) {
         .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
         .panel-izq { flex: 0 0 360px; }
@@ -1911,11 +2091,22 @@ def proteger_sistema():
     # Pantalla operativa de cocina.
     acceso_cocina = {"cocina", "pantalla_cocina", "marcar_listo"}
 
-    if request.endpoint in rutas_publicas:
+    if request.endpoint in {"login", "static"}:
         return
 
     if not session.get("usuario_id"):
+        if request.endpoint in rutas_publicas:
+            return
         return redirect("/login")
+
+    if usuario_es_produccion() and request.endpoint not in {"produccion", "logout"}:
+        print(
+            f"[PERMISO BLOQUEADO] "
+            f"endpoint={request.endpoint} "
+            f"rol={usuario_rol()} "
+            f"path={request.path}"
+        )
+        return redirect("/produccion")
 
     if request.endpoint in solo_master and not usuario_es_master():
         print(
@@ -2331,6 +2522,8 @@ def login():
             session["usuario"] = usuario[1]
             session["usuario_rol"] = usuario[2] or "mesonera"
             conn.close()
+            if session["usuario_rol"] == "produccion":
+                return redirect("/produccion")
             if session["usuario_rol"] in ("cocina", "cocina_reportes"):
                 return redirect("/cocina")
             return redirect("/")
@@ -2353,9 +2546,8 @@ def login():
         justify-content: center;
         align-items: center;
         background:
-            radial-gradient(circle at 20% 80%, rgba(26, 107, 74, 0.18), transparent 40%),
-            radial-gradient(circle at 80% 20%, rgba(249, 115, 22, 0.12), transparent 38%),
-            linear-gradient(160deg, #0d4a32 0%, #1a6b4a 50%, #1c4532 100%);
+            radial-gradient(circle at 20% 80%, rgba(61, 220, 132, 0.06), transparent 40%),
+            linear-gradient(160deg, #0F1115 0%, #151820 100%);
     }
     .login-wrap {
         display: flex;
@@ -2367,56 +2559,58 @@ def login():
     }
     .brand-logo {
         text-align: center;
-        color: white;
+        color: var(--texto);
     }
-    .brand-logo .brand-icon { font-size: 52px; line-height: 1; }
+    .brand-logo .brand-icon { font-size: 52px; line-height: 1; filter: drop-shadow(0 0 8px rgba(61, 220, 132, 0.14)); }
     .brand-logo h1 {
         margin: 8px 0 2px;
         font-size: 32px;
         font-weight: 900;
         letter-spacing: -1px;
-        color: white;
+        color: var(--verde-neko);
+        text-shadow: 0 0 8px rgba(61, 220, 132, 0.12);
     }
     .brand-logo .brand-sub {
         font-size: 13px;
         letter-spacing: 3px;
         text-transform: uppercase;
-        color: rgba(255,255,255,0.65);
+        color: var(--texto-secundario);
         font-weight: 600;
     }
-    .brand-logo .brand-accent { color: #f97316; }
+    .brand-logo .brand-accent { color: var(--verde-neko); }
     .login-box {
-        background: white;
+        background: var(--panel);
         width: 100%;
         padding: 32px 28px;
         border-radius: 16px;
-        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.28);
+        border: 1px solid var(--borde);
+        box-shadow: 0 22px 48px rgba(0, 0, 0, 0.32);
     }
     .login-box h2 {
         margin: 0 0 20px;
         font-size: 18px;
         font-weight: 700;
-        color: #1c1917;
+        color: var(--texto);
         text-align: center;
     }
-    label { display: block; font-size: 13px; font-weight: 700; color: #6b7280; margin-bottom: 4px; margin-top: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
-    input, select { width: 100%; padding: 13px 16px; border-radius: 10px; border: 1.5px solid #e5e7eb; font-size: 16px; box-sizing: border-box; transition: border-color 0.15s; }
-    input:focus, select:focus { outline: none; border-color: #1a6b4a; box-shadow: 0 0 0 3px rgba(26,107,74,0.12); }
+    label { display: block; font-size: 13px; font-weight: 700; color: var(--texto-secundario); margin-bottom: 4px; margin-top: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+    input, select { width: 100%; padding: 13px 16px; border-radius: 10px; border: 1.5px solid var(--borde); font-size: 16px; box-sizing: border-box; transition: border-color 0.15s, box-shadow 0.15s; background: var(--panel-secundario); color: var(--texto); }
+    input:focus, select:focus { outline: none; border-color: var(--verde-neko); box-shadow: 0 0 0 3px rgba(61,220,132,0.12); }
     .btn-login {
         width: 100%;
         padding: 15px;
-        background: linear-gradient(135deg, #0d4a32, #1a6b4a);
-        color: white;
+        background: var(--verde-neko);
+        color: #0F1115;
         border: none;
         border-radius: 12px;
         font-size: 17px;
         font-weight: 800;
         margin-top: 20px;
         cursor: pointer;
-        box-shadow: 0 6px 18px rgba(13, 74, 50, 0.35);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.20);
         transition: transform 0.1s, box-shadow 0.1s;
     }
-    .btn-login:hover { box-shadow: 0 8px 22px rgba(13, 74, 50, 0.45); }
+    .btn-login:hover { background: var(--hover-neko); box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24); }
     .btn-login:active { transform: scale(0.98); }
     .error { background: #fef2f2; color: #dc2626; padding: 12px 14px; border-radius: 8px; margin-bottom: 4px; text-align: center; font-weight: 600; border: 1px solid #fecaca; }
     .login-footer { color: rgba(255,255,255,0.45); font-size: 12px; text-align: center; }
@@ -2543,14 +2737,14 @@ def usuarios():
     {estilos_base()}
     body {{ margin:0; }}
     .contenido {{ padding:18px; max-width:960px; margin:auto; }}
-    .card {{ background:white; padding:18px; border-radius:10px; box-shadow:var(--sombra); overflow:auto; margin-bottom:16px; }}
+    .card {{ background:var(--tarjeta); color:var(--texto); padding:18px; border-radius:10px; box-shadow:var(--sombra-suave); border:1px solid var(--borde); overflow:auto; margin-bottom:16px; }}
     table {{ width:100%; border-collapse:collapse; }}
-    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px; text-align:left; vertical-align:middle; }}
-    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }}
+    th, td {{ border-bottom:1px solid var(--borde); padding:10px; text-align:left; vertical-align:middle; }}
+    th {{ background:var(--panel-secundario); color:var(--verde-neko); font-weight:800; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }}
     .form-grid {{ display:grid; grid-template-columns:1fr 1fr 1fr 1fr auto; gap:10px; align-items:end; }}
     .btn-accion {{ display:inline-block; padding:7px 12px; border-radius:6px; text-decoration:none; font-weight:700; font-size:13px; }}
-    .btn-editar {{ color:white; background:#1d4ed8; }}
-    .seccion-titulo {{ font-size:13px; font-weight:800; color:#6b7280; text-transform:uppercase; letter-spacing:0.5px; margin:0 0 12px 0; }}
+    .btn-editar {{ color:white; background:var(--azul); }}
+    .seccion-titulo {{ font-size:13px; font-weight:800; color:var(--texto-secundario); text-transform:uppercase; letter-spacing:0.5px; margin:0 0 12px 0; }}
     @media (max-width: 760px) {{ .form-grid {{ grid-template-columns:1fr; }} }}
     </style>
     </head>
@@ -2769,35 +2963,32 @@ def index():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }
+    """ + estilos_base() + """
+    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: var(--gris-fondo); color: var(--texto); }
     .contenedor { display: flex; padding: 14px; gap: 14px; flex-direction: column; max-width: 1280px; margin: 0 auto; }
-    .panel-izq { background: white; padding: 20px; border-radius: 14px; box-shadow: 0 4px 16px rgba(13,74,50,0.08); }
+    .panel-izq { background: var(--panel); padding: 20px; border-radius: 14px; box-shadow: var(--sombra); border: 1px solid var(--borde); }
     .panel-der { background: transparent; }
-    .panel-izq h3, .panel-der h3 { margin: 0 0 14px; font-size: 16px; font-weight: 800; color: #1c1917; display: flex; align-items: center; gap: 6px; }
-    input, select { width: 100%; padding: 12px 14px; margin: 5px 0 10px; border-radius: 10px; border: 1.5px solid #e5e7eb; font-size: 15px; box-sizing: border-box; background: white; }
-    input:focus, select:focus { outline: none; border-color: #1a6b4a; }
-    .btn-nueva-orden { width: 100%; padding: 15px; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; border: none; border-radius: 12px; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 4px 14px rgba(13,74,50,0.28); }
-    .btn-nueva-orden:hover { box-shadow: 0 6px 18px rgba(13,74,50,0.36); }
-    .card { background: white; padding: 16px; margin-bottom: 10px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.07); display: flex; flex-direction: column; gap: 10px; font-size: 16px; border-left: 4px solid #e5e7eb; }
-    .card.abierta { border-left-color: #f97316; }
-    .card.en-cocina { border-left-color: #1a6b4a; background: #f0fdf4; }
+    .panel-izq h3, .panel-der h3 { margin: 0 0 14px; font-size: 16px; font-weight: 800; color: var(--texto); display: flex; align-items: center; gap: 6px; }
+    input, select { width: 100%; padding: 12px 14px; margin: 5px 0 10px; border-radius: 10px; border: 1.5px solid var(--borde); font-size: 15px; box-sizing: border-box; background: var(--panel-secundario); color: var(--texto); }
+    input:focus, select:focus { outline: none; border-color: var(--verde-neko); box-shadow: 0 0 0 3px rgba(61,220,132,0.12); }
+    .btn-nueva-orden { width: 100%; padding: 15px; background: var(--verde-neko); color: #0F1115; border: none; border-radius: 10px; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.20); transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.1s; }
+    .btn-nueva-orden:hover { background: var(--hover-neko); box-shadow: 0 8px 18px rgba(0,0,0,0.22); }
+    .card { background: var(--tarjeta); color: var(--texto); padding: 16px; margin-bottom: 10px; border-radius: 12px; box-shadow: var(--sombra-suave); display: flex; flex-direction: column; gap: 10px; font-size: 16px; border: 1px solid var(--borde); border-left: 4px solid var(--borde); }
+    .card.abierta { border-left-color: var(--naranja); }
+    .card.en-cocina { border-left-color: var(--verde-neko); background: var(--tarjeta); }
     .estado { padding: 4px 10px; border-radius: 20px; color: white; font-size: 11px; font-weight: 800; display: inline-block; letter-spacing: 0.5px; text-transform: uppercase; }
     .btn-ver { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; margin-bottom: 6px; font-weight: 700; background: #1d4ed8; color: white; }
-    .btn-cobrar { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; font-weight: 700; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; }
-    .btn-cierre-jornada { display:block; width:100%; padding:14px; background: linear-gradient(135deg, #7c3aed, #6d28d9); color:white; text-decoration:none; text-align:center; border-radius:12px; margin-top:12px; font-size:16px; font-weight:800; box-sizing:border-box; box-shadow:0 4px 14px rgba(109,40,217,0.28); }
-    .mesonera { font-size: 13px; color: #6b7280; margin-top: 3px; }
-    .seccion-titulo { font-size: 13px; font-weight: 800; color: #6b7280; letter-spacing: 1px; text-transform: uppercase; margin: 16px 0 8px; }
-    .historial-item { background: white; padding: 12px 14px; margin-bottom: 8px; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,0.06); display: flex; justify-content: space-between; align-items: center; }
-    .historial-item a { color: #1a6b4a; text-decoration: none; font-weight: 700; font-size: 14px; }
+    .btn-cobrar { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; font-weight: 700; background: var(--verde-neko); color: #0F1115; }
+    .btn-cierre-jornada { display:block; width:100%; padding:14px; background: var(--panel-secundario); color:var(--texto); text-decoration:none; text-align:center; border-radius:10px; margin-top:12px; font-size:16px; font-weight:800; box-sizing:border-box; border:1px solid var(--borde); box-shadow:var(--sombra-suave); }
+    .mesonera { font-size: 13px; color: var(--texto-secundario); margin-top: 3px; }
+    .seccion-titulo { font-size: 13px; font-weight: 800; color: var(--texto-secundario); letter-spacing: 1px; text-transform: uppercase; margin: 16px 0 8px; }
+    .historial-item { background: var(--tarjeta); color: var(--texto); padding: 12px 14px; margin-bottom: 8px; border-radius: 10px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); display: flex; justify-content: space-between; align-items: center; }
+    .historial-item a { color: var(--azul); text-decoration: none; font-weight: 700; font-size: 14px; }
     .menu-master { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .menu-card { background: white; border-radius: 12px; padding: 16px 14px; text-decoration: none; color: #1c1917; font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); border: 1.5px solid #e5e0d8; transition: box-shadow 0.15s, transform 0.1s; }
-    .menu-card:hover { box-shadow: 0 6px 18px rgba(13,74,50,0.14); transform: translateY(-1px); }
+    .menu-card { background: var(--tarjeta); border-radius: 12px; padding: 16px 14px; text-decoration: none; color: var(--texto); font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 10px; box-shadow: var(--sombra-suave); border: 1.5px solid var(--borde); transition: background 0.15s, box-shadow 0.15s, transform 0.1s, border-color 0.15s; }
+    .menu-card:hover { background:#252A32; box-shadow: 0 8px 18px rgba(0,0,0,0.22); border-color:#3C4350; transform: translateY(-1px); }
     .menu-card .mc-icon { font-size: 22px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; border-radius: 10px; flex-shrink: 0; }
-    .mc-verde { background: #dcfce7; }
-    .mc-naranja { background: #fff7ed; }
-    .mc-azul { background: #eff6ff; }
-    .mc-morado { background: #f5f3ff; }
-    .mc-gris { background: #f8fafc; }
+    .mc-verde, .mc-naranja, .mc-azul, .mc-morado, .mc-gris { background: var(--panel-secundario); color: var(--texto-secundario); box-shadow: inset 0 0 0 1px var(--borde); }
     @media (min-width: 900px) {
         .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
         .panel-izq { flex: 0 0 340px; }
@@ -3020,20 +3211,21 @@ def menu():
     """ + estilos_base() + """
     body { margin: 0; }
     .contenido { padding: 18px; max-width: 960px; margin: 0 auto; }
-    .card { background: white; padding: 20px; margin-bottom: 14px; border-radius: 14px; box-shadow: 0 4px 16px rgba(13,74,50,0.08); border: 1px solid #e5e0d8; }
-    .card h3 { margin: 0 0 14px; font-size: 16px; color: #1c1917; }
-    input, select { width: 100%; padding: 12px 14px; margin: 6px 0 10px; border-radius: 10px; border: 1.5px solid #e5e7eb; font-size: 15px; box-sizing: border-box; }
-    .btn-add { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 12px; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; cursor: pointer; font-weight: 800; box-shadow: 0 4px 14px rgba(13,74,50,0.24); }
+    .card { background: var(--tarjeta); color: var(--texto); padding: 20px; margin-bottom: 14px; border-radius: 14px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); }
+    .card h3 { margin: 0 0 14px; font-size: 16px; color: var(--texto); }
+    input, select { width: 100%; padding: 12px 14px; margin: 6px 0 10px; border-radius: 10px; border: 1.5px solid var(--borde); font-size: 15px; box-sizing: border-box; background: var(--panel-secundario); color: var(--texto); }
+    .btn-add { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 10px; background: var(--verde-neko); color: #0F1115; cursor: pointer; font-weight: 800; box-shadow: 0 4px 12px rgba(0,0,0,0.20); }
     .productos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-    .producto { background: white; padding: 14px 16px; border-radius: 12px; border: 1.5px solid #e5e0d8; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-    .producto-nombre { font-size: 16px; font-weight: 700; color: #1c1917; margin-bottom: 2px; }
-    .producto-precio { font-size: 20px; font-weight: 900; color: #1a6b4a; margin-bottom: 4px; }
-    .producto-cat { font-size: 12px; color: #9ca3af; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; background: #f0fdf4; display: inline-block; padding: 2px 8px; border-radius: 20px; margin-bottom: 10px; }
+    .producto { background: var(--tarjeta); color: var(--texto); padding: 14px 16px; border-radius: 12px; border: 1.5px solid var(--borde); box-shadow: var(--sombra-suave); transition:background 0.16s ease, border-color 0.16s ease, transform 0.1s ease; }
+    .producto:hover { background:#252A32; border-color:rgba(61,220,132,0.38); transform:translateY(-1px); }
+    .producto-nombre { font-size: 16px; font-weight: 700; color: var(--texto); margin-bottom: 2px; }
+    .producto-precio { font-size: 20px; font-weight: 800; color: var(--texto-secundario); margin-bottom: 4px; }
+    .producto-cat { font-size: 12px; color: var(--texto-secundario); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; background: var(--panel-secundario); display: inline-block; padding: 2px 8px; border-radius: 20px; margin-bottom: 10px; border:1px solid var(--borde); }
     .acciones { display: flex; gap: 8px; }
     .acciones a { text-decoration: none; color: white; padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 700; flex: 1; text-align: center; }
-    .editar { background: #1d4ed8; }
-    .eliminar { background: #dc2626; }
-    .page-title { font-size: 22px; font-weight: 900; color: #1c1917; margin: 0 0 18px; display: flex; align-items: center; gap: 8px; }
+    .editar { background: var(--azul); }
+    .eliminar { background: var(--rojo); }
+    .page-title { font-size: 22px; font-weight: 900; color: var(--texto); margin: 0 0 18px; display: flex; align-items: center; gap: 8px; }
     </style>
     </head>
     <body>
@@ -3107,14 +3299,15 @@ def inventario():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }
+    """ + estilos_base() + """
+    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: var(--gris-fondo); color: var(--texto); }
     .contenido { padding: 14px; max-width: 960px; margin: 0 auto; }
-    .card { background: white; padding: 18px; margin-bottom: 12px; border-radius: 14px; box-shadow: 0 4px 14px rgba(13,74,50,0.08); border: 1px solid #e5e0d8; }
+    .card { background: var(--tarjeta); color: var(--texto); padding: 18px; margin-bottom: 12px; border-radius: 14px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); }
     .accesos { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
-    .btn-acceso { display: block; text-align: center; padding: 16px; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; text-decoration: none; border-radius: 12px; font-size: 16px; font-weight: 800; box-shadow: 0 3px 10px rgba(13,74,50,0.2); }
-    .btn-acceso:hover { box-shadow: 0 5px 14px rgba(13,74,50,0.3); }
-    .resumen-inventario { background: linear-gradient(135deg, #f0fdf4, #dcfce7); border-left: 5px solid #1a6b4a; padding: 14px; border-radius: 10px; margin-bottom: 12px; font-size: 17px; font-weight: 700; }
-    .volver { display: inline-block; text-align: center; margin-top: 14px; padding: 12px 16px; background: #1a6b4a; color: white; text-decoration: none; border-radius: 10px; font-weight: 700; }
+    .btn-acceso { display: block; text-align: center; padding: 16px; background: var(--panel-secundario); color: var(--texto); text-decoration: none; border-radius: 12px; font-size: 16px; font-weight: 800; box-shadow: var(--sombra-suave); border:1px solid var(--borde); transition:background 0.16s ease, border-color 0.16s ease; }
+    .btn-acceso:hover { background:#252A32; border-color:#3C4350; box-shadow:0 8px 18px rgba(0,0,0,0.22); }
+    .resumen-inventario { background: var(--panel-secundario); border-left: 5px solid var(--verde-neko); padding: 14px; border-radius: 10px; margin-bottom: 12px; font-size: 17px; font-weight: 700; }
+    .volver { display: inline-block; text-align: center; margin-top: 14px; padding: 12px 16px; background: var(--panel-secundario); color: var(--texto); text-decoration: none; border-radius: 10px; font-weight: 700; border:1px solid var(--borde); }
     @media (max-width: 768px) { .accesos { grid-template-columns: 1fr; } }
     </style>
     </head>
@@ -4080,6 +4273,8 @@ def produccion():
 
                 conn.commit()
                 conn.close()
+                if usuario_es_produccion():
+                    return redirect("/produccion")
                 return redirect("/inventario")
 
     cursor.execute(
@@ -4102,25 +4297,28 @@ def produccion():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body { font-family: Arial; margin: 0; background: #f5f6fa; }
+    """ + estilos_base() + """
+    body { font-family: Arial; margin: 0; background: var(--gris-fondo); color: var(--texto); }
     .contenido { padding: 10px; }
-    .card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
-    button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 5px; background: #27ae60; color: white; cursor: pointer; }
+    .card { background: var(--tarjeta); color: var(--texto); padding: 15px; margin-bottom: 10px; border-radius: 10px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); }
+    input, select { width: 100%; padding: 12px; margin: 5px 0; border-radius: 8px; border: 1px solid var(--borde); font-size: 16px; box-sizing: border-box; background: var(--panel-secundario); color: var(--texto); }
+    button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 8px; background: var(--verde-neko); color: #0F1115; cursor: pointer; }
     .error { background: #fdecea; color: #c0392b; padding: 10px; border-radius: 6px; margin-bottom: 10px; }
     .grid-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    textarea { width: 100%; min-height: 90px; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }
-    .ayuda { color:#64748b; font-size:13px; margin:2px 0 8px; }
-    .volver { display: block; text-align: center; margin-top: 15px; padding: 12px; background: #7f8c8d; color: white; text-decoration: none; border-radius: 5px; }
+    textarea { width: 100%; min-height: 90px; padding: 12px; margin: 5px 0; border-radius: 8px; border: 1px solid var(--borde); font-size: 16px; box-sizing: border-box; background: var(--panel-secundario); color: var(--texto); }
+    .ayuda { color:var(--texto-secundario); font-size:13px; margin:2px 0 8px; }
+    .volver { display: block; text-align: center; margin-top: 15px; padding: 12px; background: var(--panel-secundario); color: var(--texto); text-decoration: none; border-radius: 8px; border: 1px solid var(--borde); }
     @media (max-width: 768px) { .grid-form { grid-template-columns: 1fr; } }
     </style>
     </head>
     <body>
     """
 
-    produccion_links = '<a href="/cocina">🍳 Cocina</a><a href="/inventario">📦 Inventario</a>'
+    produccion_links = ""
     if usuario_es_master():
         produccion_links = '<a href="/">🏠 Inicio</a><a href="/inventario">📦 Inventario</a><a href="/compras">🛒 Compras</a>'
+    elif not usuario_es_produccion():
+        produccion_links = '<a href="/cocina">🍳 Cocina</a><a href="/inventario">📦 Inventario</a>'
 
     html += barra_superior(produccion_links)
     html += """
@@ -4443,31 +4641,33 @@ def orden(orden_id):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }}
+    {estilos_base()}
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: var(--gris-fondo); color: var(--texto); }}
     .contenedor {{ display: flex; gap: 0; }}
     .productos {{ width: 60%; padding: 18px; }}
-    .panel {{ width: 40%; padding: 18px; background: white; min-height: calc(100vh - 70px); box-sizing: border-box; border-left: 1px solid #e5e0d8; box-shadow: -4px 0 16px rgba(13,74,50,0.06); }}
-    .btn {{ width: 100%; padding: 14px; margin: 6px 0; background: linear-gradient(135deg, #0d4a32, #1a6b4a); color: white; border: none; border-radius: 10px; font-weight: 800; font-size: 15px; cursor: pointer; }}
-    .categoria {{ font-weight: 800; margin-top: 14px; background: #1c1917; color: white; padding: 8px 12px; border-radius: 10px; font-size: 13px; letter-spacing: 0.5px; }}
+    .panel {{ width: 40%; padding: 18px; background: var(--panel); min-height: calc(100vh - 70px); box-sizing: border-box; border-left: 1px solid var(--borde); box-shadow: -4px 0 18px rgba(0,0,0,0.24); }}
+    .btn {{ width: 100%; padding: 14px; margin: 6px 0; background: var(--tarjeta); color: var(--texto); border: 1px solid var(--borde); border-radius: 12px; font-weight: 800; font-size: 15px; cursor: pointer; box-shadow:var(--sombra-suave); transition:background 0.16s ease, border-color 0.16s ease, transform 0.1s ease; }}
+    .btn:hover {{ background:#252A32; border-color:rgba(61,220,132,0.38); }}
+    .categoria {{ font-weight: 800; margin-top: 14px; background: var(--panel-secundario) !important; color: var(--texto-secundario); padding: 8px 12px; border-radius: 999px; font-size: 13px; letter-spacing: 0.5px; border: 1px solid var(--borde); display:inline-flex; }}
     .grid-productos {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }}
     .acciones-superiores {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }}
     .btn-accion {{ display: block; padding: 14px 12px; margin: 5px 0; text-align: center; color: white; text-decoration: none; border-radius: 10px; font-weight: 800; font-size: 15px; }}
-    .cocina {{ background: linear-gradient(135deg, #c2410c, #f97316); }}
-    .cobrar {{ background: linear-gradient(135deg, #0d4a32, #1a6b4a); }}
-    .editar {{ background: linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
-    .eliminar {{ background: linear-gradient(135deg, #991b1b, #dc2626); }}
-    .volver {{ background: #6b7280; }}
-    .total {{ font-size: 20px; margin-top: 12px; font-weight: 800; color: #1c1917; }}
-    .info-cierre {{ background:#fffbeb; border:1px solid #f59e0b; padding:12px; border-radius:10px; margin-bottom:14px; color:#92400e; font-weight:600; }}
+    .cocina {{ background: var(--naranja); color:#0F1115; border:none; }}
+    .cobrar {{ background: var(--verde-neko); color:#0F1115; border:none; }}
+    .editar {{ background: var(--azul); border:none; }}
+    .eliminar {{ background: var(--rojo); border:none; }}
+    .volver {{ background: var(--panel-secundario); border:1px solid var(--borde); }}
+    .total {{ font-size: 20px; margin-top: 12px; font-weight: 800; color: var(--texto); }}
+    .info-cierre {{ background:#2A2417; border:1px solid var(--naranja); padding:12px; border-radius:10px; margin-bottom:14px; color:#F8D083; font-weight:600; }}
     .modal-refresco {{ position:fixed; inset:0; background:rgba(17,24,39,0.62); display:none; align-items:center; justify-content:center; padding:18px; z-index:1000; }}
     .modal-refresco.activo {{ display:flex; }}
-    .modal-contenido {{ width:min(620px, 100%); background:white; border-radius:16px; padding:22px; box-shadow:0 24px 50px rgba(0,0,0,0.30); }}
+    .modal-contenido {{ width:min(620px, 100%); background:var(--panel); color:var(--texto); border:1px solid var(--borde); border-radius:16px; padding:22px; box-shadow:0 24px 50px rgba(0,0,0,0.42); }}
     .modal-top {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }}
-    .modal-top h2 {{ margin:0; color:#1a6b4a; }}
-    .modal-top p {{ margin:5px 0 0; color:#4b5563; }}
+    .modal-top h2 {{ margin:0; color:var(--verde-neko); }}
+    .modal-top p {{ margin:5px 0 0; color:var(--texto-secundario); }}
     .cerrar-modal {{ width:auto; min-height:44px; padding:8px 14px; border:none; border-radius:8px; background:#6b7280; color:white; cursor:pointer; font-weight:700; }}
     .sabores-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
-    .sabor-btn {{ min-height:68px; padding:14px; border:none; border-radius:12px; background:#1a6b4a; color:white; font-size:16px; font-weight:900; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 14px rgba(13,74,50,0.20); transition:opacity 0.16s ease, transform 0.16s ease; }}
+    .sabor-btn {{ min-height:68px; padding:14px; border:none; border-radius:12px; background:var(--tarjeta); color:var(--texto); font-size:16px; font-weight:900; cursor:pointer; text-align:center; display:flex; align-items:center; justify-content:center; box-shadow:var(--sombra-suave); transition:opacity 0.16s ease, transform 0.16s ease, border-color 0.16s ease; }}
     .sabor-btn:hover {{ opacity:0.90; transform:translateY(-1px); }}
     .sabor-btn:active {{ transform:translateY(0); }}
     .sabor-coca-cola {{ background:#E50914; }}
@@ -4476,11 +4676,19 @@ def orden(orden_id):
     .sabor-naranja {{ background:#f97316; color:#1c1917; }}
     .sabor-uva {{ background:#6A0DAD; }}
     .sabor-btn.otro {{ background:#7c3aed; }}
-    .item-orden {{ display:flex; justify-content:space-between; align-items:flex-start; margin:5px 0; gap:10px; border-bottom:1px solid #e5e7eb; padding:8px 0; }}
+    .item-orden {{ display:flex; justify-content:space-between; align-items:flex-start; margin:5px 0; gap:10px; border-bottom:1px solid var(--borde); padding:8px 0; }}
     .item-detalle {{ flex:1; min-width:0; }}
-    .item-indicacion {{ color:#1a6b4a; font-size:13px; margin-top:3px; font-weight:700; }}
+    .item-indicacion {{ color:var(--verde-neko); font-size:13px; margin-top:3px; font-weight:700; }}
+    .item-descripcion {{ color:var(--verde-neko); font-size:14px; margin-top:4px; font-weight:800; line-height:1.35; white-space:pre-line; }}
     .acciones-item {{ display:flex; gap:6px; align-items:center; flex:0 0 auto; }}
     .btn-item {{ color:white; border:none; border-radius:8px; padding:8px 10px; cursor:pointer; width:auto; min-height:38px; box-shadow:none; font-weight:700; }}
+    .combo-config {{ display:block; }}
+    .combo-config-seccion {{ margin:14px 0; }}
+    .combo-config-seccion h3 {{ margin:0 0 8px; color:var(--texto); font-size:16px; }}
+    .combo-opciones {{ display:grid; grid-template-columns:1fr; gap:8px; }}
+    .combo-opcion {{ display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid var(--borde); border-radius:10px; font-weight:800; color:var(--texto); cursor:pointer; background:var(--panel-secundario); }}
+    .combo-opcion input {{ width:auto; min-height:auto; box-shadow:none; }}
+    .combo-aceptar {{ width:100%; margin-top:12px; background:var(--verde-neko); color:#0F1115; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; border-left: none; }}
@@ -4538,19 +4746,20 @@ def orden(orden_id):
                     </button>
                     """
                 elif p[1] in COMBOS_PERSONALES:
-                    combo = COMBOS_PERSONALES[p[1]]
-                    favoritos_data = html_lib.escape("|".join(combo["favoritos_disponibles"]), quote=True)
-                    cantidad_favoritos = 1 if combo["favoritos_disponibles"] else 0
+                    acompanantes_data = html_lib.escape("|".join(ACOMPANANTES_COMBO), quote=True)
+                    bebidas_data = html_lib.escape("|".join(BEBIDAS_COMBO), quote=True)
+                    cantidad_acompanantes = COMBOS_CANTIDAD_ACOMPANANTES.get(p[1], 1)
                     html += f"""
-                    <button class="btn btn-configurable" type="button" data-tipo="combo" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-favoritos="{favoritos_data}" data-cantidad-favoritos="{cantidad_favoritos}">
+                    <button class="btn btn-configurable" type="button" data-tipo="combo" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-acompanantes="{acompanantes_data}" data-cantidad-acompanantes="{cantidad_acompanantes}" data-bebidas="{bebidas_data}">
                         {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
                 elif p[1] in PROMOCIONES_NEKO:
                     promo = PROMOCIONES_NEKO[p[1]]
+                    pollos_data = html_lib.escape("|".join(POLLOS_PROMOCION if p[1] in PROMOCIONES_CON_POLLO else []), quote=True)
                     arroces_data = html_lib.escape("|".join(ARROCES_PROMOCION), quote=True)
                     html += f"""
-                    <button class="btn btn-configurable" type="button" data-tipo="promocion" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-arroces="{arroces_data}" data-cantidad-arroces="{promo['cantidad_arroces']}" data-cantidad-refrescos="{promo['cantidad_refrescos']}" data-refresco="{promo['refresco']}">
+                    <button class="btn btn-configurable" type="button" data-tipo="promocion" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-pollos="{pollos_data}" data-arroces="{arroces_data}" data-cantidad-arroces="{promo['cantidad_arroces']}" data-cantidad-refrescos="{promo['cantidad_refrescos']}" data-refresco="{promo['refresco']}">
                         {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
@@ -4580,12 +4789,12 @@ def orden(orden_id):
     boton_emergencia = ""
     if usuario_es_admin_cierre() and estado == "cerrada" and not bloqueada_por_cierre:
         if edicion_emergencia_activa:
-            boton_emergencia = '<div class="btn-accion" style="background:linear-gradient(135deg,#991b1b,#dc2626);">🚨 Emergencia activa</div>'
+            boton_emergencia = '<div class="btn-accion" style="background:#DC2626;">🚨 Emergencia activa</div>'
         else:
             boton_emergencia = f"""
             <form method="post" action="/activar_edicion_emergencia/{orden_id}" class="form-emergencia" style="margin:0;">
                 <input type="hidden" name="clave" value="">
-                <button type="submit" class="btn-accion" style="width:100%; border:none; cursor:pointer; background:linear-gradient(135deg,#991b1b,#dc2626);">🚨 Editar emergencia</button>
+                <button type="submit" class="btn-accion" style="width:100%; border:none; cursor:pointer; background:#DC2626;">🚨 Editar emergencia</button>
             </form>
             """
 
@@ -4624,8 +4833,17 @@ def orden(orden_id):
             </form>
             """
 
+        descripcion_combo = (
+            texto_descripcion_combo_orden(i[0], i[3])
+            or texto_descripcion_promocion_orden(i[0], i[3])
+        )
         indicacion_html = ""
-        if i[3]:
+        if descripcion_combo:
+            descripcion_segura = "<br>".join(
+                html_lib.escape(linea) for linea in descripcion_combo.splitlines()
+            )
+            indicacion_html = f"<div class='item-descripcion'>{descripcion_segura}</div>"
+        elif i[3]:
             indicacion_html = f"<div class='item-indicacion'>(Indicación: {html_lib.escape(i[3])})</div>"
 
         html += f"""
@@ -4891,28 +5109,109 @@ def orden(orden_id):
         }});
     }}
 
+    function tituloCombo(producto) {{
+        const match = (producto || "").match(/(\\d+)/);
+        return match ? "COMBO #" + match[1] : (producto || "COMBO");
+    }}
+
+    function crearGrupoRadio(titulo, nombre, opciones) {{
+        const seccion = document.createElement("div");
+        seccion.className = "combo-config-seccion";
+        const encabezado = document.createElement("h3");
+        encabezado.textContent = titulo;
+        seccion.appendChild(encabezado);
+
+        const contenedor = document.createElement("div");
+        contenedor.className = "combo-opciones";
+        opciones.forEach(function(opcion) {{
+            const etiqueta = document.createElement("label");
+            etiqueta.className = "combo-opcion";
+            const radio = document.createElement("input");
+            radio.type = "radio";
+            radio.name = nombre;
+            radio.value = opcion;
+            const texto = document.createElement("span");
+            texto.textContent = opcion;
+            etiqueta.appendChild(radio);
+            etiqueta.appendChild(texto);
+            contenedor.appendChild(etiqueta);
+        }});
+        seccion.appendChild(contenedor);
+        return seccion;
+    }}
+
+    function abrirConfiguracionCombo(btn) {{
+        configuracionUrl = btn.dataset.url;
+        const producto = btn.dataset.producto || "Combo";
+        const acompanantes = (btn.dataset.acompanantes || "").split("|").filter(Boolean);
+        const bebidas = (btn.dataset.bebidas || "").split("|").filter(Boolean);
+        const cantidadAcompanantes = Number(btn.dataset.cantidadAcompanantes || 1);
+
+        modalConfiguracionTitulo.textContent = tituloCombo(producto);
+        modalConfiguracionProducto.textContent = "";
+        configuracionOpcionesGrid.innerHTML = "";
+        configuracionOpcionesGrid.className = "combo-config";
+
+        if (cantidadAcompanantes === 1) {{
+            configuracionOpcionesGrid.appendChild(crearGrupoRadio("Acompañante", "acompanante_1", acompanantes));
+        }} else {{
+            configuracionOpcionesGrid.appendChild(crearGrupoRadio("Primer acompañante", "acompanante_1", acompanantes));
+            configuracionOpcionesGrid.appendChild(crearGrupoRadio("Segundo acompañante", "acompanante_2", acompanantes));
+        }}
+        configuracionOpcionesGrid.appendChild(crearGrupoRadio("Bebida", "bebida", bebidas));
+
+        const aceptar = document.createElement("button");
+        aceptar.type = "button";
+        aceptar.className = "sabor-btn combo-aceptar";
+        aceptar.textContent = "Aceptar";
+        aceptar.addEventListener("click", function() {{
+            const destino = new URL(configuracionUrl, window.location.origin);
+            for (let i = 1; i <= cantidadAcompanantes; i += 1) {{
+                const elegido = configuracionOpcionesGrid.querySelector('input[name="acompanante_' + i + '"]:checked');
+                if (!elegido) {{
+                    alert("Debes seleccionar todos los acompañantes");
+                    return;
+                }}
+                destino.searchParams.append("acompanante", elegido.value);
+            }}
+            const bebida = configuracionOpcionesGrid.querySelector('input[name="bebida"]:checked');
+            if (!bebida) {{
+                alert("Debes seleccionar una bebida");
+                return;
+            }}
+            destino.searchParams.append("bebida", bebida.value);
+            window.location.href = destino.pathname + destino.search;
+        }});
+        configuracionOpcionesGrid.appendChild(aceptar);
+
+        modalConfiguracion.classList.add("activo");
+        modalConfiguracion.setAttribute("aria-hidden", "false");
+    }}
+
     function abrirConfiguracion(btn) {{
         configuracionUrl = btn.dataset.url;
         modalConfiguracionProducto.textContent = btn.dataset.producto || "Producto";
         pasosConfiguracion = [];
         seleccionesConfiguracion = [];
         pasoConfiguracionActual = 0;
+        configuracionOpcionesGrid.className = "sabores-grid";
         const sabores = saboresRefresco.slice();
 
         if (btn.dataset.tipo === "combo") {{
-            const favoritos = (btn.dataset.favoritos || "").split("|").filter(Boolean);
-            const cantidadFavoritos = Number(btn.dataset.cantidadFavoritos || 0);
-            for (let i = 1; i <= cantidadFavoritos; i += 1) {{
-                pasosConfiguracion.push({{
-                    titulo: "Elige el favorito " + i + " de " + cantidadFavoritos,
-                    parametro: "favorito",
-                    opciones: favoritos
-                }});
-            }}
+            abrirConfiguracionCombo(btn);
+            return;
         }} else {{
+            const pollos = (btn.dataset.pollos || "").split("|").filter(Boolean);
             const arroces = (btn.dataset.arroces || "").split("|").filter(Boolean);
             const cantidadArroces = Number(btn.dataset.cantidadArroces || 0);
             const cantidadRefrescos = Number(btn.dataset.cantidadRefrescos || 0);
+            if (pollos.length) {{
+                pasosConfiguracion.push({{
+                    titulo: "Tipo de pollo",
+                    parametro: "pollo",
+                    opciones: pollos
+                }});
+            }}
             for (let i = 1; i <= cantidadArroces; i += 1) {{
                 pasosConfiguracion.push({{
                     titulo: "Elige el arroz " + i + " de " + cantidadArroces,
@@ -4991,28 +5290,36 @@ def agregar(orden_id, producto_id):
             return "Debes seleccionar un sabor valido para el refresco"
         indicacion = f"Sabor: {sabor}"
     elif producto_nombre in COMBOS_PERSONALES:
-        combo = COMBOS_PERSONALES[producto_nombre]
-        favoritos = [(valor or "").strip() for valor in request.args.getlist("favorito")]
-        favoritos_disponibles = combo["favoritos_disponibles"]
-        cantidad_favoritos = 1 if favoritos_disponibles else 0
-        if len(favoritos) != cantidad_favoritos or any(
-            favorito not in favoritos_disponibles for favorito in favoritos
+        cantidad_acompanantes = COMBOS_CANTIDAD_ACOMPANANTES.get(producto_nombre, 1)
+        acompanantes = [(valor or "").strip() for valor in request.args.getlist("acompanante")]
+        bebida = (request.args.get("bebida") or "").strip()
+        if len(acompanantes) != cantidad_acompanantes or any(
+            acompanante not in ACOMPANANTES_COMBO for acompanante in acompanantes
         ):
             conn.close()
-            return "Debes seleccionar todos los favoritos validos para este combo"
-        detalles = [f"Arroz: {combo['arroz']}"]
-        detalles.extend(f"Favorito {i}: {favorito}" for i, favorito in enumerate(favoritos, 1))
-        detalles.extend(
-            f"Acompañante fijo {i}: {favorito}"
-            for i, favorito in enumerate(combo["favoritos_fijos"], 1)
+            return "Debes seleccionar todos los acompañantes validos para este combo"
+        if bebida not in BEBIDAS_COMBO:
+            conn.close()
+            return "Debes seleccionar una bebida valida para este combo"
+        indicacion = serializar_indicacion(
+            {
+                "version": 1,
+                "tipo": "combo",
+                "producto": COMBOS_JSON[producto_nombre],
+                "acompanantes": acompanantes,
+                "bebida": bebida,
+            }
         )
-        detalles.append(f"Bebida fija: {combo['bebida']}")
-        indicacion = "; ".join(detalles)
     elif producto_nombre in PROMOCIONES_NEKO:
         promo = PROMOCIONES_NEKO[producto_nombre]
+        pollo = (request.args.get("pollo") or "").strip()
         arroces = [(valor or "").strip() for valor in request.args.getlist("arroz")]
         sabores = request.args.getlist("sabor")
         extra_lumpias = (request.args.get("extra_lumpias") or "0").strip()
+        requiere_pollo = producto_nombre in PROMOCIONES_CON_POLLO
+        if requiere_pollo and pollo not in POLLOS_PROMOCION:
+            conn.close()
+            return "Debes seleccionar un tipo de pollo valido para esta promocion"
         if len(arroces) != promo["cantidad_arroces"] or any(
             arroz not in ARROCES_PROMOCION for arroz in arroces
         ):
@@ -5027,12 +5334,16 @@ def agregar(orden_id, producto_id):
         if extra_lumpias not in {"0", "1"}:
             conn.close()
             return "La selección del extra de lumpias no es valida"
-        detalles = [f"Arroz {i}: {arroz}" for i, arroz in enumerate(arroces, 1)]
-        detalles.extend(
-            f"{promo['refresco']} {i}: {sabor}"
-            for i, sabor in enumerate(sabores_normalizados, 1)
-        )
-        indicacion = "; ".join(detalles)
+        datos_promocion = {
+            "version": 1,
+            "tipo": "promocion",
+            "producto": PROMOCIONES_JSON[producto_nombre],
+            "arroces": arroces,
+            "bebidas": sabores_normalizados,
+        }
+        if requiere_pollo:
+            datos_promocion["pollo"] = pollo
+        indicacion = serializar_indicacion(datos_promocion)
 
     indicacion = normalizar_indicacion_item(indicacion)
 
@@ -5603,23 +5914,23 @@ def cobrar(orden_id):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     {estilos_base()}
-    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f7f5f0; }}
-    .contenedor {{ width: 95%; max-width: 720px; margin: 18px auto; background: white; padding: 24px; border-radius: 16px; box-shadow: var(--sombra); border: 1px solid #e5e0d8; }}
-    .titulo {{ text-align: center; font-size: 26px; font-weight: 900; color:#1a6b4a; }}
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: var(--gris-fondo); color: var(--texto); }}
+    .contenedor {{ width: 95%; max-width: 720px; margin: 18px auto; background: var(--panel); color: var(--texto); padding: 24px; border-radius: 16px; box-shadow: var(--sombra); border: 1px solid var(--borde); }}
+    .titulo {{ text-align: center; font-size: 26px; font-weight: 900; color:var(--verde-neko); text-shadow:0 0 8px rgba(61,220,132,0.10); }}
     .numero {{ text-align: right; font-size: 18px; margin-bottom: 10px; }}
-    .sep {{ border-top: 1px dashed #ccc; margin: 15px 0; }}
+    .sep {{ border-top: 1px dashed var(--borde); margin: 15px 0; }}
     .total {{ font-size: 20px; font-weight: bold; text-align: right; }}
-    input, select {{ width: 100%; padding: 12px; margin: 5px 0; border-radius: 5px; border: 1px solid #ccc; font-size: 16px; box-sizing: border-box; }}
-    .btn {{ width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 5px; font-size: 18px; cursor: pointer; }}
-    .confirmar {{ background: linear-gradient(135deg, #15803d, #16a34a); color: white; }}
-    .volver {{ background: #7f8c8d; color: white; text-decoration:none; display:block; text-align:center; padding:15px; border-radius:5px; }}
+    input, select {{ width: 100%; padding: 12px; margin: 5px 0; border-radius: 8px; border: 1px solid var(--borde); font-size: 16px; box-sizing: border-box; background:var(--panel-secundario); color:var(--texto); }}
+    .btn {{ width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 8px; font-size: 18px; cursor: pointer; }}
+    .confirmar {{ background: var(--verde-neko); color: #0F1115; }}
+    .volver {{ background: var(--panel-secundario); color: var(--texto); text-decoration:none; display:block; text-align:center; padding:15px; border-radius:8px; border:1px solid var(--borde); }}
     .error {{ background:#fdecea; color:#c0392b; padding:12px; border-radius:8px; margin-bottom:12px; }}
     .metodos-grid {{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; margin:8px 0 10px; }}
-    .metodo-btn {{ min-height:60px; padding:12px; border:2px solid #cbd5e1; border-radius:10px; background:#f8fafc; color:#111827; font-size:16px; font-weight:900; cursor:pointer; box-shadow:0 4px 12px rgba(17,24,39,0.12); transition:background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease; }}
-    .metodo-btn:hover {{ transform:translateY(-1px); border-color:#15803d; }}
-    .metodo-btn.activo {{ border-color:#15803d; background:#15803d; color:white; }}
-    .metodo-btn.sin-metodo {{ background:#e5e7eb; color:#111827; }}
-    .metodo-btn.sin-metodo.activo {{ border-color:#7f8c8d; background:#7f8c8d; color:white; }}
+    .metodo-btn {{ min-height:60px; padding:12px; border:2px solid var(--borde); border-radius:10px; background:var(--panel-secundario); color:var(--texto); font-size:16px; font-weight:900; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.20); transition:background 0.16s ease, border-color 0.16s ease, color 0.16s ease, transform 0.16s ease; }}
+    .metodo-btn:hover {{ transform:translateY(-1px); border-color:var(--verde-neko); }}
+    .metodo-btn.activo {{ border-color:var(--verde-neko); background:var(--verde-neko); color:#0F1115; }}
+    .metodo-btn.sin-metodo {{ background:#242424; color:var(--texto-secundario); }}
+    .metodo-btn.sin-metodo.activo {{ border-color:var(--texto-secundario); background:#3a3a3a; color:white; }}
     @media (max-width: 520px) {{ .metodos-grid {{ grid-template-columns:1fr; }} }}
     </style>
     </head>
@@ -5991,7 +6302,7 @@ def reportes():
                 <form method="post" action="/revertir_orden_cierre/{orden["orden_id"]}" class="form-revertir-cierre" style="margin:0;">
                     <input type="hidden" name="clave" value="">
                     <input type="hidden" name="volver" value="{volver_url}">
-                    <button type="submit" style="background:linear-gradient(135deg,#991b1b,#dc2626); color:white; border:none; border-radius:8px; padding:9px 11px; cursor:pointer; width:auto; min-height:38px; font-weight:700;">🧨 Revertir orden</button>
+                    <button type="submit" style="background:#DC2626; color:white; border:none; border-radius:8px; padding:9px 11px; cursor:pointer; width:auto; min-height:38px; font-weight:700;">🧨 Revertir orden</button>
                 </form>
                 """
             ordenes_html += f"""
@@ -6024,18 +6335,18 @@ def reportes():
     {estilos_base()}
     body {{ margin:0; }}
     .contenido {{ padding:18px; }}
-    .filtros, .metricas, .bloque {{ background:white; border-radius:14px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
+    .filtros, .metricas, .bloque {{ background:var(--tarjeta); color:var(--texto); border:1px solid var(--borde); border-radius:14px; padding:18px; box-shadow:var(--sombra-suave); margin-bottom:16px; }}
     .filtros form {{ display:grid; grid-template-columns: 1fr 1fr auto auto; gap:12px; align-items:end; }}
     .metricas {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; }}
-    .metrica {{ background:linear-gradient(135deg, #f0fdf4, #dcfce7); border:1px solid #bbf7d0; border-left:5px solid var(--verde-neko); padding:14px; border-radius:12px; }}
-    .metrica small {{ display:block; color:#64748b; font-weight:700; margin-bottom:6px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
+    .metrica {{ background:var(--panel-secundario); border:1px solid var(--borde); padding:14px; border-radius:12px; }}
+    .metrica small {{ display:block; color:var(--texto-secundario); font-weight:700; margin-bottom:6px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
     .metrica b {{ font-size:22px; color:var(--carbon); }}
-    button, .btn-link {{ border:none; border-radius:10px; padding:13px 16px; color:white; background:linear-gradient(135deg, #0d4a32, #1a6b4a); text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }}
-    .btn-excel {{ background:linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
-    .btn-dashboard {{ background:linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
-    table {{ width:100%; border-collapse:collapse; background:white; border-radius:10px; overflow:hidden; }}
-    th, td {{ border-bottom:1px solid #e5e7eb; padding:11px 14px; text-align:left; }}
-    th {{ background:#f0fdf4; color:var(--verde-neko); font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
+    button, .btn-link {{ border:none; border-radius:10px; padding:13px 16px; color:#0F1115; background:var(--verde-neko); text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }}
+    .btn-excel {{ background:var(--azul); color:white; }}
+    .btn-dashboard {{ background:var(--azul); color:white; }}
+    table {{ width:100%; border-collapse:collapse; background:var(--tarjeta); border-radius:10px; overflow:hidden; }}
+    th, td {{ border-bottom:1px solid var(--borde); padding:11px 14px; text-align:left; }}
+    th {{ background:var(--panel-secundario); color:var(--texto-secundario); font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
     .tabla-wrap {{ overflow:auto; }}
     @media (max-width: 900px) {{
         .filtros form, .metricas {{ grid-template-columns:1fr; }}
@@ -6292,20 +6603,20 @@ def dashboard():
     {estilos_base()}
     body {{ margin:0; }}
     .contenido {{ padding:18px; }}
-    .filtros, .panel-dashboard {{ background:white; border-radius:14px; padding:18px; box-shadow:var(--sombra); margin-bottom:16px; }}
+    .filtros, .panel-dashboard {{ background:var(--tarjeta); color:var(--texto); border:1px solid var(--borde); border-radius:14px; padding:18px; box-shadow:var(--sombra-suave); margin-bottom:16px; }}
     .filtros form {{ display:grid; grid-template-columns: 1fr 1fr auto auto; gap:12px; align-items:end; }}
     .grid-dashboard {{ display:grid; grid-template-columns: repeat(2, 1fr); gap:16px; }}
     .resumen-top {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; margin-bottom:16px; }}
-    .metrica {{ background:linear-gradient(135deg, #f0fdf4, #dcfce7); border-left:5px solid var(--verde-neko); padding:16px; border-radius:12px; box-shadow:0 2px 8px rgba(26,107,74,0.08); }}
-    .metrica small {{ display:block; color:#64748b; font-weight:700; margin-bottom:6px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
+    .metrica {{ background:var(--panel-secundario); border:1px solid var(--borde); padding:16px; border-radius:12px; box-shadow:var(--sombra-suave); }}
+    .metrica small {{ display:block; color:var(--texto-secundario); font-weight:700; margin-bottom:6px; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
     .metrica b {{ font-size:22px; color:var(--carbon); }}
-    button, .btn-link {{ border:none; border-radius:10px; padding:13px 16px; color:white; background:linear-gradient(135deg, #0d4a32, #1a6b4a); text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }}
-    .btn-reportes {{ background:linear-gradient(135deg, #1e3a8a, #1d4ed8); }}
-    .fila-barra {{ display:grid; grid-template-columns: 240px 1fr; gap:12px; align-items:center; padding:10px 0; border-bottom:1px solid #e5e7eb; }}
+    button, .btn-link {{ border:none; border-radius:10px; padding:13px 16px; color:#0F1115; background:var(--verde-neko); text-decoration:none; font-weight:900; min-height:48px; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }}
+    .btn-reportes {{ background:var(--azul); color:white; }}
+    .fila-barra {{ display:grid; grid-template-columns: 240px 1fr; gap:12px; align-items:center; padding:10px 0; border-bottom:1px solid var(--borde); }}
     .fila-barra:last-child {{ border-bottom:none; }}
-    .barra {{ height:16px; background:#f0fdf4; border-radius:999px; overflow:hidden; }}
-    .barra span {{ display:block; height:100%; background:linear-gradient(90deg, var(--verde-neko), var(--naranja)); border-radius:999px; }}
-    .vacio {{ color:#9ca3af; padding:12px 0; font-size:14px; }}
+    .barra {{ height:16px; background:var(--panel-secundario); border-radius:999px; overflow:hidden; }}
+    .barra span {{ display:block; height:100%; background:var(--verde-neko); border-radius:999px; }}
+    .vacio {{ color:var(--texto-secundario); padding:12px 0; font-size:14px; }}
     @media (max-width: 900px) {{
         .filtros form, .grid-dashboard, .resumen-top, .fila-barra {{ grid-template-columns:1fr; }}
     }}
@@ -6386,7 +6697,7 @@ def cierre():
 
     boton = ""
     if ordenes_activas == 0 and cantidad_ordenes_cerradas > 0:
-        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:linear-gradient(135deg,#7c3aed,#6d28d9); color:white; padding:14px 20px; border-radius:12px; font-weight:800; text-decoration:none;">🔒 Confirmar cierre de jornada</a>'
+        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:#3DDC84; color:#0F1115; padding:14px 20px; border-radius:12px; font-weight:800; text-decoration:none;">🔒 Confirmar cierre de jornada</a>'
 
     auditoria_html = ""
     if not resumen["auditoria_pagos"]:
@@ -6441,7 +6752,7 @@ def cierre():
     .bloque {{ background: #f0fdf4; padding: 14px; border-radius: 12px; margin-bottom: 14px; border: 1px solid #bbf7d0; }}
     .titulo-bloque {{ font-size: 17px; font-weight: 800; margin-bottom: 10px; color: #1a6b4a; }}
     .dato {{ margin: 6px 0; font-size: 16px; }}
-    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:linear-gradient(135deg,#0d4a32,#1a6b4a); color:white; text-decoration:none; border-radius:10px; font-weight:800; }}
+    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:var(--panel-secundario); color:var(--texto); text-decoration:none; border-radius:10px; font-weight:800; border:1px solid var(--borde); }}
     .tabla-wrap {{ overflow:auto; }}
     table {{ width:100%; border-collapse: collapse; background:white; border-radius:10px; overflow:hidden; }}
     th, td {{ border-bottom:1px solid #e5e7eb; padding:10px 14px; text-align:left; }}
@@ -6601,7 +6912,7 @@ def cerrar_jornada():
     .card {{ max-width: 760px; margin: auto; background: white; padding: 28px; border-radius: 16px; box-shadow: 0 8px 24px rgba(13,74,50,0.10); border: 1px solid #e5e0d8; }}
     h1 {{ margin-top: 0; color: #1a6b4a; }}
     .total {{ font-size: 20px; font-weight: 800; color: #1a6b4a; margin-bottom: 8px; }}
-    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:linear-gradient(135deg,#0d4a32,#1a6b4a); color:white; text-decoration:none; border-radius:10px; font-weight:800; }}
+    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:var(--panel-secundario); color:var(--texto); text-decoration:none; border-radius:10px; font-weight:800; border:1px solid var(--borde); }}
     </style>
     </head>
     <body>
@@ -6657,25 +6968,25 @@ def pantalla_cocina():
     <meta http-equiv="refresh" content="5">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; background:#0f0f0f; color:white; font-size:20px; margin:0; }
-        .topbar { padding:10px 16px; background:linear-gradient(135deg, #0d4a32, #1a6b4a); display:flex; justify-content:space-between; align-items:center; gap:10px; box-shadow:0 4px 12px rgba(0,0,0,0.4); }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background:#0F1115; color:#F4F4F4; font-size:20px; margin:0; }
+        .topbar { padding:10px 16px; background:#181B20; display:flex; justify-content:space-between; align-items:center; gap:10px; border-bottom:1px solid #31363F; box-shadow:0 4px 16px rgba(0,0,0,0.28); }
         .topbar-brand { font-weight:900; font-size:18px; display:flex; align-items:center; gap:8px; }
-        .topbar-brand span { color:#f97316; }
+        .topbar-brand span { color:#3DDC84; text-shadow:0 0 8px rgba(61,220,132,0.12); }
         .topbar-user { font-size:14px; opacity:0.8; }
-        .topbar a { color:white; text-decoration:none; background:rgba(255,255,255,0.15); padding:8px 12px; border-radius:8px; font-size:13px; font-weight:700; }
-        .topbar a:hover { background:rgba(255,255,255,0.25); }
+        .topbar a { color:white; text-decoration:none; background:#20242B; border:1px solid #31363F; padding:8px 12px; border-radius:8px; font-size:13px; font-weight:700; transition:background 0.18s ease, border-color 0.18s ease; }
+        .topbar a:hover { background:#262B33; border-color:#3C4350; }
         .container { display:flex; }
         .col { width:50%; padding:10px; box-sizing:border-box; }
-        .col-title { font-size:14px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:#6b7280; padding:8px 10px 4px; }
-        .orden { border:3px solid #374151; margin:8px; padding:16px; border-radius:14px; background:#1a1a1a; }
-        .green { border-color: #22c55e; background:#052e16; }
+        .col-title { font-size:14px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:#B0B6BE; padding:8px 10px 4px; }
+        .orden { border:3px solid #31363F; margin:8px; padding:16px; border-radius:14px; background:#20242B; box-shadow:0 10px 22px rgba(0,0,0,0.22); }
+        .green { border-color: #3DDC84; background:#1C2A23; }
         .orange { border-color: #f97316; background:#1c0a00; }
         .red { border-color: #ef4444; background:#1c0000; animation: pulse-red 1.5s ease-in-out infinite; }
         @keyframes pulse-red { 0%,100% { border-color:#ef4444; } 50% { border-color:#fca5a5; } }
-        .btn { padding:12px 16px; background:linear-gradient(135deg, #0d4a32, #1a6b4a); color:white; border:none; font-size:16px; font-weight:800; border-radius:10px; cursor:pointer; width:100%; margin-top:10px; }
+        .btn { padding:12px 16px; background:#3DDC84; color:#0F1115; border:none; font-size:16px; font-weight:800; border-radius:10px; cursor:pointer; width:100%; margin-top:10px; box-shadow:0 4px 12px rgba(0,0,0,0.20); }
         .btn:active { transform:scale(0.97); }
-        .mesonera { color:#f97316; font-weight:700; font-size:16px; }
-        .cocina-header { text-align:center; padding:10px; font-size:14px; font-weight:700; letter-spacing:2px; text-transform:uppercase; color:#4b5563; background:#111; border-bottom:1px solid #1f2937; }
+        .mesonera { color:#3DDC84; font-weight:700; font-size:16px; }
+        .cocina-header { text-align:center; padding:10px; font-size:14px; font-weight:700; letter-spacing:2px; text-transform:uppercase; color:#B0B6BE; background:#181B20; border-bottom:1px solid #31363F; }
         @media (max-width: 768px) { .container { flex-direction: column; } .col { width:100%; } }
     </style>
     <script>
@@ -6739,7 +7050,8 @@ def pantalla_cocina():
         """
 
         for linea in lineas_comanda:
-            bloque += f"<p>- {html_lib.escape(quitar_prefijo_cantidad_visual(linea))}</p>"
+            linea_html = html_lib.escape(quitar_prefijo_cantidad_visual(linea)).replace("\n", "<br>")
+            bloque += f"<p>- {linea_html}</p>"
 
         bloque += f"""
             <a href="/listo/{o[0]}">
@@ -6904,6 +7216,7 @@ def factura(orden_id):
     .numero {{ text-align: right; font-size: 20px; font-weight: bold; }}
     .sep {{ border-top: 1px dashed black; margin: 10px 0; }}
     .item {{ display: flex; justify-content: space-between; margin: 5px 0; }}
+    .item span:first-child {{ white-space: pre-line; }}
     .total {{ font-size: 18px; font-weight: bold; text-align: right; }}
     </style>
     </head>
