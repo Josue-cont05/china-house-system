@@ -628,10 +628,36 @@ def agrupar_items_comanda(items, incluir_cantidad=True, observacion=""):
     grupos = []
     indices = {}
 
-    for producto, indicacion in items:
+    items = list(items)
+    i = 0
+    while i < len(items):
+        producto, indicacion = items[i]
         cantidad_producto, producto = separar_prefijo_cantidad(producto)
         indicacion = normalizar_indicacion_item(indicacion)
         indicacion_cocina = indicacion_operativa_cocina(producto, indicacion)
+        siguiente_es_extra_promocion = False
+
+        if producto in PROMOCIONES_NEKO and i + 1 < len(items):
+            siguiente_producto_raw, siguiente_indicacion = items[i + 1]
+            _, siguiente_producto = separar_prefijo_cantidad(siguiente_producto_raw)
+            siguiente_indicacion = normalizar_indicacion_item(siguiente_indicacion)
+            siguiente_es_extra_promocion = (
+                siguiente_producto == PROMO_EXTRA_LUMPIAS_NOMBRE
+                and siguiente_indicacion == f"Agregado con: {producto}"
+            )
+            if siguiente_es_extra_promocion:
+                lineas_indicacion = indicacion_cocina.splitlines() if indicacion_cocina else []
+                indice_bebida = next(
+                    (
+                        idx
+                        for idx, linea in enumerate(lineas_indicacion)
+                        if linea.strip().startswith("[")
+                    ),
+                    len(lineas_indicacion),
+                )
+                lineas_indicacion.insert(indice_bebida, "    + Extra de Lumpia")
+                indicacion_cocina = "\n".join(lineas_indicacion)
+
         clave = (producto, indicacion_cocina)
 
         if clave not in indices:
@@ -645,6 +671,7 @@ def agrupar_items_comanda(items, incluir_cantidad=True, observacion=""):
             )
 
         grupos[indices[clave]]["cantidad"] += cantidad_producto
+        i += 2 if siguiente_es_extra_promocion else 1
 
     lineas = []
     for grupo in grupos:
