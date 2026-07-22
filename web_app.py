@@ -436,7 +436,7 @@ def texto_descripcion_combo_cocina(producto, indicacion):
         return ""
     datos = combo["datos"]
     lineas = [
-        f"    • {str(acompanante).strip()}"
+        f"    - {str(acompanante).strip()}"
         for acompanante in datos.get("acompanantes", [])
         if str(acompanante).strip()
     ]
@@ -493,9 +493,9 @@ def texto_descripcion_promocion_cocina(producto, indicacion):
     lineas = []
     pollo = (datos.get("pollo") or "").strip()
     if pollo:
-        lineas.append(f"    • {pollo}")
+        lineas.append(f"    - {pollo}")
     lineas.extend(
-        f"    • Arroz {str(arroz).strip()}"
+        f"    - Arroz {str(arroz).strip()}"
         for arroz in datos.get("arroces", [])
         if str(arroz).strip()
     )
@@ -588,7 +588,7 @@ def indicacion_operativa_cocina(producto, indicacion):
             if "bebida" in etiqueta_limpia:
                 bebidas.append(f"    [{valor_limpio}]")
             elif etiqueta_limpia.startswith("favorito") or etiqueta_limpia.startswith("acompa"):
-                detalles.append(f"    • {valor_limpio}")
+                detalles.append(f"    - {valor_limpio}")
         return "\n".join(detalles + bebidas)
 
     if producto in PROMOCIONES_NEKO:
@@ -607,12 +607,12 @@ def indicacion_operativa_cocina(producto, indicacion):
             if not valor_limpio:
                 continue
             if etiqueta_lower.startswith("pollo"):
-                detalles.append(f"    • {valor_limpio}")
+                detalles.append(f"    - {valor_limpio}")
                 continue
             if etiqueta_lower.startswith("arroz"):
                 if producto != "Mega Familiar" and etiqueta_lower == "arroz 1":
                     etiqueta_limpia = "Arroz"
-                detalles.append(f"    • {etiqueta_limpia}: {valor_limpio}")
+                detalles.append(f"    - {etiqueta_limpia}: {valor_limpio}")
                 continue
             if "refresco" in etiqueta_lower or "bebida" in etiqueta_lower:
                 bebidas.append(f"    [{valor_limpio}]")
