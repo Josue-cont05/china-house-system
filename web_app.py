@@ -434,7 +434,16 @@ def texto_descripcion_combo_cocina(producto, indicacion):
     combo = datos_combo_desde_indicacion(producto, indicacion)
     if not combo:
         return ""
-    return "\n".join(f"• {linea}" for linea in combo["lineas"])
+    datos = combo["datos"]
+    lineas = [
+        f"    • {str(acompanante).strip()}"
+        for acompanante in datos.get("acompanantes", [])
+        if str(acompanante).strip()
+    ]
+    bebida = (datos.get("bebida") or "").strip()
+    if bebida:
+        lineas.append(f"    [{bebida}]")
+    return "\n".join(lineas)
 
 
 def texto_descripcion_combo_factura(producto, indicacion):
@@ -480,7 +489,22 @@ def texto_descripcion_promocion_cocina(producto, indicacion):
     promocion = datos_promocion_desde_indicacion(producto, indicacion)
     if not promocion:
         return ""
-    return "\n".join(f"• {linea}" for linea in promocion["lineas"])
+    datos = promocion["datos"]
+    lineas = []
+    pollo = (datos.get("pollo") or "").strip()
+    if pollo:
+        lineas.append(f"    • {pollo}")
+    lineas.extend(
+        f"    • Arroz {str(arroz).strip()}"
+        for arroz in datos.get("arroces", [])
+        if str(arroz).strip()
+    )
+    lineas.extend(
+        f"    [{str(bebida).strip()}]"
+        for bebida in datos.get("bebidas", [])
+        if str(bebida).strip()
+    )
+    return "\n".join(lineas)
 
 
 def texto_descripcion_promocion_factura(producto, indicacion):
@@ -551,30 +575,48 @@ def indicacion_operativa_cocina(producto, indicacion):
         descripcion_combo = texto_descripcion_combo_cocina(producto, indicacion)
         if descripcion_combo:
             return descripcion_combo
-        favoritos = []
+        detalles = []
+        bebidas = []
         for parte in partes:
             etiqueta, separador, valor = parte.partition(":")
-            if separador and etiqueta.strip().lower().startswith("favorito"):
-                favoritos.append(f"Favorito: {valor.strip()}")
-        return "; ".join(favoritos)
+            if not separador:
+                continue
+            etiqueta_limpia = etiqueta.strip().lower()
+            valor_limpio = valor.strip()
+            if not valor_limpio:
+                continue
+            if "bebida" in etiqueta_limpia:
+                bebidas.append(f"    [{valor_limpio}]")
+            elif etiqueta_limpia.startswith("favorito") or etiqueta_limpia.startswith("acompa"):
+                detalles.append(f"    • {valor_limpio}")
+        return "\n".join(detalles + bebidas)
 
     if producto in PROMOCIONES_NEKO:
         descripcion_promocion = texto_descripcion_promocion_cocina(producto, indicacion)
         if descripcion_promocion:
             return descripcion_promocion
-        arroces = []
+        detalles = []
+        bebidas = []
         for parte in partes:
             etiqueta, separador, valor = parte.partition(":")
             if not separador:
                 continue
             etiqueta_limpia = etiqueta.strip()
             valor_limpio = valor.strip()
-            if not etiqueta_limpia.lower().startswith("arroz"):
+            etiqueta_lower = etiqueta_limpia.lower()
+            if not valor_limpio:
                 continue
-            if producto != "Mega Familiar" and etiqueta_limpia.lower() == "arroz 1":
-                etiqueta_limpia = "Arroz"
-            arroces.append(f"{etiqueta_limpia}: {valor_limpio}")
-        return "; ".join(arroces)
+            if etiqueta_lower.startswith("pollo"):
+                detalles.append(f"    • {valor_limpio}")
+                continue
+            if etiqueta_lower.startswith("arroz"):
+                if producto != "Mega Familiar" and etiqueta_lower == "arroz 1":
+                    etiqueta_limpia = "Arroz"
+                detalles.append(f"    • {etiqueta_limpia}: {valor_limpio}")
+                continue
+            if "refresco" in etiqueta_lower or "bebida" in etiqueta_lower:
+                bebidas.append(f"    [{valor_limpio}]")
+        return "\n".join(detalles + bebidas)
 
     if producto == PROMO_EXTRA_LUMPIAS_NOMBRE:
         return ""
@@ -582,7 +624,7 @@ def indicacion_operativa_cocina(producto, indicacion):
     return indicacion
 
 
-def agrupar_items_comanda(items, incluir_cantidad=True):
+def agrupar_items_comanda(items, incluir_cantidad=True, observacion=""):
     grupos = []
     indices = {}
 
@@ -617,6 +659,10 @@ def agrupar_items_comanda(items, incluir_cantidad=True):
         if incluir_cantidad:
             texto = f"{grupo['cantidad']}x {texto}"
         lineas.append(quitar_prefijo_cantidad_visual(texto))
+
+    observacion = (observacion or "").strip()
+    if observacion:
+        lineas.append(f"    OBS: {observacion}")
 
     return lineas
 
@@ -4687,11 +4733,16 @@ def orden(orden_id):
     .combo-config-seccion label {{ display:block; margin:0 0 6px; color:var(--texto-secundario); font-size:13px; font-weight:800; letter-spacing:0.3px; text-transform:uppercase; }}
     .combo-select {{ width:100%; min-height:50px; padding:11px 12px; border:1px solid var(--borde); border-radius:10px; background:var(--panel-secundario); color:var(--texto); font-size:16px; font-weight:800; box-sizing:border-box; }}
     .combo-select:focus {{ outline:none; border-color:var(--verde-neko); box-shadow:0 0 0 3px rgba(61,220,132,0.12); }}
+    .extra-lumpia-opciones {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+    .extra-lumpia-btn {{ min-height:50px; padding:11px 12px; border:1px solid var(--borde); border-radius:10px; background:var(--panel-secundario); color:var(--texto); font-size:15px; font-weight:900; cursor:pointer; transition:background 0.16s ease, border-color 0.16s ease; }}
+    .extra-lumpia-btn:hover {{ background:#252A32; border-color:#3C4350; }}
+    .extra-lumpia-btn.activo {{ background:var(--verde-neko); color:white; border-color:var(--verde-neko); }}
     .combo-aceptar {{ width:100%; margin-top:4px; background:var(--verde-neko); color:#0F1115; position:sticky; bottom:0; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; border-left: none; }}
         .sabores-grid {{ grid-template-columns:1fr 1fr; }}
+        .extra-lumpia-opciones {{ grid-template-columns:1fr; }}
         .modal-refresco {{ padding:12px; }}
         .modal-contenido {{ width:calc(100% - 24px); padding:14px; }}
     }}
@@ -5142,6 +5193,48 @@ def orden(orden_id):
         return seccion;
     }}
 
+    function crearGrupoExtraLumpia() {{
+        const seccion = document.createElement("div");
+        seccion.className = "combo-config-seccion";
+
+        const etiqueta = document.createElement("label");
+        etiqueta.textContent = "Extra de Lumpia";
+        seccion.appendChild(etiqueta);
+
+        const hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "extra_lumpias";
+        hidden.value = "0";
+        seccion.appendChild(hidden);
+
+        const opciones = document.createElement("div");
+        opciones.className = "extra-lumpia-opciones";
+
+        const botonSinExtra = document.createElement("button");
+        botonSinExtra.type = "button";
+        botonSinExtra.className = "extra-lumpia-btn activo";
+        botonSinExtra.textContent = "Sin extra de Lumpia";
+        botonSinExtra.dataset.valor = "0";
+
+        const botonExtra = document.createElement("button");
+        botonExtra.type = "button";
+        botonExtra.className = "extra-lumpia-btn";
+        botonExtra.textContent = "Extra de Lumpia";
+        botonExtra.dataset.valor = "1";
+
+        [botonSinExtra, botonExtra].forEach(function(boton) {{
+            boton.addEventListener("click", function() {{
+                hidden.value = boton.dataset.valor;
+                botonSinExtra.classList.toggle("activo", boton.dataset.valor === "0");
+                botonExtra.classList.toggle("activo", boton.dataset.valor === "1");
+            }});
+            opciones.appendChild(boton);
+        }});
+
+        seccion.appendChild(opciones);
+        return seccion;
+    }}
+
     function abrirConfiguracionCombo(btn) {{
         configuracionUrl = btn.dataset.url;
         const producto = btn.dataset.producto || "Combo";
@@ -5271,7 +5364,7 @@ def orden(orden_id):
         for (let i = 1; i <= cantidadRefrescos; i += 1) {{
             configuracionOpcionesGrid.appendChild(crearGrupoRadio(cantidadRefrescos === 1 ? "Refresco" : "Refresco " + i, "sabor_" + i, sabores));
         }}
-        configuracionOpcionesGrid.appendChild(crearGrupoRadio("Extra de lumpias", "extra_lumpias", ["Sin extra", "AÃ±adir RaciÃ³n de Lumpias (+$3.00)"]));
+        configuracionOpcionesGrid.appendChild(crearGrupoExtraLumpia());
 
         const aceptar = document.createElement("button");
         aceptar.type = "button";
@@ -5321,15 +5414,8 @@ def orden(orden_id):
                 destino.searchParams.append("sabor", saborFinal);
             }}
 
-            const extraLumpias = configuracionOpcionesGrid.querySelector('select[name="extra_lumpias"]');
-            if (!extraLumpias || !extraLumpias.value) {{
-                alert("Debes seleccionar si deseas extra de lumpias");
-                if (extraLumpias) {{
-                    extraLumpias.focus();
-                }}
-                return;
-            }}
-            destino.searchParams.append("extra_lumpias", extraLumpias.value.startsWith("AÃ±adir") ? "1" : "0");
+            const extraLumpias = configuracionOpcionesGrid.querySelector('input[name="extra_lumpias"]');
+            destino.searchParams.append("extra_lumpias", extraLumpias ? extraLumpias.value : "0");
             window.location.href = destino.pathname + destino.search;
         }});
         configuracionOpcionesGrid.appendChild(aceptar);
@@ -7036,7 +7122,8 @@ def pantalla_cocina():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT o.id, o.numero_orden, o.tipo, o.referencia, o.fecha_hora, u.nombre
+        SELECT o.id, o.numero_orden, o.tipo, o.referencia, o.fecha_hora, u.nombre,
+               COALESCE(o.observacion, '')
         FROM ordenes o
         LEFT JOIN usuarios u ON o.usuario_id = u.id
         WHERE o.estado = 'en cocina'
@@ -7135,7 +7222,7 @@ def pantalla_cocina():
         items = cursor.fetchall()
         tiene_arroz = any("Arroz chino" in i[0] for i in items)
         tiene_otro = any("Arroz chino" not in i[0] for i in items)
-        lineas_comanda = agrupar_items_comanda(items)
+        lineas_comanda = agrupar_items_comanda(items, observacion=o[6])
 
         bloque = f"""
         <div class="orden {color_class}">
@@ -7147,7 +7234,7 @@ def pantalla_cocina():
 
         for linea in lineas_comanda:
             linea_html = html_lib.escape(quitar_prefijo_cantidad_visual(linea)).replace("\n", "<br>")
-            bloque += f"<p>- {linea_html}</p>"
+            bloque += f"<p>{linea_html}</p>"
 
         bloque += f"""
             <a href="/listo/{o[0]}">
@@ -7203,7 +7290,7 @@ def ordenes_cocina():
         cursor.execute(
             """
             SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
-                   o.estado, o.reimpresion_token
+                   o.estado, o.reimpresion_token, COALESCE(o.observacion, '')
             FROM ordenes o
             LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.estado = 'en cocina'
@@ -7227,7 +7314,7 @@ def ordenes_cocina():
             )
             items = [
                 quitar_prefijo_cantidad_visual(item)
-                for item in agrupar_items_comanda(cursor.fetchall())
+                for item in agrupar_items_comanda(cursor.fetchall(), observacion=o[8])
             ]
 
             evento_impresion = f"{o[0]}-{o[7] if o[7] else 'base'}"
@@ -7242,6 +7329,7 @@ def ordenes_cocina():
                     "usuario": o[5] if o[5] else "N/A",
                     "estado": o[6],
                     "items": items,
+                    "observacion": o[8],
                     "reimpresion_token": o[7],
                     "evento_impresion": evento_impresion,
                 }

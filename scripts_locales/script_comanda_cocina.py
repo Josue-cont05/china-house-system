@@ -20,7 +20,7 @@ def imprimir(texto):
     try:
         win32print.StartDocPrinter(hprinter, 1, ("Comanda", None, "RAW"))
         win32print.StartPagePrinter(hprinter)
-        win32print.WritePrinter(hprinter, texto.encode("cp850", errors="replace"))
+        win32print.WritePrinter(hprinter, texto.encode("cp1252", errors="replace"))
         win32print.EndPagePrinter(hprinter)
         win32print.EndDocPrinter(hprinter)
     finally:
@@ -96,10 +96,10 @@ def imprimir_comanda(orden):
 
     texto += "------------------------\n\n"
 
-    items_agrupados = agrupar_items(orden.get("items", []))
-
-    for producto, cantidad in items_agrupados.items():
-        texto += f"{cantidad}x {producto}\n"
+    for item in orden.get("items", []):
+        item_limpio = quitar_prefijo_cantidad_visual(item)
+        if item_limpio:
+            texto += f"{item_limpio}\n\n"
 
     texto += "\n------------------------\n\n\n"
 
