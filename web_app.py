@@ -4661,7 +4661,7 @@ def orden(orden_id):
     .info-cierre {{ background:#2A2417; border:1px solid var(--naranja); padding:12px; border-radius:10px; margin-bottom:14px; color:#F8D083; font-weight:600; }}
     .modal-refresco {{ position:fixed; inset:0; background:rgba(17,24,39,0.62); display:none; align-items:center; justify-content:center; padding:18px; z-index:1000; }}
     .modal-refresco.activo {{ display:flex; }}
-    .modal-contenido {{ width:min(620px, 100%); background:var(--panel); color:var(--texto); border:1px solid var(--borde); border-radius:16px; padding:22px; box-shadow:0 24px 50px rgba(0,0,0,0.42); }}
+    .modal-contenido {{ width:min(620px, 100%); max-height:85vh; overflow-y:auto; background:var(--panel); color:var(--texto); border:1px solid var(--borde); border-radius:16px; padding:18px; box-shadow:0 24px 50px rgba(0,0,0,0.42); }}
     .modal-top {{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }}
     .modal-top h2 {{ margin:0; color:var(--verde-neko); }}
     .modal-top p {{ margin:5px 0 0; color:var(--texto-secundario); }}
@@ -4682,17 +4682,18 @@ def orden(orden_id):
     .item-descripcion {{ color:var(--verde-neko); font-size:14px; margin-top:4px; font-weight:800; line-height:1.35; white-space:pre-line; }}
     .acciones-item {{ display:flex; gap:6px; align-items:center; flex:0 0 auto; }}
     .btn-item {{ color:white; border:none; border-radius:8px; padding:8px 10px; cursor:pointer; width:auto; min-height:38px; box-shadow:none; font-weight:700; }}
-    .combo-config {{ display:block; }}
-    .combo-config-seccion {{ margin:14px 0; }}
-    .combo-config-seccion h3 {{ margin:0 0 8px; color:var(--texto); font-size:16px; }}
-    .combo-opciones {{ display:grid; grid-template-columns:1fr; gap:8px; }}
-    .combo-opcion {{ display:flex; align-items:center; gap:10px; padding:11px 12px; border:1px solid var(--borde); border-radius:10px; font-weight:800; color:var(--texto); cursor:pointer; background:var(--panel-secundario); }}
-    .combo-opcion input {{ width:auto; min-height:auto; box-shadow:none; }}
-    .combo-aceptar {{ width:100%; margin-top:12px; background:var(--verde-neko); color:#0F1115; }}
+    .combo-config {{ display:grid; grid-template-columns:1fr; gap:12px; }}
+    .combo-config-seccion {{ margin:0; }}
+    .combo-config-seccion label {{ display:block; margin:0 0 6px; color:var(--texto-secundario); font-size:13px; font-weight:800; letter-spacing:0.3px; text-transform:uppercase; }}
+    .combo-select {{ width:100%; min-height:50px; padding:11px 12px; border:1px solid var(--borde); border-radius:10px; background:var(--panel-secundario); color:var(--texto); font-size:16px; font-weight:800; box-sizing:border-box; }}
+    .combo-select:focus {{ outline:none; border-color:var(--verde-neko); box-shadow:0 0 0 3px rgba(61,220,132,0.12); }}
+    .combo-aceptar {{ width:100%; margin-top:4px; background:var(--verde-neko); color:#0F1115; position:sticky; bottom:0; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; border-left: none; }}
         .sabores-grid {{ grid-template-columns:1fr 1fr; }}
+        .modal-refresco {{ padding:12px; }}
+        .modal-contenido {{ width:calc(100% - 24px); padding:14px; }}
     }}
     </style>
     </head>
@@ -5117,26 +5118,27 @@ def orden(orden_id):
     function crearGrupoRadio(titulo, nombre, opciones) {{
         const seccion = document.createElement("div");
         seccion.className = "combo-config-seccion";
-        const encabezado = document.createElement("h3");
-        encabezado.textContent = titulo;
-        seccion.appendChild(encabezado);
+        const etiqueta = document.createElement("label");
+        etiqueta.textContent = titulo;
+        seccion.appendChild(etiqueta);
 
-        const contenedor = document.createElement("div");
-        contenedor.className = "combo-opciones";
+        const select = document.createElement("select");
+        select.className = "combo-select";
+        select.name = nombre;
+        select.required = true;
+
+        const opcionVacia = document.createElement("option");
+        opcionVacia.value = "";
+        opcionVacia.textContent = "Seleccionar...";
+        select.appendChild(opcionVacia);
+
         opciones.forEach(function(opcion) {{
-            const etiqueta = document.createElement("label");
-            etiqueta.className = "combo-opcion";
-            const radio = document.createElement("input");
-            radio.type = "radio";
-            radio.name = nombre;
-            radio.value = opcion;
-            const texto = document.createElement("span");
-            texto.textContent = opcion;
-            etiqueta.appendChild(radio);
-            etiqueta.appendChild(texto);
-            contenedor.appendChild(etiqueta);
+            const option = document.createElement("option");
+            option.value = opcion;
+            option.textContent = opcion;
+            select.appendChild(option);
         }});
-        seccion.appendChild(contenedor);
+        seccion.appendChild(select);
         return seccion;
     }}
 
@@ -5167,15 +5169,15 @@ def orden(orden_id):
         aceptar.addEventListener("click", function() {{
             const destino = new URL(configuracionUrl, window.location.origin);
             for (let i = 1; i <= cantidadAcompanantes; i += 1) {{
-                const elegido = configuracionOpcionesGrid.querySelector('input[name="acompanante_' + i + '"]:checked');
-                if (!elegido) {{
+                const elegido = configuracionOpcionesGrid.querySelector('select[name="acompanante_' + i + '"]');
+                if (!elegido || !elegido.value) {{
                     alert("Debes seleccionar todos los acompañantes");
                     return;
                 }}
                 destino.searchParams.append("acompanante", elegido.value);
             }}
-            const bebida = configuracionOpcionesGrid.querySelector('input[name="bebida"]:checked');
-            if (!bebida) {{
+            const bebida = configuracionOpcionesGrid.querySelector('select[name="bebida"]');
+            if (!bebida || !bebida.value) {{
                 alert("Debes seleccionar una bebida");
                 return;
             }}
@@ -5242,8 +5244,102 @@ def orden(orden_id):
         modalConfiguracion.setAttribute("aria-hidden", "false");
     }}
 
+    function abrirConfiguracionSelect(btn) {{
+        if (btn.dataset.tipo === "combo") {{
+            abrirConfiguracionCombo(btn);
+            return;
+        }}
+
+        configuracionUrl = btn.dataset.url;
+        modalConfiguracionTitulo.textContent = "Configurar promocion";
+        modalConfiguracionProducto.textContent = btn.dataset.producto || "Producto";
+        configuracionOpcionesGrid.innerHTML = "";
+        configuracionOpcionesGrid.className = "combo-config";
+
+        const pollos = (btn.dataset.pollos || "").split("|").filter(Boolean);
+        const arroces = (btn.dataset.arroces || "").split("|").filter(Boolean);
+        const cantidadArroces = Number(btn.dataset.cantidadArroces || 0);
+        const cantidadRefrescos = Number(btn.dataset.cantidadRefrescos || 0);
+        const sabores = saboresRefresco.slice();
+
+        if (pollos.length) {{
+            configuracionOpcionesGrid.appendChild(crearGrupoRadio("Tipo de pollo", "pollo", pollos));
+        }}
+        for (let i = 1; i <= cantidadArroces; i += 1) {{
+            configuracionOpcionesGrid.appendChild(crearGrupoRadio(cantidadArroces === 1 ? "Arroz" : "Arroz " + i, "arroz_" + i, arroces));
+        }}
+        for (let i = 1; i <= cantidadRefrescos; i += 1) {{
+            configuracionOpcionesGrid.appendChild(crearGrupoRadio(cantidadRefrescos === 1 ? "Refresco" : "Refresco " + i, "sabor_" + i, sabores));
+        }}
+        configuracionOpcionesGrid.appendChild(crearGrupoRadio("Extra de lumpias", "extra_lumpias", ["Sin extra", "AÃ±adir RaciÃ³n de Lumpias (+$3.00)"]));
+
+        const aceptar = document.createElement("button");
+        aceptar.type = "button";
+        aceptar.className = "sabor-btn combo-aceptar";
+        aceptar.textContent = "Aceptar";
+        aceptar.addEventListener("click", function() {{
+            const destino = new URL(configuracionUrl, window.location.origin);
+            const campoPollo = configuracionOpcionesGrid.querySelector('select[name="pollo"]');
+            if (campoPollo) {{
+                if (!campoPollo.value) {{
+                    alert("Debes seleccionar un tipo de pollo");
+                    campoPollo.focus();
+                    return;
+                }}
+                destino.searchParams.append("pollo", campoPollo.value);
+            }}
+
+            for (let i = 1; i <= cantidadArroces; i += 1) {{
+                const arroz = configuracionOpcionesGrid.querySelector('select[name="arroz_' + i + '"]');
+                if (!arroz || !arroz.value) {{
+                    alert("Debes seleccionar todos los arroces");
+                    if (arroz) {{
+                        arroz.focus();
+                    }}
+                    return;
+                }}
+                destino.searchParams.append("arroz", arroz.value);
+            }}
+
+            for (let i = 1; i <= cantidadRefrescos; i += 1) {{
+                const sabor = configuracionOpcionesGrid.querySelector('select[name="sabor_' + i + '"]');
+                if (!sabor || !sabor.value) {{
+                    alert("Debes seleccionar todos los refrescos");
+                    if (sabor) {{
+                        sabor.focus();
+                    }}
+                    return;
+                }}
+                let saborFinal = sabor.value;
+                if (saborFinal === "Otro") {{
+                    saborFinal = prompt("Escribe el sabor del refresco");
+                    if (saborFinal === null || !saborFinal.trim()) {{
+                        return;
+                    }}
+                    saborFinal = saborFinal.trim();
+                }}
+                destino.searchParams.append("sabor", saborFinal);
+            }}
+
+            const extraLumpias = configuracionOpcionesGrid.querySelector('select[name="extra_lumpias"]');
+            if (!extraLumpias || !extraLumpias.value) {{
+                alert("Debes seleccionar si deseas extra de lumpias");
+                if (extraLumpias) {{
+                    extraLumpias.focus();
+                }}
+                return;
+            }}
+            destino.searchParams.append("extra_lumpias", extraLumpias.value.startsWith("AÃ±adir") ? "1" : "0");
+            window.location.href = destino.pathname + destino.search;
+        }});
+        configuracionOpcionesGrid.appendChild(aceptar);
+
+        modalConfiguracion.classList.add("activo");
+        modalConfiguracion.setAttribute("aria-hidden", "false");
+    }}
+
     document.querySelectorAll(".btn-configurable").forEach(function(btn) {{
-        btn.addEventListener("click", function() {{ abrirConfiguracion(btn); }});
+        btn.addEventListener("click", function() {{ abrirConfiguracionSelect(btn); }});
     }});
     cerrarModalConfiguracion.addEventListener("click", cerrarConfiguracion);
     modalConfiguracion.addEventListener("click", function(event) {{
