@@ -3232,14 +3232,14 @@ def index():
             listo_html += f"""
             <div class="card listo">
                 <div>
-                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} Â· {o[4]}</span><br>
-                    <span style="font-size:15px;">ðŸ‘¤ {o[5] if o[5] else 'â€”'}</span>
-                    <div class="mesonera">ðŸ‘© {o[9] if o[9] else 'â€”'}</div>
+                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} · {o[4]}</span><br>
+                    <span style="font-size:15px;">👤 {o[5] if o[5] else '—'}</span>
+                    <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
                 </div>
                 <div style="min-width:160px;">
                     <span class="estado" style="background:#1d4ed8; margin-bottom:8px;">Lista</span>
-                    <a href="/orden/{o[0]}" class="btn-ver">ðŸ” Ver detalle</a>
-                    <a href="/cobrar/{o[0]}" class="btn-cobrar">ðŸ’µ Cobrar</a>
+                    <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
+                    <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
                 </div>
             </div>
             """
