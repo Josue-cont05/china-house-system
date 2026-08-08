@@ -2135,6 +2135,7 @@ def proteger_sistema():
         "editar_usuario",
         "activar_usuario",
         "activar_edicion_emergencia",
+        "ordenes_listas",
         "reset_neko",
     }
 
@@ -2556,7 +2557,7 @@ def siguiente_numero():
         SELECT MAX(numero_orden)
         FROM ordenes
         WHERE fecha_hora >= ?
-          AND estado IN ('en cocina', 'cerrada')
+          AND estado IN ('en cocina', 'listo', 'cerrada')
           AND numero_orden IS NOT NULL
         """,
         (inicio_jornada,),
@@ -3049,6 +3050,7 @@ def index():
     .card { background: var(--tarjeta); color: var(--texto); padding: 16px; margin-bottom: 10px; border-radius: 12px; box-shadow: var(--sombra-suave); display: flex; flex-direction: column; gap: 10px; font-size: 16px; border: 1px solid var(--borde); border-left: 4px solid var(--borde); }
     .card.abierta { border-left-color: var(--naranja); }
     .card.en-cocina { border-left-color: var(--verde-neko); background: var(--tarjeta); }
+    .card.listo { border-left-color: var(--azul); background: var(--tarjeta); }
     .estado { padding: 4px 10px; border-radius: 20px; color: white; font-size: 11px; font-weight: 800; display: inline-block; letter-spacing: 0.5px; text-transform: uppercase; }
     .btn-ver { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; margin-bottom: 6px; font-weight: 700; background: #1d4ed8; color: white; }
     .btn-cobrar { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; font-weight: 700; background: var(--verde-neko); color: #0F1115; }
@@ -3111,6 +3113,12 @@ def index():
     if usuario_es_admin_cierre():
         boton_cerrar_jornada = (
             '<a href="/cerrar_jornada" class="btn-cierre-jornada">🔒 Cerrar jornada</a>'
+        )
+
+    boton_ordenes_listas = ""
+    if usuario_es_master():
+        boton_ordenes_listas = (
+            '<a href="/ordenes_listas" class="btn-cierre-jornada">Listas por cobrar</a>'
         )
 
     panel_izq_extra = ""
@@ -3178,6 +3186,7 @@ def index():
                 <button class="btn-nueva-orden" type="submit">➕ Crear orden</button>
             </form>
             {boton_cerrar_jornada}
+            {boton_ordenes_listas}
             {panel_izq_extra}
         </div>
         <div class="panel-der">
@@ -3185,6 +3194,7 @@ def index():
 
     abierta_html = ""
     cocina_html = ""
+    listo_html = ""
     historial_html = ""
 
     for o in ordenes:
@@ -3218,6 +3228,21 @@ def index():
                 </div>
             </div>
             """
+        elif o[6] == "listo":
+            listo_html += f"""
+            <div class="card listo">
+                <div>
+                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} Â· {o[4]}</span><br>
+                    <span style="font-size:15px;">ðŸ‘¤ {o[5] if o[5] else 'â€”'}</span>
+                    <div class="mesonera">ðŸ‘© {o[9] if o[9] else 'â€”'}</div>
+                </div>
+                <div style="min-width:160px;">
+                    <span class="estado" style="background:#1d4ed8; margin-bottom:8px;">Lista</span>
+                    <a href="/orden/{o[0]}" class="btn-ver">ðŸ” Ver detalle</a>
+                    <a href="/cobrar/{o[0]}" class="btn-cobrar">ðŸ’µ Cobrar</a>
+                </div>
+            </div>
+            """
         elif o[6] == "cerrada":
             historial_html += f"""
             <div class="historial-item">
@@ -3233,9 +3258,11 @@ def index():
         html += f'<div class="seccion-titulo">🟠 Órdenes abiertas</div>{abierta_html}'
     if cocina_html:
         html += f'<div class="seccion-titulo">🍳 En cocina</div>{cocina_html}'
+    if listo_html:
+        html += f'<div class="seccion-titulo">Listas por cobrar</div>{listo_html}'
     if historial_html:
         html += f'<div class="seccion-titulo">📚 Historial del día</div>{historial_html}'
-    if not abierta_html and not cocina_html:
+    if not abierta_html and not cocina_html and not listo_html:
         html += '<div style="text-align:center;padding:40px;color:#9ca3af;font-size:16px;">Sin órdenes activas</div>'
 
     html += """
@@ -4695,7 +4722,7 @@ def orden(orden_id):
     )
 
     boton_reimprimir = ""
-    if usuario_puede_reimprimir_cocina() and estado in ("en cocina", "cerrada"):
+    if usuario_puede_reimprimir_cocina() and estado in ("en cocina", "listo", "cerrada"):
         boton_reimprimir = (
             f'<a href="/reimprimir_cocina/{orden_id}" class="btn-accion" '
             'style="background:#8e44ad;">🔁 Reimprimir cocina</a>'
@@ -4957,7 +4984,7 @@ def orden(orden_id):
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">💵 Volver a cobrar</a>
         """
 
-    if not bloqueada_por_cierre and items and estado in ("abierta", "en cocina", "cerrada"):
+    if not bloqueada_por_cierre and items and estado in ("abierta", "en cocina", "listo", "cerrada"):
         html += f"""
         <a href="/reimprimir_factura/{orden_id}" class="btn-accion" style="background:#d35400;">🧾 Reimprimir factura</a>
         """
@@ -5646,9 +5673,9 @@ def reimprimir_cocina(orden_id):
         conn.close()
         return "Orden no encontrada"
 
-    if orden[1] not in ("en cocina", "cerrada"):
+    if orden[1] not in ("en cocina", "listo", "cerrada"):
         conn.close()
-        return "Solo se pueden reimprimir ordenes en cocina o cerradas"
+        return "Solo se pueden reimprimir ordenes en cocina, listas o cerradas"
 
     reimpresion_token = ahora_venezuela().strftime("%Y%m%d%H%M%S%f")
 
@@ -7306,6 +7333,93 @@ def marcar_listo(orden_id):
     conn.commit()
     conn.close()
     return redirect("/cocina")
+
+
+@app.route("/ordenes_listas")
+def ordenes_listas():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
+               u.nombre, COUNT(i.id), COALESCE(SUM(i.precio), 0)
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        LEFT JOIN orden_items i ON i.orden_id = o.id
+        WHERE o.estado = 'listo'
+          AND o.cierre_id IS NULL
+        GROUP BY o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente, u.nombre
+        ORDER BY o.id DESC
+        """
+    )
+    ordenes = cursor.fetchall()
+    conn.close()
+
+    filas = ""
+    for o in ordenes:
+        filas += f"""
+        <tr>
+            <td>{texto_numero_orden(o[1])}</td>
+            <td>{html_lib.escape(o[2] or '')}</td>
+            <td>{html_lib.escape(o[3] or '')}</td>
+            <td>{html_lib.escape(o[4] or '')}</td>
+            <td>{html_lib.escape(o[5] or '-')}</td>
+            <td>{html_lib.escape(o[6] or '-')}</td>
+            <td>{o[7]}</td>
+            <td>$ {round(a_float(o[8]), 2)}</td>
+            <td class="acciones">
+                <a href="/orden/{o[0]}">Ver</a>
+                <a class="cobrar" href="/cobrar/{o[0]}">Cobrar</a>
+            </td>
+        </tr>
+        """
+
+    if not filas:
+        filas = '<tr><td colspan="9" class="vacio">No hay ordenes listas pendientes por cobrar.</td></tr>'
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ font-family:'Segoe UI', Arial, sans-serif; margin:0; background:var(--gris-fondo); color:var(--texto); }}
+    .contenedor {{ width:95%; max-width:1100px; margin:18px auto; background:var(--panel); border:1px solid var(--borde); border-radius:14px; padding:18px; box-shadow:var(--sombra); }}
+    h1 {{ margin-top:0; color:var(--verde-neko); }}
+    table {{ width:100%; border-collapse:collapse; background:var(--tarjeta); }}
+    th, td {{ padding:10px; border-bottom:1px solid var(--borde); text-align:left; font-size:14px; }}
+    th {{ color:var(--texto-secundario); text-transform:uppercase; letter-spacing:0.5px; font-size:12px; }}
+    .acciones {{ display:flex; gap:8px; flex-wrap:wrap; }}
+    .acciones a {{ color:white; background:#1d4ed8; padding:8px 10px; border-radius:8px; text-decoration:none; font-weight:800; }}
+    .acciones a.cobrar {{ background:var(--verde-neko); color:#0F1115; }}
+    .vacio {{ text-align:center; color:var(--texto-secundario); padding:26px; }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">Inicio</a><a href="/cierre">Cierre</a>')}
+    <div class="contenedor">
+        <h1>Ordenes listas pendientes por cobrar</h1>
+        <table>
+            <thead>
+                <tr>
+                    <th>Orden</th>
+                    <th>Fecha</th>
+                    <th>Tipo</th>
+                    <th>Referencia</th>
+                    <th>Cliente</th>
+                    <th>Mesonera</th>
+                    <th>Items</th>
+                    <th>Total</th>
+                    <th>Acciones</th>
+                </tr>
+            </thead>
+            <tbody>{filas}</tbody>
+        </table>
+    </div>
+    </body>
+    </html>
+    """
 
 
 @app.route("/ordenes_cocina")
