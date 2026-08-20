@@ -763,10 +763,39 @@ def convertir_pago_equivalente(metodo, monto, tasa):
     return 0.0, 0.0
 
 
+def calcular_totales_cobro(precios_items, tasa, descuento_bs):
+    subtotal_usd = round(sum(a_float(precio) for precio in precios_items), 2)
+    tasa_cobro = a_float(tasa)
+    if tasa_cobro <= 0:
+        raise ValueError("La tasa de cobro debe ser mayor a 0")
+    descuento_bs = round(a_float(descuento_bs), 2)
+    total_bs = round(max((subtotal_usd * tasa_cobro) - descuento_bs, 0.0), 2)
+    total_usd = round((total_bs / tasa_cobro) if tasa_cobro else 0.0, 2)
+
+    return {
+        "subtotal_usd": subtotal_usd,
+        "tasa_cobro": tasa_cobro,
+        "descuento_bs": descuento_bs,
+        "total_usd": total_usd,
+        "total_bs": total_bs,
+    }
+
+
 def obtener_tasa_actual(cursor):
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
     row = cursor.fetchone()
     return float(row[0]) if row and row[0] else 1.0
+
+
+def obtener_tasa_cobro(cursor):
+    cursor.execute("SELECT valor FROM tasa LIMIT 1")
+    row = cursor.fetchone()
+    if not row or row[0] is None:
+        raise ValueError("Tasa de cobro no configurada")
+    tasa = a_float(row[0])
+    if tasa <= 0:
+        raise ValueError("Tasa de cobro invalida")
+    return tasa
 
 
 def asegurar_columna(tabla, columna, definicion):
@@ -2388,6 +2417,12 @@ def init_db():
     asegurar_columna("ordenes", "reimpresion_token", "TEXT")
     asegurar_columna("ordenes", "factura_reimpresion_token", "TEXT")
     asegurar_columna("ordenes", "inventario_descontado", "INTEGER DEFAULT 0")
+    asegurar_columna("ordenes", "fecha_cobro", "TEXT")
+    asegurar_columna("ordenes", "tasa_cobro", "REAL")
+    asegurar_columna("ordenes", "subtotal_usd", "REAL")
+    asegurar_columna("ordenes", "descuento_bs_snapshot", "REAL")
+    asegurar_columna("ordenes", "total_usd", "REAL")
+    asegurar_columna("ordenes", "total_bs", "REAL")
     asegurar_columna("orden_items", "indicacion", "TEXT")
     asegurar_columna("usuarios", "rol", "TEXT")
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
@@ -6024,12 +6059,17 @@ def cobrar(orden_id):
         conn.close()
         return "No puedes cobrar una orden vacia"
 
-    total_usd = sum(a_float(i[0]) for i in items)
-    tasa = obtener_tasa_actual(cursor)
-
-    total_bs = total_usd * tasa
+    precios_items = [i[0] for i in items]
     descuento_bs = a_float(o[8])
-    total_bs_final = max(total_bs - descuento_bs, 0)
+    try:
+        tasa = obtener_tasa_cobro(cursor)
+        totales_cobro = calcular_totales_cobro(precios_items, tasa, descuento_bs)
+    except ValueError:
+        conn.close()
+        return "Tasa de cobro invalida. Corrige la tasa antes de cobrar.", 400
+    total_usd = totales_cobro["subtotal_usd"]
+    total_bs = round(total_usd * tasa, 2)
+    total_bs_final = totales_cobro["total_bs"]
 
     error = ""
     metodo1_val = ""
@@ -6068,8 +6108,9 @@ def cobrar(orden_id):
         elif not metodo2_val and monto2 > 0:
             error = "Si colocas monto en pago 2, debes seleccionar el metodo"
         else:
-            total_bs_final = max(total_bs - descuento, 0)
-            total_usd_final = (total_bs_final / tasa) if tasa else 0.0
+            totales_cobro = calcular_totales_cobro(precios_items, tasa, descuento)
+            total_bs_final = totales_cobro["total_bs"]
+            total_usd_final = totales_cobro["total_usd"]
 
             pago1_bs, pago1_usd = convertir_pago_equivalente(metodo1_val, monto1, tasa)
             total_pagado_bs = pago1_bs
@@ -6089,54 +6130,75 @@ def cobrar(orden_id):
             else:
                 fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
 
-                cursor.execute("DELETE FROM pagos WHERE orden_id = ?", (orden_id,))
+                try:
+                    cursor.execute("DELETE FROM pagos WHERE orden_id = ?", (orden_id,))
 
-                if insertar_pago_1:
+                    if insertar_pago_1:
+                        cursor.execute(
+                            """
+                            INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (orden_id, metodo1_val, monto1, ref1_val, fecha),
+                        )
+
+                    if insertar_pago_2:
+                        cursor.execute(
+                            """
+                            INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (orden_id, metodo2_val, monto2, ref2_val, fecha),
+                        )
+
                     cursor.execute(
                         """
-                        INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-                        VALUES (?, ?, ?, ?, ?)
+                        UPDATE ordenes
+                        SET estado='cerrada',
+                            descuento=?,
+                            fecha_cobro=?,
+                            tasa_cobro=?,
+                            subtotal_usd=?,
+                            descuento_bs_snapshot=?,
+                            total_usd=?,
+                            total_bs=?
+                        WHERE id=?
+                          AND cierre_id IS NULL
+                          AND estado IN ('abierta', 'en cocina', 'listo', 'cerrada')
                         """,
-                        (orden_id, metodo1_val, monto1, ref1_val, fecha),
+                        (
+                            totales_cobro["descuento_bs"],
+                            fecha,
+                            totales_cobro["tasa_cobro"],
+                            totales_cobro["subtotal_usd"],
+                            totales_cobro["descuento_bs"],
+                            totales_cobro["total_usd"],
+                            totales_cobro["total_bs"],
+                            orden_id,
+                        ),
                     )
 
-                if insertar_pago_2:
-                    cursor.execute(
-                        """
-                        INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (orden_id, metodo2_val, monto2, ref2_val, fecha),
-                    )
+                    if getattr(cursor, "rowcount", 0) == 0:
+                        conn.rollback()
+                        conn.close()
+                        return "Esta orden ya fue cerrada o pertenece a un cierre de jornada"
 
-                cursor.execute(
-                    """
-                    UPDATE ordenes
-                    SET estado='cerrada', descuento=?
-                    WHERE id=?
-                      AND cierre_id IS NULL
-                      AND estado IN ('abierta', 'en cocina', 'listo', 'cerrada')
-                    """,
-                    (descuento, orden_id),
-                )
+                    if estado == "cerrada" and emergencia_activa(orden_id):
+                        registrar_auditoria_emergencia(
+                            cursor,
+                            orden_id,
+                            "volver_a_cobrar_emergencia",
+                            "Pagos reemplazados durante edicion de emergencia",
+                        )
 
-                if getattr(cursor, "rowcount", 0) == 0:
+                    descontar_inventario_por_orden(cursor, orden_id)
+
+                    conn.commit()
+                    conn.close()
+                except Exception:
                     conn.rollback()
                     conn.close()
-                    return "Esta orden ya fue cerrada o pertenece a un cierre de jornada"
-
-                if estado == "cerrada" and emergencia_activa(orden_id):
-                    registrar_auditoria_emergencia(
-                        cursor,
-                        orden_id,
-                        "volver_a_cobrar_emergencia",
-                        "Pagos reemplazados durante edicion de emergencia",
-                    )
-
-                descontar_inventario_por_orden(cursor, orden_id)
-
-                conn.commit()
-                conn.close()
+                    raise
                 if estado == "cerrada":
                     desactivar_emergencia_sesion(orden_id)
                 return redirect("/")
