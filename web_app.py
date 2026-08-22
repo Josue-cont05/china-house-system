@@ -798,6 +798,101 @@ def obtener_tasa_cobro(cursor):
     return tasa
 
 
+MODOS_COBRO_VALIDOS = {"pagado", "parcial", "credito"}
+TOLERANCIA_COBRO = 0.0001
+
+
+def normalizar_modo_cobro(modo):
+    modo = (modo or "pagado").strip().lower()
+    return modo if modo in MODOS_COBRO_VALIDOS else ""
+
+
+def obtener_cliente_para_cxc(cursor, cliente_id):
+    try:
+        cliente_id = int(cliente_id)
+    except (TypeError, ValueError):
+        raise ValueError("Debes seleccionar un cliente valido para la cuenta por cobrar")
+
+    cursor.execute(
+        """
+        SELECT id, nombre
+        FROM clientes
+        WHERE id=? AND COALESCE(activo, 1)=1
+        """,
+        (cliente_id,),
+    )
+    cliente = cursor.fetchone()
+    if not cliente:
+        raise ValueError("Debes seleccionar un cliente valido para la cuenta por cobrar")
+    return cliente
+
+
+def obtener_cuenta_cxc_por_orden(cursor, orden_id):
+    cursor.execute("SELECT id FROM cuentas_por_cobrar WHERE orden_id=?", (orden_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def validar_recobro_cxc(cursor, orden_id):
+    cuenta_id = obtener_cuenta_cxc_por_orden(cursor, orden_id)
+    if cuenta_id is None:
+        return None
+
+    raise ValueError(
+        "Esta orden tiene una cuenta por cobrar asociada y no puede recobrarse directamente. "
+        "Debe utilizarse un proceso administrativo de reversion."
+    )
+
+
+def insertar_movimiento_cxc_inicial(cursor, cuenta_id, saldo_usd, fecha, usuario_id):
+    cursor.execute(
+        """
+        INSERT INTO cuentas_por_cobrar_movimientos (
+            cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
+            tasa_movimiento, metodo_pago, referencia, fecha,
+            usuario_id, observacion, movimiento_revertido_id,
+            referencia_externa_tipo, referencia_externa_id
+        )
+        VALUES (?, 'cargo', ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL)
+        """,
+        (
+            cuenta_id,
+            saldo_usd,
+            fecha,
+            usuario_id,
+            "Cargo inicial generado al cobrar la orden",
+        ),
+    )
+
+
+def crear_cuenta_por_cobrar_inicial(
+    cursor, orden_id, cliente_id, cliente_nombre, saldo_usd, fecha, usuario_id
+):
+    cursor.execute(
+        """
+        INSERT INTO cuentas_por_cobrar (
+            orden_id, cliente_id, cliente_nombre_snapshot, moneda_saldo,
+            monto_original_deuda, saldo_pendiente, fecha_generacion,
+            estado, usuario_id, observacion
+        )
+        VALUES (?, ?, ?, 'USD', ?, ?, ?, 'pendiente', ?, ?)
+        """,
+        (
+            orden_id,
+            cliente_id,
+            cliente_nombre,
+            saldo_usd,
+            saldo_usd,
+            fecha,
+            usuario_id,
+            "Cuenta por cobrar generada al cobrar la orden",
+        ),
+    )
+    cuenta_id = obtener_ultimo_id(cursor, "cuentas_por_cobrar")
+    insertar_movimiento_cxc_inicial(cursor, cuenta_id, saldo_usd, fecha, usuario_id)
+    return cuenta_id
+
+
 def asegurar_columna(tabla, columna, definicion):
     conn = get_connection()
     cursor = conn.cursor()
@@ -6100,7 +6195,7 @@ def cobrar(orden_id):
     cursor.execute(
         """
         SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
-               o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id
+               o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id, o.cliente_id
         FROM ordenes o
         LEFT JOIN usuarios u ON o.usuario_id = u.id
         WHERE o.id=?
@@ -6114,8 +6209,10 @@ def cobrar(orden_id):
         return "Orden no encontrada"
 
     estado = o[6]
+    cierre_id = o[10]
+    cliente_id_actual = o[11]
 
-    if o[10] is not None:
+    if cierre_id is not None:
         conn.close()
         return "Esta orden ya pertenece a un cierre de jornada. Primero debes revertirla desde reportes."
 
@@ -6152,6 +6249,8 @@ def cobrar(orden_id):
     descuento_val = f"{round(descuento_bs, 2)}"
 
     if request.method == "POST":
+        modo_cobro = normalizar_modo_cobro(request.form.get("modo_cobro"))
+        cliente_id_val = (request.form.get("cliente_id", "") or "").strip()
         metodo1_val = normalizar_metodo_pago(request.form.get("metodo1"))
         monto1_val = (request.form.get("monto1", "") or "").strip()
         ref1_val = (request.form.get("ref1", "") or "").strip()
@@ -6164,14 +6263,35 @@ def cobrar(orden_id):
         monto2 = a_float(monto2_val)
         descuento = a_float(descuento_val)
 
-        if metodo1_val == "":
-            error = "Debes seleccionar el metodo de pago principal"
-        elif metodo1_val not in METODOS_PAGO_VALIDOS:
-            error = "Metodo de pago principal invalido"
-        elif monto1 <= 0:
-            error = "El monto del pago 1 debe ser mayor a 0"
+        cliente_cxc = None
+        if modo_cobro == "":
+            conn.close()
+            return "Modo de cobro invalido", 400
+        elif modo_cobro in ("parcial", "credito"):
+            try:
+                cliente_cxc = obtener_cliente_para_cxc(cursor, cliente_id_val)
+            except ValueError as exc:
+                conn.close()
+                return str(exc), 400
+
+        if error:
+            pass
         elif descuento < 0:
             error = "El descuento no puede ser negativo"
+        elif modo_cobro == "credito" and (
+            metodo1_val or metodo2_val or monto1 > 0 or monto2 > 0
+        ):
+            conn.close()
+            return "El credito completo no debe registrar pagos", 400
+        elif modo_cobro == "parcial" and metodo1_val == "":
+            conn.close()
+            return "El cobro parcial requiere al menos un pago", 400
+        elif modo_cobro != "credito" and metodo1_val == "":
+            error = "Debes seleccionar el metodo de pago principal"
+        elif modo_cobro != "credito" and metodo1_val not in METODOS_PAGO_VALIDOS:
+            error = "Metodo de pago principal invalido"
+        elif modo_cobro != "credito" and monto1 <= 0:
+            error = "El monto del pago 1 debe ser mayor a 0"
         elif metodo2_val and metodo2_val not in METODOS_PAGO_VALIDOS:
             error = "Metodo de pago 2 invalido"
         elif metodo2_val and monto2 < 0:
@@ -6183,23 +6303,58 @@ def cobrar(orden_id):
             total_bs_final = totales_cobro["total_bs"]
             total_usd_final = totales_cobro["total_usd"]
 
-            pago1_bs, pago1_usd = convertir_pago_equivalente(metodo1_val, monto1, tasa)
-            total_pagado_bs = pago1_bs
-            total_pagado_usd = pago1_usd
+            insertar_pago_1 = False
+            insertar_pago_2 = False
+            total_pagado_bs = 0.0
+            total_pagado_usd = 0.0
 
-            insertar_pago_1 = bool(metodo1_val and monto1 > 0)
-            insertar_pago_2 = bool(metodo2_val and monto2 > 0 and pago1_usd + 0.0001 < total_usd_final)
-            if insertar_pago_2:
-                pago2_bs, pago2_usd = convertir_pago_equivalente(metodo2_val, monto2, tasa)
-                total_pagado_bs += pago2_bs
-                total_pagado_usd += pago2_usd
+            if modo_cobro != "credito":
+                pago1_bs, pago1_usd = convertir_pago_equivalente(metodo1_val, monto1, tasa)
+                total_pagado_bs = pago1_bs
+                total_pagado_usd = pago1_usd
 
-            if not insertar_pago_1:
+                insertar_pago_1 = bool(metodo1_val and monto1 > 0)
+                insertar_pago_2 = bool(
+                    metodo2_val and monto2 > 0 and pago1_usd + TOLERANCIA_COBRO < total_usd_final
+                )
+                if insertar_pago_2:
+                    pago2_bs, pago2_usd = convertir_pago_equivalente(metodo2_val, monto2, tasa)
+                    total_pagado_bs += pago2_bs
+                    total_pagado_usd += pago2_usd
+
+            saldo_cxc_usd = 0.0
+            if modo_cobro == "credito":
+                saldo_cxc_usd = total_usd_final
+            elif modo_cobro == "parcial":
+                saldo_cxc_usd = round(max(total_usd_final - total_pagado_usd, 0.0), 2)
+
+            if modo_cobro != "credito" and not insertar_pago_1:
+                if modo_cobro == "parcial":
+                    conn.close()
+                    return "El cobro parcial requiere al menos un pago", 400
                 error = "No hay pagos validos para registrar"
-            elif total_pagado_bs + 0.0001 < total_bs_final:
+            elif modo_cobro == "pagado" and total_pagado_bs + TOLERANCIA_COBRO < total_bs_final:
                 error = "Pago insuficiente"
+            elif modo_cobro == "parcial" and total_pagado_usd <= TOLERANCIA_COBRO:
+                conn.close()
+                return "El cobro parcial requiere al menos un pago", 400
+            elif modo_cobro == "parcial" and saldo_cxc_usd <= TOLERANCIA_COBRO:
+                conn.close()
+                return "El cobro parcial requiere saldo pendiente. Usa modo pagado.", 400
+            elif modo_cobro == "credito" and saldo_cxc_usd <= TOLERANCIA_COBRO:
+                conn.close()
+                return "El credito completo requiere saldo pendiente", 400
             else:
                 fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+                fecha_cobro = fecha if modo_cobro != "credito" else None
+                cliente_id_orden = cliente_cxc[0] if cliente_cxc else cliente_id_actual
+                cliente_nombre_orden = cliente_cxc[1] if cliente_cxc else o[5]
+
+                try:
+                    validar_recobro_cxc(cursor, orden_id)
+                except ValueError as exc:
+                    conn.close()
+                    return str(exc), 400
 
                 try:
                     cursor.execute("DELETE FROM pagos WHERE orden_id = ?", (orden_id,))
@@ -6227,12 +6382,15 @@ def cobrar(orden_id):
                         UPDATE ordenes
                         SET estado='cerrada',
                             descuento=?,
+                            fecha_venta=?,
                             fecha_cobro=?,
                             tasa_cobro=?,
                             subtotal_usd=?,
                             descuento_bs_snapshot=?,
                             total_usd=?,
-                            total_bs=?
+                            total_bs=?,
+                            cliente_id=?,
+                            cliente=?
                         WHERE id=?
                           AND cierre_id IS NULL
                           AND estado IN ('abierta', 'en cocina', 'listo', 'cerrada')
@@ -6240,11 +6398,14 @@ def cobrar(orden_id):
                         (
                             totales_cobro["descuento_bs"],
                             fecha,
+                            fecha_cobro,
                             totales_cobro["tasa_cobro"],
                             totales_cobro["subtotal_usd"],
                             totales_cobro["descuento_bs"],
                             totales_cobro["total_usd"],
                             totales_cobro["total_bs"],
+                            cliente_id_orden,
+                            cliente_nombre_orden,
                             orden_id,
                         ),
                     )
@@ -6253,6 +6414,17 @@ def cobrar(orden_id):
                         conn.rollback()
                         conn.close()
                         return "Esta orden ya fue cerrada o pertenece a un cierre de jornada"
+
+                    if saldo_cxc_usd > TOLERANCIA_COBRO:
+                        crear_cuenta_por_cobrar_inicial(
+                            cursor,
+                            orden_id,
+                            cliente_cxc[0],
+                            cliente_cxc[1],
+                            saldo_cxc_usd,
+                            fecha,
+                            session.get("usuario_id"),
+                        )
 
                     if estado == "cerrada" and emergencia_activa(orden_id):
                         registrar_auditoria_emergencia(

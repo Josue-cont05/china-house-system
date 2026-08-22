@@ -2,6 +2,7 @@ import importlib
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 TEST_DB = tempfile.NamedTemporaryFile(prefix="neko_snapshot_", suffix=".db", delete=False)
@@ -90,7 +91,36 @@ class SalesSnapshotTest(unittest.TestCase):
         conn.close()
         return orden_id
 
-    def _charge(self, orden_id, metodo1, monto1, metodo2="", monto2="", descuento=0):
+    def _charge(
+        self,
+        orden_id,
+        metodo1,
+        monto1,
+        metodo2="",
+        monto2="",
+        descuento=0,
+        modo_cobro="pagado",
+        cliente_id="",
+    ):
+        return self.client.post(
+            f"/cobrar/{orden_id}",
+            data={
+                "modo_cobro": modo_cobro,
+                "cliente_id": str(cliente_id),
+                "metodo1": metodo1,
+                "monto1": str(monto1),
+                "ref1": "ref1",
+                "metodo2": metodo2,
+                "monto2": str(monto2),
+                "ref2": "ref2",
+                "descuento": str(descuento),
+            },
+            follow_redirects=False,
+        )
+
+    def _charge_legacy_payload(
+        self, orden_id, metodo1, monto1, metodo2="", monto2="", descuento=0
+    ):
         return self.client.post(
             f"/cobrar/{orden_id}",
             data={
@@ -125,6 +155,43 @@ class SalesSnapshotTest(unittest.TestCase):
         pagos = cursor.fetchall()
         conn.close()
         return row, pagos
+
+    def _order_cxc_state(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT fecha_venta, fecha_cobro, cliente_id, cliente,
+                   tasa_cobro, subtotal_usd, descuento_bs_snapshot, total_usd, total_bs
+            FROM ordenes
+            WHERE id=?
+            """,
+            (orden_id,),
+        )
+        orden = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT cx.id, cx.cliente_id, cx.cliente_nombre_snapshot,
+                   cx.moneda_saldo, cx.monto_original_deuda, cx.saldo_pendiente,
+                   cx.estado, m.tipo, m.monto_saldo, m.fecha
+            FROM cuentas_por_cobrar cx
+            JOIN cuentas_por_cobrar_movimientos m ON m.cuenta_id = cx.id
+            WHERE cx.orden_id=?
+            ORDER BY m.id
+            """,
+            (orden_id,),
+        )
+        movimientos = cursor.fetchall()
+        conn.close()
+        return orden, movimientos
+
+    def _inventory_discounted(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT inventario_descontado FROM ordenes WHERE id=?", (orden_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0]
 
     def _columns(self, table):
         conn = self._conn()
@@ -192,6 +259,10 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(pagos[0][0], "usd")
         self.assertEqual(pagos[0][1], 10.0)
         self.assertEqual(pagos[0][3], snapshot[1])
+        orden, movimientos = self._order_cxc_state(orden_id)
+        self.assertIsNotNone(orden[0])
+        self.assertEqual(orden[0], snapshot[1])
+        self.assertEqual(movimientos, [])
 
     def test_bs_full_payment_snapshot(self):
         orden_id = self._create_order()
@@ -213,6 +284,223 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 4.0), ("bs_pago_movil", 1200.0)])
         self.assertEqual(pagos[0][3], snapshot[1])
         self.assertEqual(pagos[1][3], snapshot[1])
+
+    def test_legacy_payload_without_modo_cobro_defaults_to_paid(self):
+        orden_id = self._create_order(price=20.0)
+        response = self._charge_legacy_payload(orden_id, "usd", 5, "bs_pago_movil", 3000)
+        self.assertEqual(response.status_code, 302)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        orden, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "cerrada")
+        self.assertEqual(snapshot[2:7], (200.0, 20.0, 0.0, 20.0, 4000.0))
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 5.0), ("bs_pago_movil", 3000.0)])
+        self.assertEqual(orden[0], snapshot[1])
+        self.assertEqual(orden[1], snapshot[1])
+        self.assertEqual(movimientos, [])
+
+    def test_invalid_modo_cobro_returns_400_without_writes(self):
+        orden_id = self._create_order(price=20.0)
+        response = self._charge(orden_id, "usd", 20, modo_cobro="cualquier_cosa")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Modo de cobro invalido", response.data)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+        self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+
+    def test_partial_usd_payment_creates_receivable_for_remaining_balance(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Credito")
+        response = self._charge(
+            orden_id,
+            "usd",
+            12,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        orden, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "cerrada")
+        self.assertEqual(snapshot[2:7], (200.0, 20.0, 0.0, 20.0, 4000.0))
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 12.0)])
+        self.assertEqual(orden[0], snapshot[1])
+        self.assertEqual(orden[1], snapshot[1])
+        self.assertEqual(orden[2], cliente_id)
+        self.assertEqual(orden[3], "Cliente Credito")
+        self.assertEqual(len(movimientos), 1)
+        self.assertEqual(movimientos[0][1:9], (cliente_id, "Cliente Credito", "USD", 8.0, 8.0, "pendiente", "cargo", 8.0))
+        self.assertEqual(movimientos[0][9], snapshot[1])
+
+    def test_partial_bs_payment_creates_receivable_using_checkout_rate(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Bs")
+        response = self._charge(
+            orden_id,
+            "bs_pago_movil",
+            2400,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(movimientos[0][4], 8.0)
+        self.assertEqual(movimientos[0][5], 8.0)
+        self.assertEqual(movimientos[0][8], 8.0)
+
+    def test_partial_mixed_payment_creates_receivable_from_unpaid_usd_balance(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Mixto")
+        response = self._charge(
+            orden_id,
+            "usd",
+            5,
+            "bs_pago_movil",
+            1400,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 5.0), ("bs_pago_movil", 1400.0)])
+        self.assertEqual(pagos[0][3], snapshot[1])
+        self.assertEqual(pagos[1][3], snapshot[1])
+        self.assertEqual(movimientos[0][4], 8.0)
+        self.assertEqual(movimientos[0][8], 8.0)
+
+    def test_full_credit_creates_receivable_without_payments_or_fecha_cobro(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Full Credito")
+        response = self._charge(
+            orden_id,
+            "",
+            0,
+            modo_cobro="credito",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        orden, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "cerrada")
+        self.assertIsNone(snapshot[1])
+        self.assertEqual(snapshot[2:7], (200.0, 20.0, 0.0, 20.0, 4000.0))
+        self.assertEqual(pagos, [])
+        self.assertIsNotNone(orden[0])
+        self.assertIsNone(orden[1])
+        self.assertEqual(movimientos[0][4], 20.0)
+        self.assertEqual(movimientos[0][8], 20.0)
+        self.assertEqual(self._inventory_discounted(orden_id), 1)
+
+    def test_partial_or_credit_requires_existing_client(self):
+        for modo in ("parcial", "credito"):
+            with self.subTest(modo=modo):
+                self._clear_operational_data()
+                self._set_tasa(200)
+                orden_id = self._create_order(price=20.0)
+                response = self._charge(
+                    orden_id,
+                    "usd" if modo == "parcial" else "",
+                    5 if modo == "parcial" else 0,
+                    modo_cobro=modo,
+                    cliente_id=999999,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(b"cliente valido", response.data)
+
+                snapshot, pagos = self._snapshot(orden_id)
+                _, movimientos = self._order_cxc_state(orden_id)
+                self.assertEqual(snapshot[0], "abierta")
+                self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+                self.assertEqual(pagos, [])
+                self.assertEqual(movimientos, [])
+                self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+
+    def test_paid_mode_still_rejects_insufficient_payment_without_receivable(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Sin Credito")
+        response = self._charge(orden_id, "usd", 5, cliente_id=cliente_id)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Pago insuficiente", response.data)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+
+    def test_partial_with_zero_payments_is_rejected_without_debt(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Parcial Cero")
+        response = self._charge(
+            orden_id,
+            "",
+            0,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"cobro parcial requiere al menos un pago", response.data)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+        self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+
+    def test_partial_that_pays_full_total_is_rejected_without_debt(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Parcial Completo")
+        response = self._charge(
+            orden_id,
+            "usd",
+            20,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Usa modo pagado", response.data)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+        self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+
+    def test_credit_with_positive_payment_is_rejected_without_writes(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Credito Con Pago")
+        response = self._charge(
+            orden_id,
+            "usd",
+            5,
+            modo_cobro="credito",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"credito completo no debe registrar pagos", response.data)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+        self.assertIn(self._inventory_discounted(orden_id), (None, 0))
 
     def test_discount_snapshot_uses_current_bs_discount_semantics(self):
         orden_id = self._create_order()
@@ -273,6 +561,31 @@ class SalesSnapshotTest(unittest.TestCase):
                 self.assertEqual(snapshot[0], "abierta")
                 self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
                 self.assertEqual(pagos, [])
+
+    def test_invalid_rate_does_not_allow_full_credit_snapshot(self):
+        for tasa_invalida in (0, -1, None):
+            with self.subTest(tasa=tasa_invalida):
+                self._clear_operational_data()
+                self._set_tasa(tasa_invalida)
+                orden_id = self._create_order(price=20.0)
+                cliente_id = self._create_client("Cliente Tasa Invalida")
+
+                response = self._charge(
+                    orden_id,
+                    "",
+                    0,
+                    modo_cobro="credito",
+                    cliente_id=cliente_id,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(b"Tasa de cobro invalida", response.data)
+
+                snapshot, pagos = self._snapshot(orden_id)
+                _, movimientos = self._order_cxc_state(orden_id)
+                self.assertEqual(snapshot[0], "abierta")
+                self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+                self.assertEqual(pagos, [])
+                self.assertEqual(movimientos, [])
 
     def test_schema_initialization_is_idempotent_and_preserves_snapshot_columns(self):
         orden_id = self._create_order()
@@ -529,6 +842,166 @@ class SalesSnapshotTest(unittest.TestCase):
         snapshot, pagos = self._snapshot(orden_id)
         self.assertEqual(snapshot[2:7], (200.0, 10.0, 200.0, 9.0, 1800.0))
         self.assertEqual([(p[0], p[1]) for p in pagos], [("bs_pago_movil", 1800.0)])
+
+    def test_emergency_recharge_blocks_order_with_initial_receivable(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Recobro")
+        self.assertEqual(
+            self._charge(
+                orden_id,
+                "usd",
+                12,
+                modo_cobro="parcial",
+                cliente_id=cliente_id,
+            ).status_code,
+            302,
+        )
+        snapshot_antes, pagos_antes = self._snapshot(orden_id)
+        _, movimientos_antes = self._order_cxc_state(orden_id)
+
+        with self.client.session_transaction() as sess:
+            sess["emergencias_activas"] = [str(orden_id)]
+
+        response = self._charge(
+            orden_id,
+            "usd",
+            10,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"cuenta por cobrar asociada", response.data)
+
+        snapshot_despues, pagos_despues = self._snapshot(orden_id)
+        _, movimientos_despues = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot_despues, snapshot_antes)
+        self.assertEqual(pagos_despues, pagos_antes)
+        self.assertEqual(movimientos_despues, movimientos_antes)
+
+    def test_emergency_recharge_blocks_receivable_with_later_movements(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Con Abono")
+        self.assertEqual(
+            self._charge(
+                orden_id,
+                "usd",
+                12,
+                modo_cobro="parcial",
+                cliente_id=cliente_id,
+            ).status_code,
+            302,
+        )
+        _, movimientos_antes = self._order_cxc_state(orden_id)
+        cuenta_id = movimientos_antes[0][0]
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO cuentas_por_cobrar_movimientos (
+                cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
+                tasa_movimiento, metodo_pago, referencia, fecha,
+                usuario_id, observacion, movimiento_revertido_id,
+                referencia_externa_tipo, referencia_externa_id
+            )
+            VALUES (?, 'abono', -3, 'USD', 3, NULL, 'usd', 'ABONO-TEST',
+                    '2026-08-21 13:00:00', ?, 'Abono posterior', NULL, NULL, NULL)
+            """,
+            (cuenta_id, self._master_user_id()),
+        )
+        conn.commit()
+        conn.close()
+
+        with self.client.session_transaction() as sess:
+            sess["emergencias_activas"] = [str(orden_id)]
+
+        response = self._charge(
+            orden_id,
+            "usd",
+            10,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"cuenta por cobrar asociada", response.data)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos_despues = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[2:7], (200.0, 20.0, 0.0, 20.0, 4000.0))
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 12.0)])
+        self.assertEqual([(m[7], m[8]) for m in movimientos_despues], [("cargo", 8.0), ("abono", -3.0)])
+
+    def test_receivable_account_creation_failure_rolls_back_checkout(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Rollback Cuenta")
+        with mock.patch(
+            "web_app.crear_cuenta_por_cobrar_inicial",
+            side_effect=RuntimeError("fallo cuenta cxc"),
+        ):
+            response = self._charge(
+                orden_id,
+                "usd",
+                12,
+                modo_cobro="parcial",
+                cliente_id=cliente_id,
+            )
+        self.assertEqual(response.status_code, 500)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+        self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+
+    def test_initial_receivable_movement_failure_rolls_back_checkout(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Rollback")
+        with mock.patch(
+            "web_app.insertar_movimiento_cxc_inicial",
+            side_effect=RuntimeError("fallo movimiento cxc"),
+        ):
+            response = self._charge(
+                orden_id,
+                "usd",
+                12,
+                modo_cobro="parcial",
+                cliente_id=cliente_id,
+            )
+        self.assertEqual(response.status_code, 500)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+        self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+
+    def test_inventory_failure_rolls_back_payments_snapshot_and_receivable(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Inventario")
+        with mock.patch(
+            "web_app.descontar_inventario_por_orden",
+            side_effect=RuntimeError("fallo inventario"),
+        ):
+            response = self._charge(
+                orden_id,
+                "usd",
+                12,
+                modo_cobro="parcial",
+                cliente_id=cliente_id,
+            )
+        self.assertEqual(response.status_code, 500)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
+        self.assertIn(self._inventory_discounted(orden_id), (None, 0))
 
     def test_daily_close_preserves_snapshot(self):
         orden_id = self._create_order()
