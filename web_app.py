@@ -873,6 +873,76 @@ def crear_tablas_cierre_jornada():
     conn.close()
 
 
+def crear_tablas_cuentas_por_cobrar():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS clientes (
+            id {pk_autoincrement_sql()},
+            nombre TEXT NOT NULL,
+            telefono TEXT,
+            documento TEXT,
+            notas TEXT,
+            activo INTEGER DEFAULT 1,
+            fecha_creacion TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS cuentas_por_cobrar (
+            id {pk_autoincrement_sql()},
+            orden_id INTEGER NOT NULL,
+            cliente_id INTEGER NOT NULL,
+            cliente_nombre_snapshot TEXT NOT NULL,
+            moneda_saldo TEXT NOT NULL DEFAULT 'USD',
+            monto_original_deuda REAL NOT NULL DEFAULT 0 CHECK (monto_original_deuda >= 0),
+            saldo_pendiente REAL NOT NULL DEFAULT 0 CHECK (saldo_pendiente >= 0),
+            fecha_generacion TEXT,
+            estado TEXT NOT NULL DEFAULT 'pendiente'
+                CHECK (estado IN ('pendiente', 'pagada', 'anulada')),
+            usuario_id INTEGER,
+            observacion TEXT,
+            UNIQUE (orden_id)
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS cuentas_por_cobrar_movimientos (
+            id {pk_autoincrement_sql()},
+            cuenta_id INTEGER NOT NULL,
+            tipo TEXT NOT NULL
+                CHECK (tipo IN ('cargo', 'abono', 'ajuste', 'reverso', 'compensacion')),
+            -- Delta firmado del saldo de deuda, expresado en moneda_saldo de la cuenta.
+            monto_saldo REAL NOT NULL DEFAULT 0,
+            moneda_pago TEXT,
+            monto_pago REAL,
+            tasa_movimiento REAL,
+            metodo_pago TEXT,
+            referencia TEXT,
+            fecha TEXT,
+            usuario_id INTEGER,
+            observacion TEXT,
+            movimiento_revertido_id INTEGER,
+            referencia_externa_tipo TEXT,
+            referencia_externa_id INTEGER
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+    asegurar_columna("ordenes", "cliente_id", "INTEGER")
+    asegurar_columna("ordenes", "fecha_venta", "TEXT")
+    asegurar_columna("cuentas_por_cobrar_movimientos", "movimiento_revertido_id", "INTEGER")
+
+
 def crear_usuarios_iniciales():
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
 
@@ -2429,6 +2499,7 @@ def init_db():
     asegurar_columna_facturar()
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
+    crear_tablas_cuentas_por_cobrar()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
     asegurar_columna("producciones", "merma", "REAL DEFAULT 0")

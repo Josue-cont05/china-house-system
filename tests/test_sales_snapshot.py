@@ -39,9 +39,12 @@ class SalesSnapshotTest(unittest.TestCase):
         conn = self._conn()
         cursor = conn.cursor()
         for table in (
+            "cuentas_por_cobrar_movimientos",
+            "cuentas_por_cobrar",
             "pagos",
             "orden_items",
             "ordenes",
+            "clientes",
             "cierre_detalle",
             "cierres_caja",
             "movimientos_inventario",
@@ -122,6 +125,59 @@ class SalesSnapshotTest(unittest.TestCase):
         pagos = cursor.fetchall()
         conn.close()
         return row, pagos
+
+    def _columns(self, table):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table})")
+        columns = {row[1]: row for row in cursor.fetchall()}
+        conn.close()
+        return columns
+
+    def _create_client(self, nombre="Ferreteria El Vecino"):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
+            VALUES (?, ?, ?, ?, 1, ?)
+            """,
+            (nombre, "0412-0000000", "J-00000000-0", "Cliente de prueba", "2026-08-21 10:00:00"),
+        )
+        cliente_id = web_app.obtener_ultimo_id(cursor, "clientes")
+        conn.commit()
+        conn.close()
+        return cliente_id
+
+    def _create_receivable(self, orden_id, cliente_id, monto=8.0):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO cuentas_por_cobrar (
+                orden_id, cliente_id, cliente_nombre_snapshot, moneda_saldo,
+                monto_original_deuda, saldo_pendiente, fecha_generacion,
+                estado, usuario_id, observacion
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                orden_id,
+                cliente_id,
+                "Ferreteria El Vecino",
+                "USD",
+                monto,
+                monto,
+                "2026-08-21 10:05:00",
+                "pendiente",
+                self._master_user_id(),
+                "Cuenta de prueba",
+            ),
+        )
+        cuenta_id = web_app.obtener_ultimo_id(cursor, "cuentas_por_cobrar")
+        conn.commit()
+        conn.close()
+        return cuenta_id
 
     def test_usd_full_payment_snapshot(self):
         orden_id = self._create_order()
@@ -241,6 +297,226 @@ class SalesSnapshotTest(unittest.TestCase):
         ):
             self.assertEqual(columns.count(column), 1)
         self.assertEqual(order_count, 1)
+
+    def test_accounts_receivable_tables_and_order_columns_exist(self):
+        expected = {
+            "clientes": {
+                "id",
+                "nombre",
+                "telefono",
+                "documento",
+                "notas",
+                "activo",
+                "fecha_creacion",
+            },
+            "cuentas_por_cobrar": {
+                "id",
+                "orden_id",
+                "cliente_id",
+                "cliente_nombre_snapshot",
+                "moneda_saldo",
+                "monto_original_deuda",
+                "saldo_pendiente",
+                "fecha_generacion",
+                "estado",
+                "usuario_id",
+                "observacion",
+            },
+            "cuentas_por_cobrar_movimientos": {
+                "id",
+                "cuenta_id",
+                "tipo",
+                "monto_saldo",
+                "moneda_pago",
+                "monto_pago",
+                "tasa_movimiento",
+                "metodo_pago",
+                "referencia",
+                "fecha",
+                "usuario_id",
+                "observacion",
+                "movimiento_revertido_id",
+                "referencia_externa_tipo",
+                "referencia_externa_id",
+            },
+        }
+
+        for table, columns in expected.items():
+            self.assertTrue(columns.issubset(set(self._columns(table))))
+
+        orden_columns = self._columns("ordenes")
+        self.assertIn("cliente_id", orden_columns)
+        self.assertIn("fecha_venta", orden_columns)
+        self.assertEqual(self._columns("cuentas_por_cobrar")["cliente_nombre_snapshot"][3], 1)
+
+    def test_accounts_receivable_schema_initialization_is_idempotent_and_preserves_data(self):
+        orden_id = self._create_order()
+        cliente_id = self._create_client()
+        cuenta_id = self._create_receivable(orden_id, cliente_id)
+
+        web_app.init_db()
+        web_app.init_db()
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT nombre FROM clientes WHERE id=?", (cliente_id,))
+        cliente = cursor.fetchone()
+        cursor.execute("SELECT saldo_pendiente FROM cuentas_por_cobrar WHERE id=?", (cuenta_id,))
+        cuenta = cursor.fetchone()
+        orden_columns = self._columns("ordenes")
+        conn.close()
+
+        self.assertEqual(cliente[0], "Ferreteria El Vecino")
+        self.assertEqual(cuenta[0], 8.0)
+        self.assertEqual(list(orden_columns).count("cliente_id"), 1)
+        self.assertEqual(list(orden_columns).count("fecha_venta"), 1)
+
+    def test_can_create_client_receivable_and_movements(self):
+        orden_id = self._create_order()
+        cliente_id = self._create_client()
+        cuenta_id = self._create_receivable(orden_id, cliente_id)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO cuentas_por_cobrar_movimientos (
+                cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
+                tasa_movimiento, metodo_pago, referencia, fecha,
+                usuario_id, observacion, movimiento_revertido_id,
+                referencia_externa_tipo, referencia_externa_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cuenta_id,
+                "cargo",
+                8.0,
+                "USD",
+                8.0,
+                None,
+                None,
+                "CARGO-1",
+                "2026-08-21 10:05:00",
+                self._master_user_id(),
+                "Cargo inicial de prueba",
+                None,
+                None,
+                None,
+            ),
+        )
+        cargo_id = web_app.obtener_ultimo_id(cursor, "cuentas_por_cobrar_movimientos")
+        cursor.execute(
+            """
+            INSERT INTO cuentas_por_cobrar_movimientos (
+                cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
+                tasa_movimiento, metodo_pago, referencia, fecha,
+                usuario_id, observacion, movimiento_revertido_id,
+                referencia_externa_tipo, referencia_externa_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cuenta_id,
+                "abono",
+                -3.0,
+                "USD",
+                3.0,
+                None,
+                "usd",
+                "ABONO-1",
+                "2026-08-22 12:00:00",
+                self._master_user_id(),
+                "Abono de prueba",
+                None,
+                None,
+                None,
+            ),
+        )
+        abono_id = web_app.obtener_ultimo_id(cursor, "cuentas_por_cobrar_movimientos")
+        cursor.execute(
+            "SELECT SUM(monto_saldo) FROM cuentas_por_cobrar_movimientos WHERE cuenta_id=?",
+            (cuenta_id,),
+        )
+        saldo_por_movimientos_tras_abono = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO cuentas_por_cobrar_movimientos (
+                cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
+                tasa_movimiento, metodo_pago, referencia, fecha,
+                usuario_id, observacion, movimiento_revertido_id,
+                referencia_externa_tipo, referencia_externa_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cuenta_id,
+                "reverso",
+                3.0,
+                None,
+                None,
+                None,
+                None,
+                "REV-1",
+                "2026-08-22 12:05:00",
+                self._master_user_id(),
+                "Reverso de prueba",
+                abono_id,
+                None,
+                None,
+            ),
+        )
+        conn.commit()
+        cursor.execute(
+            """
+            SELECT c.nombre, cx.moneda_saldo, cx.saldo_pendiente,
+                   SUM(m.monto_saldo), MAX(m.movimiento_revertido_id)
+            FROM cuentas_por_cobrar cx
+            JOIN clientes c ON c.id = cx.cliente_id
+            JOIN cuentas_por_cobrar_movimientos m ON m.cuenta_id = cx.id
+            WHERE cx.id=?
+            GROUP BY c.nombre, cx.moneda_saldo, cx.saldo_pendiente
+            """,
+            (cuenta_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        self.assertIsNotNone(cargo_id)
+        self.assertEqual(saldo_por_movimientos_tras_abono, 5.0)
+        self.assertEqual(row, ("Ferreteria El Vecino", "USD", 8.0, 8.0, abono_id))
+
+    def test_receivable_order_id_is_unique(self):
+        orden_id = self._create_order()
+        cliente_id = self._create_client()
+        self._create_receivable(orden_id, cliente_id)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        with self.assertRaises(Exception):
+            cursor.execute(
+                """
+                INSERT INTO cuentas_por_cobrar (
+                    orden_id, cliente_id, moneda_saldo, monto_original_deuda,
+                    saldo_pendiente, fecha_generacion, estado
+                )
+                VALUES (?, ?, 'USD', 1, 1, '2026-08-21 11:00:00', 'pendiente')
+                """,
+                (orden_id, cliente_id),
+            )
+        conn.rollback()
+        conn.close()
+
+    def test_legacy_order_has_nullable_client_id_and_fecha_venta(self):
+        orden_id = self._create_order()
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT cliente_id, fecha_venta FROM ordenes WHERE id=?", (orden_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        self.assertEqual(row, (None, None))
 
     def test_recharge_updates_snapshot_and_replaces_payments(self):
         orden_id = self._create_order()
