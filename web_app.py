@@ -749,6 +749,33 @@ def monto_formateado_segun_metodo(metodo, monto):
     return f"Bs {round(monto, 2)}"
 
 
+def formato_usd(monto):
+    return f"$ {a_float(monto):,.2f}"
+
+
+def formato_bs(monto):
+    return f"Bs {a_float(monto):,.2f}"
+
+
+def texto_fecha_corta(fecha):
+    if not fecha:
+        return "-"
+    return str(fecha)[:16]
+
+
+def estado_cxc_badge(estado):
+    estado = (estado or "pendiente").lower()
+    clases = {
+        "pendiente": "estado-pendiente",
+        "pagada": "estado-pagada",
+        "anulada": "estado-anulada",
+    }
+    return (
+        f'<span class="badge-estado {clases.get(estado, "estado-anulada")}">'
+        f'{html_lib.escape(estado)}</span>'
+    )
+
+
 def convertir_pago_equivalente(metodo, monto, tasa):
     metodo = normalizar_metodo_pago(metodo)
     monto = a_float(monto)
@@ -825,6 +852,506 @@ def obtener_cliente_para_cxc(cursor, cliente_id):
     if not cliente:
         raise ValueError("Debes seleccionar un cliente valido para la cuenta por cobrar")
     return cliente
+
+
+def listar_clientes_activos(cursor, busqueda=""):
+    busqueda = (busqueda or "").strip().lower()
+    params = []
+    filtro = ""
+    if busqueda:
+        filtro = """
+          AND (
+              LOWER(nombre) LIKE ?
+              OR LOWER(COALESCE(telefono, '')) LIKE ?
+              OR LOWER(COALESCE(documento, '')) LIKE ?
+          )
+        """
+        patron = f"%{busqueda}%"
+        params = [patron, patron, patron]
+
+    cursor.execute(
+        f"""
+        SELECT id, nombre, telefono, documento
+        FROM clientes
+        WHERE COALESCE(activo, 1)=1
+        {filtro}
+        ORDER BY LOWER(nombre), id
+        LIMIT 100
+        """,
+        params,
+    )
+    return cursor.fetchall()
+
+
+def cliente_json_desde_fila(cliente):
+    return {
+        "id": cliente[0],
+        "nombre": cliente[1] or "",
+        "telefono": cliente[2] or "",
+        "documento": cliente[3] or "",
+    }
+
+
+def filtros_clientes_admin(busqueda, filtro):
+    condiciones = []
+    params = []
+    busqueda = (busqueda or "").strip().lower()
+    filtro = (filtro or "todos").strip().lower()
+
+    if busqueda:
+        condiciones.append(
+            """
+            (
+                LOWER(c.nombre) LIKE ?
+                OR LOWER(COALESCE(c.telefono, '')) LIKE ?
+                OR LOWER(COALESCE(c.documento, '')) LIKE ?
+            )
+            """
+        )
+        patron = f"%{busqueda}%"
+        params.extend([patron, patron, patron])
+
+    if filtro == "activos":
+        condiciones.append("COALESCE(c.activo, 1)=1")
+    elif filtro == "inactivos":
+        condiciones.append("COALESCE(c.activo, 1)=0")
+    elif filtro == "con_saldo":
+        condiciones.append(
+            """
+            EXISTS (
+                SELECT 1 FROM cuentas_por_cobrar cxp
+                WHERE cxp.cliente_id = c.id
+                AND cxp.estado = 'pendiente'
+                AND cxp.saldo_pendiente > 0
+            )
+            """
+        )
+    elif filtro == "sin_saldo":
+        condiciones.append(
+            """
+            NOT EXISTS (
+                SELECT 1 FROM cuentas_por_cobrar cxs
+                WHERE cxs.cliente_id = c.id
+                AND cxs.estado = 'pendiente'
+                AND cxs.saldo_pendiente > 0
+            )
+            """
+        )
+
+    where = "WHERE " + " AND ".join(condiciones) if condiciones else ""
+    return where, params
+
+
+def listar_clientes_admin(cursor, busqueda="", filtro="todos"):
+    where, params = filtros_clientes_admin(busqueda, filtro)
+    cursor.execute(
+        f"""
+        SELECT
+            c.id,
+            c.nombre,
+            COALESCE(c.telefono, ''),
+            COALESCE(c.documento, ''),
+            COALESCE(c.activo, 1),
+            COALESCE(SUM(CASE
+                WHEN cx.estado='pendiente' THEN cx.saldo_pendiente
+                ELSE 0
+            END), 0) AS saldo_pendiente_total,
+            COALESCE(SUM(CASE
+                WHEN cx.estado='pendiente' AND cx.saldo_pendiente > 0 THEN 1
+                ELSE 0
+            END), 0) AS cuentas_pendientes,
+            COALESCE(SUM(CASE WHEN cx.estado='pagada' THEN 1 ELSE 0 END), 0) AS cuentas_pagadas
+        FROM clientes c
+        LEFT JOIN cuentas_por_cobrar cx ON cx.cliente_id = c.id
+        {where}
+        GROUP BY c.id, c.nombre, c.telefono, c.documento, c.activo
+        ORDER BY COALESCE(c.activo, 1) DESC, LOWER(c.nombre), c.id
+        LIMIT 300
+        """,
+        params,
+    )
+    return cursor.fetchall()
+
+
+def obtener_cliente_admin(cursor, cliente_id):
+    cursor.execute(
+        """
+        SELECT id, nombre, COALESCE(telefono, ''), COALESCE(documento, ''),
+               COALESCE(notas, ''), COALESCE(activo, 1), fecha_creacion
+        FROM clientes
+        WHERE id=?
+        """,
+        (cliente_id,),
+    )
+    return cursor.fetchone()
+
+
+def obtener_resumen_cliente(cursor, cliente_id):
+    cursor.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN estado='pendiente' THEN saldo_pendiente ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN estado='pendiente' AND saldo_pendiente > 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN estado='pagada' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(monto_original_deuda), 0)
+        FROM cuentas_por_cobrar
+        WHERE cliente_id=?
+        """,
+        (cliente_id,),
+    )
+    row = cursor.fetchone() or (0, 0, 0, 0)
+    return {
+        "saldo_pendiente": a_float(row[0]),
+        "cuentas_pendientes": int(row[1] or 0),
+        "cuentas_pagadas": int(row[2] or 0),
+        "total_deuda_generada": a_float(row[3]),
+    }
+
+
+def listar_cuentas_cliente(cursor, cliente_id):
+    cursor.execute(
+        """
+        SELECT cx.id, cx.orden_id, o.numero_orden, cx.fecha_generacion,
+               cx.monto_original_deuda, cx.saldo_pendiente, cx.estado,
+               cx.cliente_nombre_snapshot
+        FROM cuentas_por_cobrar cx
+        LEFT JOIN ordenes o ON o.id = cx.orden_id
+        WHERE cx.cliente_id=?
+        ORDER BY cx.fecha_generacion DESC, cx.id DESC
+        """,
+        (cliente_id,),
+    )
+    return cursor.fetchall()
+
+
+def filtros_cxc_admin(busqueda, estado, cliente_id):
+    condiciones = []
+    params = []
+    busqueda = (busqueda or "").strip().lower()
+    estado = (estado or "pendiente").strip().lower()
+    cliente_id = (str(cliente_id or "")).strip()
+
+    if estado in ("pendiente", "pagada", "anulada"):
+        condiciones.append("cx.estado=?")
+        params.append(estado)
+
+    if cliente_id:
+        condiciones.append("cx.cliente_id=?")
+        params.append(cliente_id)
+
+    if busqueda:
+        condiciones.append(
+            """
+            (
+                LOWER(cx.cliente_nombre_snapshot) LIKE ?
+                OR LOWER(COALESCE(c.nombre, '')) LIKE ?
+                OR LOWER(COALESCE(c.telefono, '')) LIKE ?
+                OR LOWER(COALESCE(c.documento, '')) LIKE ?
+                OR LOWER(CAST(COALESCE(o.numero_orden, o.id) AS TEXT)) LIKE ?
+            )
+            """
+        )
+        patron = f"%{busqueda}%"
+        params.extend([patron, patron, patron, patron, patron])
+
+    where = "WHERE " + " AND ".join(condiciones) if condiciones else ""
+    return where, params
+
+
+def resumen_cuentas_por_cobrar(cursor):
+    cursor.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN estado='pendiente' THEN saldo_pendiente ELSE 0 END), 0),
+            COUNT(DISTINCT CASE WHEN estado='pendiente' AND saldo_pendiente > 0 THEN cliente_id END),
+            COALESCE(SUM(CASE WHEN estado='pendiente' AND saldo_pendiente > 0 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN estado='pagada' THEN 1 ELSE 0 END), 0)
+        FROM cuentas_por_cobrar
+        """
+    )
+    row = cursor.fetchone() or (0, 0, 0, 0)
+    return {
+        "saldo_total": a_float(row[0]),
+        "clientes_con_deuda": int(row[1] or 0),
+        "cuentas_pendientes": int(row[2] or 0),
+        "cuentas_pagadas": int(row[3] or 0),
+    }
+
+
+def listar_cuentas_por_cobrar_admin(cursor, busqueda="", estado="pendiente", cliente_id=""):
+    where, params = filtros_cxc_admin(busqueda, estado, cliente_id)
+    cursor.execute(
+        f"""
+        SELECT
+            cx.id,
+            cx.cliente_id,
+            cx.cliente_nombre_snapshot,
+            COALESCE(c.nombre, ''),
+            COALESCE(c.telefono, ''),
+            COALESCE(c.documento, ''),
+            cx.orden_id,
+            o.numero_orden,
+            cx.fecha_generacion,
+            cx.monto_original_deuda,
+            cx.saldo_pendiente,
+            cx.estado
+        FROM cuentas_por_cobrar cx
+        LEFT JOIN clientes c ON c.id = cx.cliente_id
+        LEFT JOIN ordenes o ON o.id = cx.orden_id
+        {where}
+        ORDER BY cx.fecha_generacion DESC, cx.id DESC
+        LIMIT 300
+        """,
+        params,
+    )
+    return cursor.fetchall()
+
+
+def calcular_suma_movimientos_cxc(cursor, cuenta_id):
+    cursor.execute(
+        """
+        SELECT COALESCE(SUM(monto_saldo), 0)
+        FROM cuentas_por_cobrar_movimientos
+        WHERE cuenta_id=?
+        """,
+        (cuenta_id,),
+    )
+    row = cursor.fetchone()
+    return round(a_float(row[0] if row else 0), 2)
+
+
+def calcular_pagado_inicial_orden(cursor, orden_id, tasa_historica):
+    cursor.execute(
+        """
+        SELECT metodo, monto
+        FROM pagos
+        WHERE orden_id=?
+        ORDER BY id
+        """,
+        (orden_id,),
+    )
+    pagos = cursor.fetchall()
+    total_usd = 0.0
+    total_bs = 0.0
+    for metodo, monto in pagos:
+        pago_bs, pago_usd = convertir_pago_equivalente(metodo, monto, tasa_historica)
+        total_bs += pago_bs
+        total_usd += pago_usd
+    return {
+        "usd": round(total_usd, 2),
+        "bs": round(total_bs, 2),
+        "pagos": pagos,
+    }
+
+
+def obtener_detalle_cuenta_cxc(cursor, cuenta_id):
+    cursor.execute(
+        """
+        SELECT
+            cx.id, cx.orden_id, cx.cliente_id, cx.cliente_nombre_snapshot,
+            cx.moneda_saldo, cx.monto_original_deuda, cx.saldo_pendiente,
+            cx.fecha_generacion, cx.estado, COALESCE(cx.observacion, ''),
+            COALESCE(c.nombre, ''), COALESCE(c.telefono, ''), COALESCE(c.documento, ''),
+            o.numero_orden, o.fecha_venta, o.fecha_cobro, o.tasa_cobro,
+            o.subtotal_usd, o.descuento_bs_snapshot, o.total_usd, o.total_bs
+        FROM cuentas_por_cobrar cx
+        LEFT JOIN clientes c ON c.id = cx.cliente_id
+        LEFT JOIN ordenes o ON o.id = cx.orden_id
+        WHERE cx.id=?
+        """,
+        (cuenta_id,),
+    )
+    cuenta = cursor.fetchone()
+    if not cuenta:
+        return None
+
+    cursor.execute(
+        """
+        SELECT m.fecha, m.tipo, m.monto_saldo, m.moneda_pago, m.monto_pago,
+               m.tasa_movimiento, m.metodo_pago, m.referencia,
+               COALESCE(u.nombre, ''), COALESCE(m.observacion, '')
+        FROM cuentas_por_cobrar_movimientos m
+        LEFT JOIN usuarios u ON u.id = m.usuario_id
+        WHERE m.cuenta_id=?
+        ORDER BY m.fecha ASC, m.id ASC
+        """,
+        (cuenta_id,),
+    )
+    movimientos = cursor.fetchall()
+    suma_movimientos = calcular_suma_movimientos_cxc(cursor, cuenta_id)
+    tasa_historica = a_float(cuenta[16])
+    pagado_inicial = calcular_pagado_inicial_orden(cursor, cuenta[1], tasa_historica)
+    inconsistente = abs(round(a_float(cuenta[6]) - suma_movimientos, 2)) > 0.01
+
+    return {
+        "cuenta": cuenta,
+        "movimientos": movimientos,
+        "suma_movimientos": suma_movimientos,
+        "pagado_inicial": pagado_inicial,
+        "inconsistente": inconsistente,
+    }
+
+
+def metodo_pago_es_usd(metodo):
+    return normalizar_metodo_pago(metodo) == "usd"
+
+
+def metodo_pago_es_bs(metodo):
+    return normalizar_metodo_pago(metodo) in ("punto_venta", "bs_pago_movil", "bs_efectivo")
+
+
+def moneda_pago_desde_metodo(metodo):
+    metodo = normalizar_metodo_pago(metodo)
+    if metodo_pago_es_usd(metodo):
+        return "USD"
+    if metodo_pago_es_bs(metodo):
+        return "BS"
+    return ""
+
+
+def insertar_movimiento_abono_cxc(
+    cursor,
+    cuenta_id,
+    monto_saldo,
+    moneda_pago,
+    monto_pago,
+    tasa_movimiento,
+    metodo_pago,
+    referencia,
+    fecha,
+    usuario_id,
+    observacion,
+):
+    cursor.execute(
+        """
+        INSERT INTO cuentas_por_cobrar_movimientos (
+            cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
+            tasa_movimiento, metodo_pago, referencia, fecha,
+            usuario_id, observacion, movimiento_revertido_id,
+            referencia_externa_tipo, referencia_externa_id
+        )
+        VALUES (?, 'abono', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        """,
+        (
+            cuenta_id,
+            monto_saldo,
+            moneda_pago,
+            monto_pago,
+            tasa_movimiento,
+            metodo_pago,
+            referencia,
+            fecha,
+            usuario_id,
+            observacion,
+        ),
+    )
+
+
+def actualizar_saldo_cxc(cursor, cuenta_id, nuevo_saldo, nuevo_estado):
+    cursor.execute(
+        """
+        UPDATE cuentas_por_cobrar
+        SET saldo_pendiente=?, estado=?
+        WHERE id=?
+        """,
+        (nuevo_saldo, nuevo_estado, cuenta_id),
+    )
+
+
+def registrar_abono_cuenta(
+    cursor,
+    cuenta_id,
+    metodo_pago,
+    monto_recibido,
+    referencia,
+    observacion,
+    usuario_id,
+):
+    cursor.execute(
+        """
+        SELECT id, saldo_pendiente, estado, moneda_saldo, cliente_nombre_snapshot
+        FROM cuentas_por_cobrar
+        WHERE id=?
+        """,
+        (cuenta_id,),
+    )
+    cuenta = cursor.fetchone()
+    if not cuenta:
+        raise ValueError("Cuenta por cobrar no encontrada")
+
+    cuenta_id, saldo_actual, estado, moneda_saldo, cliente_nombre = cuenta
+    saldo_actual = round(a_float(saldo_actual), 2)
+    suma_movimientos = calcular_suma_movimientos_cxc(cursor, cuenta_id)
+
+    if abs(round(saldo_actual - suma_movimientos, 2)) > 0.01:
+        raise ValueError("La cuenta tiene una inconsistencia entre saldo y movimientos. No se puede registrar el abono.")
+    if estado != "pendiente" or saldo_actual <= TOLERANCIA_COBRO:
+        raise ValueError("Solo se pueden registrar abonos en cuentas pendientes con saldo.")
+    if (moneda_saldo or "USD") != "USD":
+        raise ValueError("La moneda de saldo de la cuenta no esta soportada para abonos.")
+
+    metodo_pago = normalizar_metodo_pago(metodo_pago)
+    if metodo_pago not in METODOS_PAGO_VALIDOS:
+        raise ValueError("Metodo de pago invalido")
+
+    monto_pago = a_float(monto_recibido)
+    if monto_pago <= 0:
+        raise ValueError("El monto del abono debe ser mayor a 0.")
+
+    moneda_pago = moneda_pago_desde_metodo(metodo_pago)
+    tasa_movimiento = None
+    if moneda_pago == "USD":
+        abono_usd = round(monto_pago, 2)
+    elif moneda_pago == "BS":
+        try:
+            tasa_movimiento = obtener_tasa_cobro(cursor)
+        except ValueError:
+            raise ValueError("No hay una tasa de cambio valida para registrar el abono.")
+        abono_usd = round(monto_pago / tasa_movimiento, 2)
+    else:
+        raise ValueError("Metodo de pago invalido")
+
+    if abono_usd <= 0:
+        raise ValueError("El monto del abono debe ser mayor a 0.")
+    if abono_usd > saldo_actual + TOLERANCIA_COBRO:
+        raise ValueError(f"El abono supera el saldo pendiente de {formato_usd(saldo_actual)}.")
+
+    if abs(abono_usd - saldo_actual) <= TOLERANCIA_COBRO:
+        abono_usd = saldo_actual
+
+    nuevo_saldo = round(max(saldo_actual - abono_usd, 0.0), 2)
+    nuevo_estado = "pagada" if nuevo_saldo <= TOLERANCIA_COBRO else "pendiente"
+    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    observacion = (observacion or "").strip()
+    referencia = (referencia or "").strip()
+
+    insertar_movimiento_abono_cxc(
+        cursor,
+        cuenta_id,
+        -abono_usd,
+        moneda_pago,
+        round(monto_pago, 2),
+        tasa_movimiento,
+        metodo_pago,
+        referencia,
+        fecha,
+        usuario_id,
+        observacion,
+    )
+    actualizar_saldo_cxc(cursor, cuenta_id, nuevo_saldo, nuevo_estado)
+
+    return {
+        "cuenta_id": cuenta_id,
+        "cliente": cliente_nombre,
+        "saldo_anterior": saldo_actual,
+        "abono_usd": abono_usd,
+        "nuevo_saldo": nuevo_saldo,
+        "estado": nuevo_estado,
+        "moneda_pago": moneda_pago,
+        "monto_pago": round(monto_pago, 2),
+        "tasa_movimiento": tasa_movimiento,
+        "fecha": fecha,
+    }
 
 
 def obtener_cuenta_cxc_por_orden(cursor, orden_id):
@@ -2328,6 +2855,14 @@ def proteger_sistema():
         "crear_usuario",
         "editar_usuario",
         "activar_usuario",
+        "clientes",
+        "crear_cliente",
+        "detalle_cliente",
+        "editar_cliente",
+        "activar_cliente",
+        "cuentas_por_cobrar_admin",
+        "detalle_cuenta_por_cobrar",
+        "registrar_abono_cxc",
         "activar_edicion_emergencia",
         "ordenes_listas",
         "reset_neko",
@@ -2351,6 +2886,7 @@ def proteger_sistema():
         "reimprimir_factura",
         "factura",
         "cobrar",
+        "api_clientes",
         "editar_orden",
         "actualizar_indicacion_item",
         "eliminar_item",
@@ -2951,6 +3487,679 @@ def rol_desde_formulario():
     return rol
 
 
+def estilos_admin_cxc():
+    return """
+    body { margin:0; background:var(--gris-fondo); color:var(--texto); }
+    .contenido { padding:18px; max-width:1180px; margin:auto; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin:0 0 14px; }
+    .toolbar > div { flex:1 1 180px; }
+    .card-admin { background:var(--tarjeta); border:1px solid var(--borde); border-radius:10px; padding:16px; box-shadow:var(--sombra-suave); margin-bottom:14px; overflow:auto; }
+    .metricas { display:grid; grid-template-columns:repeat(4, minmax(140px, 1fr)); gap:10px; margin:12px 0; }
+    .metrica { background:var(--panel-secundario); border:1px solid var(--borde); border-radius:8px; padding:14px; }
+    .metrica small { color:var(--texto-secundario); font-weight:800; text-transform:uppercase; font-size:11px; }
+    .metrica b { display:block; font-size:24px; margin-top:6px; }
+    table { width:100%; border-collapse:collapse; min-width:760px; }
+    th, td { padding:10px; border-bottom:1px solid var(--borde); text-align:left; vertical-align:top; }
+    th { color:var(--verde-neko); background:var(--panel-secundario); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+    .monto { text-align:right; white-space:nowrap; font-weight:800; }
+    .acciones { display:flex; gap:8px; flex-wrap:wrap; }
+    .btn-mini { display:inline-block; padding:8px 12px; border-radius:7px; background:var(--azul); color:white; text-decoration:none; font-weight:800; border:0; cursor:pointer; }
+    .btn-sec { background:var(--panel-secundario); color:var(--texto); border:1px solid var(--borde); }
+    .btn-danger { background:#b91c1c; color:white; }
+    .badge-estado { display:inline-block; padding:4px 9px; border-radius:999px; font-size:12px; font-weight:900; text-transform:uppercase; }
+    .estado-pendiente { background:#fef3c7; color:#92400e; }
+    .estado-pagada { background:#dcfce7; color:#166534; }
+    .estado-anulada { background:#fee2e2; color:#991b1b; }
+    .tabs-cxc { display:grid; grid-template-columns:repeat(3, minmax(150px, 1fr)); gap:10px; margin:12px 0 16px; }
+    .tab-cxc { background:var(--panel-secundario); border:1px solid var(--borde); border-radius:8px; color:var(--texto); min-height:58px; padding:12px; text-decoration:none; display:flex; align-items:center; justify-content:center; text-align:center; font-weight:900; }
+    .tab-cxc.activo { background:var(--verde-neko); color:#0F1115; border-color:var(--verde-neko); }
+    .form-grid { display:grid; grid-template-columns:repeat(2, minmax(180px, 1fr)); gap:12px; }
+    .full { grid-column:1 / -1; }
+    .nota-alerta { background:#fff7ed; color:#7c2d12; border:1px solid #fed7aa; border-radius:8px; padding:12px; margin:10px 0; }
+    @media (max-width: 760px) {
+        .metricas, .form-grid { grid-template-columns:1fr; }
+        .contenido { padding:12px; }
+    }
+    """
+
+
+def tabs_cuentas_por_cobrar(activo):
+    items = [
+        ("cuentas", "/cuentas_por_cobrar", "Cuentas"),
+        ("clientes", "/cuentas_por_cobrar/clientes", "Cartera de clientes"),
+    ]
+    return (
+        '<div class="tabs-cxc">'
+        + "".join(
+            f'<a class="tab-cxc{" activo" if clave == activo else ""}" href="{url}">{texto}</a>'
+            for clave, url, texto in items
+        )
+        + "</div>"
+    )
+
+
+def opciones_filtro_cliente(filtro_actual):
+    opciones = [
+        ("todos", "Todos"),
+        ("con_saldo", "Con saldo pendiente"),
+        ("sin_saldo", "Sin saldo pendiente"),
+        ("activos", "Activos"),
+        ("inactivos", "Inactivos"),
+    ]
+    return "".join(
+        f'<option value="{valor}"{" selected" if valor == filtro_actual else ""}>{texto}</option>'
+        for valor, texto in opciones
+    )
+
+
+def opciones_estado_cxc(estado_actual):
+    opciones = [
+        ("pendiente", "Pendientes"),
+        ("pagada", "Pagadas"),
+        ("anulada", "Anuladas"),
+        ("todas", "Todas"),
+    ]
+    return "".join(
+        f'<option value="{valor}"{" selected" if valor == estado_actual else ""}>{texto}</option>'
+        for valor, texto in opciones
+    )
+
+
+@app.route("/clientes")
+@app.route("/cuentas_por_cobrar/clientes")
+def clientes():
+    if request.path == "/clientes":
+        return redirect("/cuentas_por_cobrar/clientes")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    busqueda = (request.args.get("q") or "").strip()
+    filtro = (request.args.get("filtro") or "todos").strip().lower()
+    clientes_rows = listar_clientes_admin(cursor, busqueda, filtro)
+    conn.close()
+
+    filas = ""
+    for row in clientes_rows:
+        cliente_id, nombre, telefono, documento, activo, saldo, cuentas, pagadas = row
+        estado = "Activo" if activo else "Inactivo"
+        filas += f"""
+        <tr>
+            <td><b>{html_lib.escape(nombre or '')}</b></td>
+            <td>{html_lib.escape(telefono or '-')}</td>
+            <td>{html_lib.escape(documento or '-')}</td>
+            <td>{estado}</td>
+            <td class="monto">{formato_usd(saldo)}</td>
+            <td class="monto">{int(cuentas or 0)}</td>
+            <td class="acciones">
+                <a class="btn-mini" href="/cuentas_por_cobrar/clientes/{cliente_id}">Ver</a>
+                <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/clientes/{cliente_id}/editar">Editar</a>
+            </td>
+        </tr>
+        """
+    if not filas:
+        filas = '<tr><td colspan="7">No hay clientes para este filtro.</td></tr>'
+
+    return f"""
+    <html>
+    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/cuentas_por_cobrar">Cuentas por cobrar</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Cuentas por cobrar</h1>
+        {tabs_cuentas_por_cobrar("clientes")}
+        <h2>Cartera de clientes</h2>
+        <div class="card-admin">
+            <form method="get" class="toolbar">
+                <div><label>Buscar</label><input name="q" value="{html_lib.escape(busqueda, quote=True)}" placeholder="Nombre, telefono o documento"></div>
+                <div><label>Filtro</label><select name="filtro">{opciones_filtro_cliente(filtro)}</select></div>
+                <button type="submit">Buscar</button>
+                <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/clientes">Limpiar</a>
+                <a class="btn-mini" href="/cuentas_por_cobrar/clientes/nuevo">Nuevo cliente</a>
+            </form>
+        </div>
+        <div class="card-admin">
+            <table>
+                <thead><tr><th>Cliente</th><th>Telefono</th><th>Documento</th><th>Estado</th><th>Saldo pendiente</th><th>Cuentas</th><th>Acciones</th></tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>
+    </div></body></html>
+    """
+
+
+@app.route("/clientes/nuevo", methods=["GET", "POST"])
+@app.route("/cuentas_por_cobrar/clientes/nuevo", methods=["GET", "POST"])
+def crear_cliente():
+    if request.method == "POST":
+        nombre = (request.form.get("nombre") or "").strip()
+        telefono = (request.form.get("telefono") or "").strip()
+        documento = (request.form.get("documento") or "").strip()
+        notas = (request.form.get("notas") or "").strip()
+        activo = 1 if request.form.get("activo", "1") == "1" else 0
+        if not nombre:
+            return "El nombre del cliente es obligatorio", 400
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (nombre, telefono, documento, notas, activo, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        cliente_id = obtener_ultimo_id(cursor, "clientes")
+        conn.commit()
+        conn.close()
+        return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}")
+
+    return render_form_cliente()
+
+
+@app.route("/clientes/<int:cliente_id>")
+@app.route("/cuentas_por_cobrar/clientes/<int:cliente_id>")
+def detalle_cliente(cliente_id):
+    if request.path.startswith("/clientes/"):
+        return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cliente = obtener_cliente_admin(cursor, cliente_id)
+    if not cliente:
+        conn.close()
+        return "Cliente no encontrado", 404
+    resumen = obtener_resumen_cliente(cursor, cliente_id)
+    cuentas = listar_cuentas_cliente(cursor, cliente_id)
+    conn.close()
+
+    filas = ""
+    for cuenta in cuentas:
+        cuenta_id, orden_id, numero, fecha, original, saldo, estado, snapshot = cuenta
+        filas += f"""
+        <tr>
+            <td><a href="/cuentas_por_cobrar/{cuenta_id}">#{html_lib.escape(str(numero or orden_id))}</a></td>
+            <td>{texto_fecha_corta(fecha)}</td>
+            <td class="monto">{formato_usd(original)}</td>
+            <td class="monto">{formato_usd(saldo)}</td>
+            <td>{estado_cxc_badge(estado)}</td>
+            <td>{html_lib.escape(snapshot or '')}</td>
+        </tr>
+        """
+    if not filas:
+        filas = '<tr><td colspan="6">Este cliente no tiene cuentas por cobrar.</td></tr>'
+
+    return f"""
+    <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/cuentas_por_cobrar">Cuentas por cobrar</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Cuentas por cobrar</h1>
+        {tabs_cuentas_por_cobrar("clientes")}
+        <h1>{html_lib.escape(cliente[1] or '')}</h1>
+        <div class="acciones" style="margin-bottom:12px;">
+            <a class="btn-mini" href="/cuentas_por_cobrar/clientes/{cliente_id}/editar">Editar cliente</a>
+            <a class="btn-mini btn-sec" href="/cuentas_por_cobrar?cliente_id={cliente_id}&estado=todas">Ver sus cuentas</a>
+            <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/clientes">Volver a cartera</a>
+        </div>
+        <div class="card-admin">
+            <h2>Datos</h2>
+            <p><b>Telefono:</b> {html_lib.escape(cliente[2] or '-')}</p>
+            <p><b>Documento:</b> {html_lib.escape(cliente[3] or '-')}</p>
+            <p><b>Notas:</b> {html_lib.escape(cliente[4] or '-')}</p>
+            <p><b>Estado:</b> {'Activo' if cliente[5] else 'Inactivo'}</p>
+        </div>
+        <div class="metricas">
+            <div class="metrica"><small>Saldo pendiente</small><b>{formato_usd(resumen["saldo_pendiente"])}</b></div>
+            <div class="metrica"><small>Cuentas pendientes</small><b>{resumen["cuentas_pendientes"]}</b></div>
+            <div class="metrica"><small>Cuentas pagadas</small><b>{resumen["cuentas_pagadas"]}</b></div>
+            <div class="metrica"><small>Deuda historica</small><b>{formato_usd(resumen["total_deuda_generada"])}</b></div>
+        </div>
+        <div class="card-admin">
+            <h2>Cuentas por cobrar</h2>
+            <table>
+                <thead><tr><th>Orden</th><th>Generada</th><th>Original</th><th>Pendiente</th><th>Estado</th><th>Snapshot cliente</th></tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>
+    </div></body></html>
+    """
+
+
+def render_form_cliente(cliente=None):
+    cliente = cliente or ("", "", "", "", "", 1, "")
+    cliente_id = cliente[0] or ""
+    titulo = "Nuevo cliente" if not cliente_id else "Editar cliente"
+    activo = int(cliente[5] if len(cliente) > 5 else 1)
+    opciones_activo = (
+        f'<option value="1"{" selected" if activo else ""}>Activo</option>'
+        f'<option value="0"{" selected" if not activo else ""}>Inactivo</option>'
+    )
+    accion_desactivar = ""
+    if cliente_id:
+        etiqueta = "Desactivar" if activo else "Activar"
+        estilo = "btn-danger" if activo else ""
+        accion_desactivar = f"""
+        <form method="post" action="/cuentas_por_cobrar/clientes/{cliente_id}/activar" style="margin-top:12px;">
+            <button type="submit" class="btn-mini {estilo}">{etiqueta}</button>
+        </form>
+        """
+
+    return f"""
+    <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/cuentas_por_cobrar">Cuentas por cobrar</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Cuentas por cobrar</h1>
+        {tabs_cuentas_por_cobrar("clientes")}
+        <h2>{titulo}</h2>
+        <div class="card-admin">
+            <form method="post" class="form-grid">
+                <div><label>Nombre</label><input name="nombre" required value="{html_lib.escape(cliente[1] or '', quote=True)}"></div>
+                <div><label>Telefono</label><input name="telefono" value="{html_lib.escape(cliente[2] or '', quote=True)}"></div>
+                <div><label>Documento</label><input name="documento" value="{html_lib.escape(cliente[3] or '', quote=True)}"></div>
+                <div><label>Estado</label><select name="activo">{opciones_activo}</select></div>
+                <div class="full"><label>Notas</label><textarea name="notas">{html_lib.escape(cliente[4] or '')}</textarea></div>
+                <div class="acciones full">
+                    <button type="submit">Guardar</button>
+                    <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/clientes">Cancelar</a>
+                </div>
+            </form>
+            {accion_desactivar}
+        </div>
+    </div></body></html>
+    """
+
+
+@app.route("/clientes/<int:cliente_id>/editar", methods=["GET", "POST"])
+@app.route("/cuentas_por_cobrar/clientes/<int:cliente_id>/editar", methods=["GET", "POST"])
+def editar_cliente(cliente_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cliente = obtener_cliente_admin(cursor, cliente_id)
+    if not cliente:
+        conn.close()
+        return "Cliente no encontrado", 404
+
+    if request.method == "POST":
+        nombre = (request.form.get("nombre") or "").strip()
+        telefono = (request.form.get("telefono") or "").strip()
+        documento = (request.form.get("documento") or "").strip()
+        notas = (request.form.get("notas") or "").strip()
+        activo = 1 if request.form.get("activo", "1") == "1" else 0
+        if not nombre:
+            conn.close()
+            return "El nombre del cliente es obligatorio", 400
+        cursor.execute(
+            """
+            UPDATE clientes
+            SET nombre=?, telefono=?, documento=?, notas=?, activo=?
+            WHERE id=?
+            """,
+            (nombre, telefono, documento, notas, activo, cliente_id),
+        )
+        conn.commit()
+        conn.close()
+        return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}")
+
+    conn.close()
+    return render_form_cliente(cliente)
+
+
+@app.route("/clientes/<int:cliente_id>/activar", methods=["POST"])
+@app.route("/cuentas_por_cobrar/clientes/<int:cliente_id>/activar", methods=["POST"])
+def activar_cliente(cliente_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COALESCE(activo, 1) FROM clientes WHERE id=?", (cliente_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return "Cliente no encontrado", 404
+    nuevo_activo = 0 if row[0] else 1
+    cursor.execute("UPDATE clientes SET activo=? WHERE id=?", (nuevo_activo, cliente_id))
+    conn.commit()
+    conn.close()
+    return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}")
+
+
+@app.route("/cuentas_por_cobrar")
+@app.route("/cuentas_por_cobrar/cuentas")
+def cuentas_por_cobrar_admin():
+    conn = get_connection()
+    cursor = conn.cursor()
+    busqueda = (request.args.get("q") or "").strip()
+    estado = (request.args.get("estado") or "pendiente").strip().lower()
+    cliente_id = (request.args.get("cliente_id") or "").strip()
+    resumen = resumen_cuentas_por_cobrar(cursor)
+    cuentas = listar_cuentas_por_cobrar_admin(cursor, busqueda, estado, cliente_id)
+    clientes_filtro = listar_clientes_admin(cursor, "", "todos")
+    conn.close()
+
+    opciones_cliente = ['<option value="">Todos los clientes</option>']
+    for cliente in clientes_filtro:
+        selected = " selected" if str(cliente[0]) == cliente_id else ""
+        opciones_cliente.append(
+            f'<option value="{cliente[0]}"{selected}>{html_lib.escape(cliente[1] or "")}</option>'
+        )
+
+    filas = ""
+    for row in cuentas:
+        cuenta_id, cli_id, snapshot, nombre_actual, telefono, documento, orden_id, numero, fecha, original, saldo, estado_row = row
+        cliente_texto = snapshot or nombre_actual or "Cliente"
+        filas += f"""
+        <tr>
+            <td><a href="/cuentas_por_cobrar/clientes/{cli_id}">{html_lib.escape(cliente_texto)}</a><br><small>{html_lib.escape(telefono or documento or '')}</small></td>
+            <td>#{html_lib.escape(str(numero or orden_id))}</td>
+            <td>{texto_fecha_corta(fecha)}</td>
+            <td class="monto">{formato_usd(original)}</td>
+            <td class="monto">{formato_usd(saldo)}</td>
+            <td>{estado_cxc_badge(estado_row)}</td>
+            <td><a class="btn-mini" href="/cuentas_por_cobrar/{cuenta_id}">Ver</a></td>
+        </tr>
+        """
+    if not filas:
+        filas = '<tr><td colspan="7">No hay cuentas por cobrar para este filtro.</td></tr>'
+
+    return f"""
+    <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Cuentas por cobrar</h1>
+        {tabs_cuentas_por_cobrar("cuentas")}
+        <div class="metricas">
+            <div class="metrica"><small>Saldo total pendiente</small><b>{formato_usd(resumen["saldo_total"])}</b></div>
+            <div class="metrica"><small>Clientes con deuda</small><b>{resumen["clientes_con_deuda"]}</b></div>
+            <div class="metrica"><small>Cuentas pendientes</small><b>{resumen["cuentas_pendientes"]}</b></div>
+            <div class="metrica"><small>Cuentas pagadas</small><b>{resumen["cuentas_pagadas"]}</b></div>
+        </div>
+        {f'''
+        <div class="card-admin">
+            <form method="get" class="toolbar">
+                <div><label>Buscar</label><input name="q" value="{html_lib.escape(busqueda, quote=True)}" placeholder="Cliente, orden, telefono o documento"></div>
+                <div><label>Estado</label><select name="estado">{opciones_estado_cxc(estado)}</select></div>
+                <div><label>Cliente</label><select name="cliente_id">{''.join(opciones_cliente)}</select></div>
+                <button type="submit">Filtrar</button>
+                <a class="btn-mini btn-sec" href="/cuentas_por_cobrar">Limpiar</a>
+            </form>
+        </div>
+        <div class="card-admin">
+            <h2>Cuentas</h2>
+            <table>
+                <thead><tr><th>Cliente</th><th>Orden</th><th>Generada</th><th>Original</th><th>Pendiente</th><th>Estado</th><th>Accion</th></tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>
+        '''}
+    </div></body></html>
+    """
+
+
+@app.route("/cuentas_por_cobrar/<int:cuenta_id>")
+def detalle_cuenta_por_cobrar(cuenta_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    detalle = obtener_detalle_cuenta_cxc(cursor, cuenta_id)
+    conn.close()
+    if not detalle:
+        return "Cuenta por cobrar no encontrada", 404
+
+    c = detalle["cuenta"]
+    movimientos = ""
+    for mov in detalle["movimientos"]:
+        fecha, tipo, monto_saldo, moneda_pago, monto_pago, tasa_mov, metodo, referencia, usuario, observacion = mov
+        signo = "+" if a_float(monto_saldo) > 0 else ""
+        movimientos += f"""
+        <tr>
+            <td>{texto_fecha_corta(fecha)}</td>
+            <td>{html_lib.escape(tipo or '')}</td>
+            <td class="monto">{signo}{formato_usd(monto_saldo)}</td>
+            <td>{html_lib.escape(moneda_pago or '-')}</td>
+            <td class="monto">{monto_formateado_segun_metodo(metodo, monto_pago) if monto_pago is not None else '-'}</td>
+            <td>{a_float(tasa_mov) if tasa_mov else '-'}</td>
+            <td>{html_lib.escape(etiqueta_metodo_pago(metodo))}</td>
+            <td>{html_lib.escape(referencia or '-')}</td>
+            <td>{html_lib.escape(usuario or '-')}</td>
+            <td>{html_lib.escape(observacion or '-')}</td>
+        </tr>
+        """
+    if not movimientos:
+        movimientos = '<tr><td colspan="10">No hay movimientos registrados.</td></tr>'
+
+    alerta = ""
+    if detalle["inconsistente"]:
+        print(
+            f"[CXC INCONSISTENTE] cuenta_id={c[0]} saldo={c[6]} suma_movimientos={detalle['suma_movimientos']}"
+        )
+        alerta = (
+            '<div class="nota-alerta">Atencion: el saldo cacheado no coincide con '
+            'la suma de movimientos. Revisar administrativamente.</div>'
+        )
+
+    numero_orden = c[13] or c[1]
+    pagado = detalle["pagado_inicial"]
+    fecha_venta = c[14] or c[7]
+    acciones_abono = ""
+    if not detalle["inconsistente"] and c[8] == "pendiente" and a_float(c[6]) > TOLERANCIA_COBRO:
+        acciones_abono = f"""
+        <div class="card-admin">
+            <h2>Acciones</h2>
+            <div class="acciones">
+                <a class="btn-mini" href="/cuentas_por_cobrar/{cuenta_id}/abono">Registrar abono</a>
+                <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/{cuenta_id}/abono?completo=1">Pagar saldo completo</a>
+            </div>
+        </div>
+        """
+    elif c[8] == "pagada" or a_float(c[6]) <= TOLERANCIA_COBRO:
+        acciones_abono = '<div class="card-admin"><h2>Cuenta pagada</h2><p>No hay saldo pendiente para abonar.</p></div>'
+    return f"""
+    <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/cuentas_por_cobrar">Cuentas por cobrar</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Cuenta por cobrar #{cuenta_id}</h1>
+        {tabs_cuentas_por_cobrar("cuentas")}
+        {alerta}
+        <div class="acciones" style="margin-bottom:12px;">
+            <a class="btn-mini" href="/cuentas_por_cobrar/clientes/{c[2]}">Ver cliente</a>
+            <a class="btn-mini btn-sec" href="/cuentas_por_cobrar">Volver a cuentas</a>
+            <a class="btn-mini btn-sec" href="/orden/{c[1]}">Ver orden</a>
+        </div>
+        <div class="metricas">
+            <div class="metrica"><small>Valor de venta</small><b>{formato_usd(c[19])}</b></div>
+            <div class="metrica"><small>Cobrado al cerrar</small><b>{formato_usd(pagado["usd"])}</b></div>
+            <div class="metrica"><small>Deuda generada</small><b>{formato_usd(c[5])}</b></div>
+            <div class="metrica"><small>Saldo actual</small><b>{formato_usd(c[6])}</b></div>
+        </div>
+        {acciones_abono}
+        <div class="card-admin">
+            <h2>Cliente</h2>
+            <p><b>Snapshot:</b> {html_lib.escape(c[3] or '')}</p>
+            <p><b>Nombre actual:</b> {html_lib.escape(c[10] or '-')}</p>
+            <p><b>Telefono:</b> {html_lib.escape(c[11] or '-')}</p>
+            <p><b>Documento:</b> {html_lib.escape(c[12] or '-')}</p>
+        </div>
+        <div class="card-admin">
+            <h2>Venta origen</h2>
+            <p><b>Orden:</b> #{html_lib.escape(str(numero_orden))}</p>
+            <p><b>Fecha de venta:</b> {texto_fecha_corta(fecha_venta)}</p>
+            <p><b>Total original de venta:</b> {formato_usd(c[19])} / {formato_bs(c[20])}</p>
+            <p><b>Pagado al momento:</b> {formato_usd(pagado["usd"])} / {formato_bs(pagado["bs"])}</p>
+            <p><b>Tasa historica:</b> {a_float(c[16])}</p>
+        </div>
+        <div class="card-admin">
+            <h2>Estado actual</h2>
+            <p><b>Deuda original:</b> {formato_usd(c[5])}</p>
+            <p><b>Saldo pendiente:</b> {formato_usd(c[6])}</p>
+            <p><b>Suma movimientos:</b> {formato_usd(detalle["suma_movimientos"])}</p>
+            <p><b>Estado:</b> {estado_cxc_badge(c[8])}</p>
+        </div>
+        <div class="card-admin">
+            <h2>Movimientos</h2>
+            <table>
+                <thead><tr><th>Fecha</th><th>Tipo</th><th>Monto saldo</th><th>Moneda pago</th><th>Monto pago</th><th>Tasa</th><th>Metodo</th><th>Referencia</th><th>Usuario</th><th>Observacion</th></tr></thead>
+                <tbody>{movimientos}</tbody>
+            </table>
+        </div>
+    </div></body></html>
+    """
+
+
+def opciones_metodos_abono(metodo_actual="usd"):
+    opciones = []
+    for metodo in METODOS_PAGO_VALIDOS:
+        etiqueta = etiqueta_metodo_pago(metodo)
+        selected = " selected" if metodo == metodo_actual else ""
+        opciones.append(f'<option value="{metodo}"{selected}>{html_lib.escape(etiqueta)}</option>')
+    return "".join(opciones)
+
+
+def render_form_abono_cxc(cuenta_id, detalle, error="", completo=False, valores=None):
+    valores = valores or {}
+    c = detalle["cuenta"]
+    tasa_actual = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        tasa_actual = obtener_tasa_cobro(cursor)
+        conn.close()
+    except Exception:
+        tasa_actual = None
+
+    metodo = valores.get("metodo_pago") or "usd"
+    monto_val = valores.get("monto") or (str(round(a_float(c[6]), 2)) if completo else "")
+    referencia = valores.get("referencia") or ""
+    observacion = valores.get("observacion") or ""
+    equivalente_bs = formato_bs(a_float(c[6]) * tasa_actual) if tasa_actual else "Tasa no disponible"
+    titulo = "Pagar saldo completo" if completo else "Registrar abono"
+
+    return f"""
+    <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/cuentas_por_cobrar">Cuentas</a><a href="/cuentas_por_cobrar/clientes">Cartera de clientes</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>Cuentas por cobrar</h1>
+        {tabs_cuentas_por_cobrar("cuentas")}
+        <h2>{titulo}</h2>
+        {"<div class='error'>" + html_lib.escape(error) + "</div>" if error else ""}
+        <div class="metricas">
+            <div class="metrica"><small>Cliente</small><b>{html_lib.escape(c[3] or c[10] or "-")}</b></div>
+            <div class="metrica"><small>Orden origen</small><b>#{html_lib.escape(str(c[13] or c[1]))}</b></div>
+            <div class="metrica"><small>Deuda original</small><b>{formato_usd(c[5])}</b></div>
+            <div class="metrica"><small>Saldo pendiente</small><b>{formato_usd(c[6])}</b></div>
+        </div>
+        <div class="card-admin">
+            <p><b>Equivalente para pago completo en Bs:</b> {equivalente_bs}</p>
+            <form method="post" class="form-grid" id="formAbonoCxc">
+                <div>
+                    <label>Metodo de pago</label>
+                    <select name="metodo_pago" id="metodo_pago_abono">{opciones_metodos_abono(metodo)}</select>
+                </div>
+                <div>
+                    <label>Monto recibido</label>
+                    <input name="monto" id="monto_abono" type="number" step="0.01" min="0.01" value="{html_lib.escape(str(monto_val), quote=True)}" required>
+                </div>
+                <div>
+                    <label>Referencia</label>
+                    <input name="referencia" value="{html_lib.escape(referencia, quote=True)}">
+                </div>
+                <div>
+                    <label>Observaci&oacute;n</label>
+                    <input name="observacion" value="{html_lib.escape(observacion, quote=True)}">
+                </div>
+                <div class="acciones full">
+                    <button type="submit">Confirmar</button>
+                    <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/{cuenta_id}">Cancelar</a>
+                </div>
+            </form>
+        </div>
+    </div>
+    <script>
+    const formAbono = document.getElementById("formAbonoCxc");
+    const metodoAbono = document.getElementById("metodo_pago_abono");
+    const montoAbono = document.getElementById("monto_abono");
+    const saldoActual = {round(a_float(c[6]), 2)};
+    const tasaActual = {json.dumps(tasa_actual)};
+    function metodoBs(metodo) {{
+        return metodo === "punto_venta" || metodo === "bs_pago_movil" || metodo === "bs_efectivo";
+    }}
+    function numeroAbono(valor) {{
+        const n = parseFloat(String(valor || "0").replace(",", "."));
+        return Number.isFinite(n) ? n : 0;
+    }}
+    formAbono.addEventListener("submit", function(event) {{
+        const monto = numeroAbono(montoAbono.value);
+        let equivalente = monto;
+        let mensaje = "Registrar abono de $" + equivalente.toFixed(2) + "\\n";
+        if (metodoBs(metodoAbono.value)) {{
+            if (!tasaActual || tasaActual <= 0) {{
+                event.preventDefault();
+                alert("No hay una tasa de cambio valida para registrar el abono.");
+                return;
+            }}
+            equivalente = monto / tasaActual;
+            mensaje = "Pago recibido: " + monto.toFixed(2) + " Bs\\nTasa: " + tasaActual.toFixed(2) + " Bs/$\\nAbono equivalente: $" + equivalente.toFixed(2) + "\\n";
+        }}
+        const nuevoSaldo = Math.max(saldoActual - equivalente, 0);
+        mensaje += "Saldo anterior: $" + saldoActual.toFixed(2) + "\\nNuevo saldo: $" + nuevoSaldo.toFixed(2) + "\\nConfirmar?";
+        if (!confirm(mensaje)) {{
+            event.preventDefault();
+        }}
+    }});
+    </script>
+    </body></html>
+    """
+
+
+@app.route("/cuentas_por_cobrar/<int:cuenta_id>/abono", methods=["GET", "POST"])
+def registrar_abono_cxc(cuenta_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    detalle = obtener_detalle_cuenta_cxc(cursor, cuenta_id)
+    if not detalle:
+        conn.close()
+        return "Cuenta por cobrar no encontrada", 404
+
+    completo = request.args.get("completo") == "1"
+    if request.method == "GET":
+        conn.close()
+        return render_form_abono_cxc(cuenta_id, detalle, completo=completo)
+
+    valores = {
+        "metodo_pago": request.form.get("metodo_pago", ""),
+        "monto": request.form.get("monto", ""),
+        "referencia": request.form.get("referencia", ""),
+        "observacion": request.form.get("observacion", ""),
+    }
+    try:
+        registrar_abono_cuenta(
+            cursor,
+            cuenta_id,
+            valores["metodo_pago"],
+            valores["monto"],
+            valores["referencia"],
+            valores["observacion"],
+            session.get("usuario_id"),
+        )
+        conn.commit()
+        conn.close()
+        return redirect(f"/cuentas_por_cobrar/{cuenta_id}")
+    except ValueError as exc:
+        conn.rollback()
+        detalle = obtener_detalle_cuenta_cxc(cursor, cuenta_id)
+        conn.close()
+        return render_form_abono_cxc(cuenta_id, detalle, error=str(exc), completo=completo, valores=valores), 400
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+
 @app.route("/usuarios")
 def usuarios():
     if not usuario_es_master():
@@ -3295,6 +4504,7 @@ def index():
         <a href="/usuarios">👥 Usuarios</a>
         <a href="/cocina">🍳 Cocina</a>
         """
+        menu_links += '<a href="/cuentas_por_cobrar">CxC</a>'
     elif rol_actual == "socio":
         menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
     elif rol_actual == "mesonera_reportes":
@@ -6187,6 +7397,49 @@ def activar_edicion_emergencia(orden_id):
     return redirect(f"/orden/{orden_id}")
 
 
+@app.route("/api/clientes", methods=["GET", "POST"])
+def api_clientes():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        datos = request.get_json(silent=True) or request.form
+        nombre = (datos.get("nombre", "") or "").strip()
+        telefono = (datos.get("telefono", "") or "").strip()
+        documento = (datos.get("documento", "") or "").strip()
+        notas = (datos.get("notas", "") or "").strip()
+
+        if not nombre:
+            conn.close()
+            return jsonify({"ok": False, "error": "El nombre del cliente es obligatorio"}), 400
+
+        fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute(
+            """
+            INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
+            VALUES (?, ?, ?, ?, 1, ?)
+            """,
+            (nombre, telefono, documento, notas, fecha),
+        )
+        cliente_id = obtener_ultimo_id(cursor, "clientes")
+        conn.commit()
+
+        cursor.execute(
+            "SELECT id, nombre, telefono, documento FROM clientes WHERE id=?",
+            (cliente_id,),
+        )
+        cliente = cursor.fetchone()
+        conn.close()
+        return jsonify({"ok": True, "cliente": cliente_json_desde_fila(cliente)})
+
+    clientes = [
+        cliente_json_desde_fila(cliente)
+        for cliente in listar_clientes_activos(cursor, request.args.get("q", ""))
+    ]
+    conn.close()
+    return jsonify({"ok": True, "clientes": clientes})
+
+
 @app.route("/cobrar/<int:orden_id>", methods=["GET", "POST"])
 def cobrar(orden_id):
     conn = get_connection()
@@ -6247,9 +7500,12 @@ def cobrar(orden_id):
     monto2_val = ""
     ref2_val = ""
     descuento_val = f"{round(descuento_bs, 2)}"
+    modo_cobro_val = "pagado"
+    cliente_id_val = str(cliente_id_actual or "")
 
     if request.method == "POST":
         modo_cobro = normalizar_modo_cobro(request.form.get("modo_cobro"))
+        modo_cobro_val = modo_cobro or (request.form.get("modo_cobro", "") or "").strip()
         cliente_id_val = (request.form.get("cliente_id", "") or "").strip()
         metodo1_val = normalizar_metodo_pago(request.form.get("metodo1"))
         monto1_val = (request.form.get("monto1", "") or "").strip()
@@ -6446,7 +7702,13 @@ def cobrar(orden_id):
                     desactivar_emergencia_sesion(orden_id)
                 return redirect("/")
 
+    clientes_cobro = listar_clientes_activos(cursor)
     conn.close()
+    clientes_cobro_json = json.dumps(
+        [cliente_json_desde_fila(cliente) for cliente in clientes_cobro],
+        ensure_ascii=False,
+    )
+    modo_cobro_seguro = modo_cobro_val if modo_cobro_val in MODOS_COBRO_VALIDOS else "pagado"
 
     return f"""
     <html>
@@ -6472,7 +7734,27 @@ def cobrar(orden_id):
     .metodo-btn.activo {{ border-color:var(--verde-neko); background:var(--verde-neko); color:#0F1115; }}
     .metodo-btn.sin-metodo {{ background:#242424; color:var(--texto-secundario); }}
     .metodo-btn.sin-metodo.activo {{ border-color:var(--texto-secundario); background:#3a3a3a; color:white; }}
+    .modo-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; margin:8px 0 12px; }}
+    .modo-btn {{ min-height:66px; padding:12px; border:2px solid var(--borde); border-radius:10px; background:var(--panel-secundario); color:var(--texto); font-size:16px; font-weight:900; cursor:pointer; }}
+    .modo-btn.activo {{ border-color:var(--verde-neko); background:var(--verde-neko); color:#0F1115; }}
+    .modo-ayuda {{ color:var(--texto-secundario); font-size:14px; margin:4px 0 0; }}
+    .saldo-panel {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; margin:12px 0; }}
+    .saldo-box {{ background:var(--panel-secundario); border:1px solid var(--borde); border-radius:8px; padding:12px; }}
+    .saldo-label {{ color:var(--texto-secundario); font-size:13px; font-weight:700; }}
+    .saldo-valor {{ font-size:20px; font-weight:900; margin-top:4px; }}
+    .cliente-panel {{ border:1px solid var(--borde); border-radius:10px; padding:14px; background:var(--panel-secundario); margin:12px 0; }}
+    .cliente-panel.oculto, .nuevo-cliente.oculto, .pagos-panel.oculto, .cliente-busqueda.oculto, .cliente-seleccion.oculto {{ display:none; }}
+    .cliente-resultados {{ display:grid; gap:8px; margin:10px 0; }}
+    .cliente-opcion {{ width:100%; min-height:62px; text-align:left; border:1px solid var(--borde); border-radius:8px; background:#242424; color:var(--texto); padding:11px 12px; box-shadow:none; }}
+    .cliente-opcion b {{ display:block; font-size:16px; }}
+    .cliente-opcion small {{ display:block; color:var(--texto-secundario); margin-top:4px; }}
+    .cliente-seleccion {{ border:1px solid var(--verde-neko); background:#11251a; border-radius:8px; padding:12px; margin:10px 0; }}
+    .cliente-seleccion small {{ color:var(--texto-secundario); display:block; margin-top:4px; }}
+    .accion-secundaria {{ background:#242424; color:var(--texto); border:1px solid var(--borde); }}
+    .nuevo-cliente {{ margin-top:10px; }}
+    .mensaje-ui {{ color:var(--texto-secundario); font-size:14px; min-height:18px; }}
     @media (max-width: 520px) {{ .metodos-grid {{ grid-template-columns:1fr; }} }}
+    @media (max-width: 520px) {{ .modo-grid, .saldo-panel {{ grid-template-columns:1fr; }} }}
     </style>
     </head>
     <body>
@@ -6491,29 +7773,76 @@ def cobrar(orden_id):
     <div class="total">Total final Bs: {round(total_bs_final, 2)}</div>
     <div class="sep"></div>
     {"<div class='error'>" + error + "</div>" if error else ""}
-    <form method="post">
+    <form method="post" id="formCobro">
+    <input type="hidden" name="modo_cobro" id="modo_cobro" value="{modo_cobro_seguro}">
+    <h3>Modo de cobro</h3>
+    <div class="modo-grid">
+        <button type="button" class="modo-btn" data-modo="pagado">Pagado</button>
+        <button type="button" class="modo-btn" data-modo="parcial">Parcial</button>
+        <button type="button" class="modo-btn" data-modo="credito">Cr&eacute;dito</button>
+    </div>
+    <div id="modoAyuda" class="modo-ayuda"></div>
+    <div id="clientePanel" class="cliente-panel oculto">
+        <label>Cliente para cuenta por cobrar</label>
+        <input type="hidden" name="cliente_id" id="cliente_id" value="{html_lib.escape(cliente_id_val or '', quote=True)}">
+        <div id="clienteSeleccion" class="cliente-seleccion oculto">
+            <div><b>Cliente seleccionado</b></div>
+            <div id="clienteSeleccionNombre"></div>
+            <small id="clienteSeleccionDetalle"></small>
+            <button type="button" class="btn accion-secundaria" id="cambiarCliente">Cambiar cliente</button>
+        </div>
+        <div id="clienteBusqueda" class="cliente-busqueda">
+            <input type="search" id="clienteBuscar" placeholder="Buscar por nombre, tel&eacute;fono o documento" autocomplete="off">
+            <div id="clienteResultados" class="cliente-resultados"></div>
+        </div>
+        <button type="button" class="btn accion-secundaria" id="mostrarNuevoCliente">+ Nuevo cliente</button>
+        <div id="nuevoClientePanel" class="nuevo-cliente oculto">
+            <input id="nuevoClienteNombre" placeholder="Nombre del cliente">
+            <input id="nuevoClienteTelefono" placeholder="Tel&eacute;fono">
+            <input id="nuevoClienteDocumento" placeholder="Documento">
+            <input id="nuevoClienteNotas" placeholder="Notas">
+            <button type="button" class="btn accion-secundaria" id="guardarNuevoCliente">Guardar cliente</button>
+            <div id="clienteMensaje" class="mensaje-ui"></div>
+        </div>
+    </div>
+    <div class="saldo-panel">
+        <div class="saldo-box">
+            <div class="saldo-label">Total</div>
+            <div class="saldo-valor" id="resumenTotal">$0.00</div>
+        </div>
+        <div class="saldo-box">
+            <div class="saldo-label">Pagado ahora</div>
+            <div class="saldo-valor" id="resumenPagado">$0.00</div>
+        </div>
+        <div class="saldo-box">
+            <div class="saldo-label">Saldo estimado</div>
+            <div class="saldo-valor" id="resumenSaldo">$0.00</div>
+        </div>
+    </div>
+    <div id="pagosPanel" class="pagos-panel">
     <h3>💳 Pago 1</h3>
     <input type="hidden" name="metodo1" id="metodo1" value="{metodo1_val}">
     <div class="metodos-grid" data-metodo-grupo="metodo1">
         <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="punto_venta">Punto de venta</button>
-        <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="bs_pago_movil">Pago móvil</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="bs_pago_movil">Pago m&oacute;vil</button>
         <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="bs_efectivo">Efectivo Bs</button>
         <button type="button" class="metodo-btn" data-metodo-target="metodo1" data-metodo="usd">Efectivo USD</button>
     </div>
     <input name="monto1" id="monto1" type="number" step="0.01" min="0.01" value="{monto1_val}" placeholder="Monto" required>
-    <input name="ref1" value="{ref1_val}" placeholder="Referencia">
+    <input name="ref1" id="ref1" value="{ref1_val}" placeholder="Referencia">
     <div class="sep"></div>
     <h3>💳 Pago 2 (opcional)</h3>
     <input type="hidden" name="metodo2" id="metodo2" value="{metodo2_val}">
     <div class="metodos-grid" data-metodo-grupo="metodo2">
-        <button type="button" class="metodo-btn sin-metodo" data-metodo-target="metodo2" data-metodo="">Sin método</button>
+        <button type="button" class="metodo-btn sin-metodo" data-metodo-target="metodo2" data-metodo="">Sin m&eacute;todo</button>
         <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="punto_venta">Punto de venta</button>
-        <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="bs_pago_movil">Pago móvil</button>
+        <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="bs_pago_movil">Pago m&oacute;vil</button>
         <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="bs_efectivo">Efectivo Bs</button>
         <button type="button" class="metodo-btn" data-metodo-target="metodo2" data-metodo="usd">Efectivo USD</button>
     </div>
     <input name="monto2" id="monto2" type="number" step="0.01" min="0" value="{monto2_val}" placeholder="Monto">
-    <input name="ref2" value="{ref2_val}" placeholder="Referencia">
+    <input name="ref2" id="ref2" value="{ref2_val}" placeholder="Referencia">
+    </div>
     <div class="sep"></div>
     <label>Descuento (Bs)</label>
     <input name="descuento" id="descuento" type="number" step="0.01" value="{descuento_val}">
@@ -6522,11 +7851,40 @@ def cobrar(orden_id):
     <a href="/orden/{orden_id}" class="volver">🏠 Volver</a>
     </div>
     <script>
+    const formCobro = document.getElementById("formCobro");
+    const modoCobro = document.getElementById("modo_cobro");
+    const clientePanel = document.getElementById("clientePanel");
+    const clienteId = document.getElementById("cliente_id");
+    const clienteBuscar = document.getElementById("clienteBuscar");
+    const clienteResultados = document.getElementById("clienteResultados");
+    const clienteBusqueda = document.getElementById("clienteBusqueda");
+    const clienteSeleccion = document.getElementById("clienteSeleccion");
+    const clienteSeleccionNombre = document.getElementById("clienteSeleccionNombre");
+    const clienteSeleccionDetalle = document.getElementById("clienteSeleccionDetalle");
+    const cambiarCliente = document.getElementById("cambiarCliente");
+    const pagosPanel = document.getElementById("pagosPanel");
+    const modoAyuda = document.getElementById("modoAyuda");
     const metodo1 = document.getElementById("metodo1");
     const monto1 = document.getElementById("monto1");
+    const ref1 = document.getElementById("ref1");
     const metodo2 = document.getElementById("metodo2");
     const monto2 = document.getElementById("monto2");
+    const ref2 = document.getElementById("ref2");
     const descuento = document.getElementById("descuento");
+    const resumenTotal = document.getElementById("resumenTotal");
+    const resumenPagado = document.getElementById("resumenPagado");
+    const resumenSaldo = document.getElementById("resumenSaldo");
+    const nuevoClientePanel = document.getElementById("nuevoClientePanel");
+    const mostrarNuevoCliente = document.getElementById("mostrarNuevoCliente");
+    const guardarNuevoCliente = document.getElementById("guardarNuevoCliente");
+    const clienteMensaje = document.getElementById("clienteMensaje");
+    const nuevoClienteNombre = document.getElementById("nuevoClienteNombre");
+    const nuevoClienteTelefono = document.getElementById("nuevoClienteTelefono");
+    const nuevoClienteDocumento = document.getElementById("nuevoClienteDocumento");
+    const nuevoClienteNotas = document.getElementById("nuevoClienteNotas");
+    let clientesActivos = {clientes_cobro_json};
+    let clienteSeleccionado = null;
+    let clienteBusquedaTimer = null;
     const totalUSD = {round(total_usd, 2)};
     const tasa = {round(tasa, 6)};
 
@@ -6543,6 +7901,10 @@ def cobrar(orden_id):
         return Number.isFinite(n) ? n : 0;
     }}
 
+    function formatoUSD(valor) {{
+        return "$" + Math.max(valor, 0).toFixed(2);
+    }}
+
     function totalFinalUSD() {{
         const descuentoBs = Math.max(numero(descuento.value), 0);
         return Math.max(totalUSD - (tasa ? descuentoBs / tasa : 0), 0);
@@ -6552,24 +7914,48 @@ def cobrar(orden_id):
         return totalFinalUSD() * tasa;
     }}
 
-    function pago1EnUSD() {{
-        const valor = Math.max(numero(monto1.value), 0);
-        if (metodoEsUSD(metodo1.value)) {{
+    function pagoEnUSD(metodo, monto) {{
+        const valor = Math.max(numero(monto), 0);
+        if (metodoEsUSD(metodo)) {{
             return valor;
         }}
-        if (metodoEsBs(metodo1.value)) {{
+        if (metodoEsBs(metodo)) {{
             return tasa ? valor / tasa : 0;
         }}
         return 0;
     }}
 
+    function pago1EnUSD() {{
+        return pagoEnUSD(metodo1.value, monto1.value);
+    }}
+
+    function pagoTotalEnUSD() {{
+        if (modoCobro.value === "credito") {{
+            return 0;
+        }}
+        return pago1EnUSD() + pagoEnUSD(metodo2.value, monto2.value);
+    }}
+
+    function saldoEstimadoUSD() {{
+        if (modoCobro.value === "credito") {{
+            return totalFinalUSD();
+        }}
+        return Math.max(totalFinalUSD() - pagoTotalEnUSD(), 0);
+    }}
+
     function recalcularPago2() {{
+        if (modoCobro.value === "parcial" || modoCobro.value === "credito") {{
+            actualizarResumenCobro();
+            return;
+        }}
         const restanteUSD = Math.max(totalFinalUSD() - pago1EnUSD(), 0);
         if (restanteUSD <= 0) {{
             monto2.value = "0.00";
+            actualizarResumenCobro();
             return;
         }}
         if (!metodo2.value) {{
+            actualizarResumenCobro();
             return;
         }}
         if (metodoEsUSD(metodo2.value)) {{
@@ -6577,6 +7963,15 @@ def cobrar(orden_id):
         }} else if (metodoEsBs(metodo2.value)) {{
             monto2.value = (restanteUSD * tasa).toFixed(2);
         }}
+        actualizarResumenCobro();
+    }}
+
+    function actualizarResumenCobro() {{
+        const total = totalFinalUSD();
+        const pagado = pagoTotalEnUSD();
+        resumenTotal.textContent = formatoUSD(total);
+        resumenPagado.textContent = formatoUSD(pagado);
+        resumenSaldo.textContent = formatoUSD(saldoEstimadoUSD());
     }}
 
     function actualizarBotonesMetodo(targetId) {{
@@ -6586,6 +7981,54 @@ def cobrar(orden_id):
         }});
     }}
 
+    function actualizarBotonesModo() {{
+        document.querySelectorAll(".modo-btn").forEach(function(btn) {{
+            btn.classList.toggle("activo", btn.dataset.modo === modoCobro.value);
+        }});
+    }}
+
+    function limpiarPagosCredito() {{
+        metodo1.value = "";
+        metodo2.value = "";
+        monto1.value = "0.00";
+        monto2.value = "0.00";
+        ref1.value = "";
+        ref2.value = "";
+        actualizarBotonesMetodo("metodo1");
+        actualizarBotonesMetodo("metodo2");
+    }}
+
+    function setPagosDeshabilitados(deshabilitado) {{
+        [metodo1, metodo2, monto1, monto2, ref1, ref2].forEach(function(input) {{
+            input.disabled = deshabilitado;
+        }});
+        document.querySelectorAll(".metodo-btn").forEach(function(btn) {{
+            btn.disabled = deshabilitado;
+        }});
+        monto1.required = !deshabilitado;
+        pagosPanel.classList.toggle("oculto", deshabilitado);
+    }}
+
+    function aplicarModo(modo, limpiarCredito) {{
+        modoCobro.value = modo;
+        actualizarBotonesModo();
+        clientePanel.classList.toggle("oculto", modo === "pagado");
+        if (modo === "credito") {{
+            if (limpiarCredito) {{
+                limpiarPagosCredito();
+            }}
+            setPagosDeshabilitados(true);
+            modoAyuda.textContent = "No se recibe dinero ahora. El total queda pendiente para el cliente.";
+        }} else {{
+            setPagosDeshabilitados(false);
+            modoAyuda.textContent = modo === "parcial"
+                ? "Recibe una parte ahora y deja el resto como saldo por cobrar."
+                : "Cierra la venta con el pago completo recibido.";
+        }}
+        recalcularPago2();
+        actualizarResumenCobro();
+    }}
+
     function seleccionarMetodo(targetId, valor) {{
         const input = document.getElementById(targetId);
         input.value = valor;
@@ -6593,7 +8036,7 @@ def cobrar(orden_id):
 
         if (targetId === "metodo1") {{
             if (metodoEsUSD(valor)) {{
-                monto1.value = totalUSD.toFixed(2);
+                monto1.value = totalFinalUSD().toFixed(2);
             }} else if (metodoEsBs(valor)) {{
                 monto1.value = totalFinalBs().toFixed(2);
             }}
@@ -6602,17 +8045,203 @@ def cobrar(orden_id):
         recalcularPago2();
     }}
 
+    function detalleCliente(cliente) {{
+        return [cliente.telefono, cliente.documento].filter(Boolean).join(" · ");
+    }}
+
+    function clienteSeleccionadoTexto() {{
+        return clienteSeleccionado ? clienteSeleccionado.nombre : "";
+    }}
+
+    function mostrarClienteSeleccionado(cliente) {{
+        clienteSeleccionado = cliente;
+        clienteId.value = String(cliente.id);
+        clienteSeleccionNombre.textContent = cliente.nombre;
+        clienteSeleccionDetalle.textContent = detalleCliente(cliente);
+        clienteSeleccion.classList.remove("oculto");
+        clienteBusqueda.classList.add("oculto");
+        clienteBuscar.value = "";
+        clienteResultados.innerHTML = "";
+    }}
+
+    function limpiarClienteSeleccionado() {{
+        clienteSeleccionado = null;
+        clienteId.value = "";
+        clienteSeleccion.classList.add("oculto");
+        clienteBusqueda.classList.remove("oculto");
+        clienteBuscar.focus();
+        renderClientes(clientesActivos.slice(0, 8));
+    }}
+
+    function botonCliente(cliente) {{
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cliente-opcion";
+        const detalle = detalleCliente(cliente);
+        btn.innerHTML = "<b></b><small></small>";
+        btn.querySelector("b").textContent = cliente.nombre;
+        btn.querySelector("small").textContent = detalle || "Sin telefono/documento";
+        btn.addEventListener("click", function() {{
+            mostrarClienteSeleccionado(cliente);
+        }});
+        return btn;
+    }}
+
+    function renderClientes(clientes) {{
+        clienteResultados.innerHTML = "";
+        if (!clientes.length) {{
+            const vacio = document.createElement("div");
+            vacio.className = "mensaje-ui";
+            vacio.textContent = "No hay clientes activos para esa busqueda.";
+            clienteResultados.appendChild(vacio);
+            return;
+        }}
+        clientes.slice(0, 8).forEach(function(cliente) {{
+            clienteResultados.appendChild(botonCliente(cliente));
+        }});
+    }}
+
+    async function buscarClientesApi(q) {{
+        const response = await fetch("/api/clientes?q=" + encodeURIComponent(q));
+        const data = await response.json();
+        if (!response.ok || !data.ok) {{
+            throw new Error(data.error || "No se pudo buscar clientes.");
+        }}
+        clientesActivos = data.clientes || [];
+        renderClientes(clientesActivos);
+    }}
+
+    function buscarClientesConDebounce() {{
+        clearTimeout(clienteBusquedaTimer);
+        const q = clienteBuscar.value.trim();
+        clienteBusquedaTimer = setTimeout(function() {{
+            if (!q) {{
+                renderClientes(clientesActivos.slice(0, 8));
+                return;
+            }}
+            buscarClientesApi(q).catch(function() {{
+                clienteResultados.innerHTML = '<div class="mensaje-ui">No se pudo buscar clientes.</div>';
+            }});
+        }}, 250);
+    }}
+
+    function agregarClienteLocal(cliente) {{
+        clientesActivos = clientesActivos.filter(function(actual) {{
+            return String(actual.id) !== String(cliente.id);
+        }});
+        clientesActivos.unshift(cliente);
+        mostrarClienteSeleccionado(cliente);
+    }}
+
+    document.querySelectorAll(".modo-btn").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{
+            aplicarModo(btn.dataset.modo, btn.dataset.modo === "credito");
+        }});
+    }});
+
     document.querySelectorAll(".metodo-btn").forEach(function(btn) {{
         btn.addEventListener("click", function() {{
             seleccionarMetodo(btn.dataset.metodoTarget, btn.dataset.metodo || "");
         }});
     }});
 
+    mostrarNuevoCliente.addEventListener("click", function() {{
+        nuevoClientePanel.classList.toggle("oculto");
+        clienteMensaje.textContent = "";
+        if (!nuevoClientePanel.classList.contains("oculto")) {{
+            nuevoClienteNombre.focus();
+        }}
+    }});
+
+    guardarNuevoCliente.addEventListener("click", async function() {{
+        clienteMensaje.textContent = "";
+        const nombre = nuevoClienteNombre.value.trim();
+        if (!nombre) {{
+            clienteMensaje.textContent = "El nombre del cliente es obligatorio.";
+            return;
+        }}
+        guardarNuevoCliente.disabled = true;
+        try {{
+            const response = await fetch("/api/clientes", {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{
+                    nombre: nombre,
+                    telefono: nuevoClienteTelefono.value.trim(),
+                    documento: nuevoClienteDocumento.value.trim(),
+                    notas: nuevoClienteNotas.value.trim()
+                }})
+            }});
+            const data = await response.json();
+            if (!response.ok || !data.ok) {{
+                clienteMensaje.textContent = data.error || "No se pudo guardar el cliente.";
+                return;
+            }}
+            agregarClienteLocal(data.cliente);
+            nuevoClienteNombre.value = "";
+            nuevoClienteTelefono.value = "";
+            nuevoClienteDocumento.value = "";
+            nuevoClienteNotas.value = "";
+            nuevoClientePanel.classList.add("oculto");
+            clienteMensaje.textContent = "Cliente seleccionado.";
+        }} catch (err) {{
+            clienteMensaje.textContent = "No se pudo guardar el cliente.";
+        }} finally {{
+            guardarNuevoCliente.disabled = false;
+        }}
+    }});
+
+    formCobro.addEventListener("submit", function(event) {{
+        const modo = modoCobro.value;
+        const total = totalFinalUSD();
+        const pagado = pagoTotalEnUSD();
+        const saldo = saldoEstimadoUSD();
+        const cliente = clienteSeleccionadoTexto();
+
+        if ((modo === "parcial" || modo === "credito") && !clienteId.value) {{
+            event.preventDefault();
+            alert("Selecciona un cliente para registrar el saldo pendiente.");
+            return;
+        }}
+        if (modo === "parcial" && pagado <= 0.0001) {{
+            event.preventDefault();
+            alert("Ingresa al menos un pago para usar cobro parcial.");
+            return;
+        }}
+        if (modo === "parcial" && saldo <= 0.0001) {{
+            event.preventDefault();
+            alert("El pago cubre el total. Usa el modo Pagado.");
+            return;
+        }}
+        if (modo === "credito") {{
+            if (!confirm("Esta venta por " + formatoUSD(total) + " quedara completamente pendiente para " + cliente + ". Confirmar?")) {{
+                event.preventDefault();
+            }}
+            return;
+        }}
+        if (modo === "parcial") {{
+            if (!confirm("Esta venta dejara un saldo pendiente de " + formatoUSD(saldo) + " para " + cliente + ". Confirmar?")) {{
+                event.preventDefault();
+            }}
+        }}
+    }});
+
     actualizarBotonesMetodo("metodo1");
     actualizarBotonesMetodo("metodo2");
-    monto1.addEventListener("input", recalcularPago2);
+    clienteBuscar.addEventListener("input", buscarClientesConDebounce);
+    cambiarCliente.addEventListener("click", limpiarClienteSeleccionado);
+    monto1.addEventListener("input", actualizarResumenCobro);
+    monto2.addEventListener("input", actualizarResumenCobro);
     descuento.addEventListener("input", recalcularPago2);
-    recalcularPago2();
+    const clienteInicial = clientesActivos.find(function(cliente) {{
+        return String(cliente.id) === String(clienteId.value || "");
+    }});
+    if (clienteInicial) {{
+        mostrarClienteSeleccionado(clienteInicial);
+    }} else {{
+        renderClientes(clientesActivos.slice(0, 8));
+    }}
+    aplicarModo(modoCobro.value || "pagado", false);
     </script>
     </body>
     </html>
@@ -6916,7 +8545,7 @@ def reportes():
         <div class="metricas">
             <div class="metrica"><small>Total vendido USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
             <div class="metrica"><small>Punto de venta Bs</small><b>Bs {reporte["total_punto_venta_bs"]}</b></div>
-            <div class="metrica"><small>Pago movil Bs</small><b>Bs {reporte["total_pago_movil_bs"]}</b></div>
+            <div class="metrica"><small>Pago m&oacute;vil Bs</small><b>Bs {reporte["total_pago_movil_bs"]}</b></div>
             <div class="metrica"><small>Efectivo Bs</small><b>Bs {reporte["total_efectivo_bs"]}</b></div>
             <div class="metrica"><small>Efectivo USD</small><b>$ {reporte["total_efectivo_usd"]}</b></div>
             <div class="metrica"><small>Total equivalente USD</small><b>$ {reporte["total_equiv_usd"]}</b></div>
@@ -6986,7 +8615,7 @@ def exportar_reporte():
         ["Tasa", reporte["tasa"]],
         ["Total vendido USD", reporte["total_vendido_usd"]],
         ["Total punto de venta Bs", reporte["total_punto_venta_bs"]],
-        ["Total pago movil Bs", reporte["total_pago_movil_bs"]],
+        ["Total Pago m&oacute;vil Bs", reporte["total_pago_movil_bs"]],
         ["Total efectivo Bs", reporte["total_efectivo_bs"]],
         ["Total efectivo USD", reporte["total_efectivo_usd"]],
         ["Total equivalente USD", reporte["total_equiv_usd"]],
@@ -7317,7 +8946,7 @@ def cierre():
         <div class="bloque">
             <div class="titulo-bloque">💳 COBRADO</div>
             <div class="dato"><b>Punto de venta:</b> Bs {round(resumen["total_punto_venta_bs"], 2)}</div>
-            <div class="dato"><b>Pago movil en Bs:</b> Bs {round(resumen["total_pago_movil_bs"], 2)}</div>
+            <div class="dato"><b>Pago m&oacute;vil en Bs:</b> Bs {round(resumen["total_pago_movil_bs"], 2)}</div>
             <div class="dato"><b>Efectivo en Bs:</b> Bs {round(resumen["total_efectivo_bs"], 2)}</div>
             <div class="dato"><b>Efectivo en USD:</b> $ {round(resumen["total_efectivo_usd"], 2)}</div>
         </div>

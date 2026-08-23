@@ -216,7 +216,22 @@ class SalesSnapshotTest(unittest.TestCase):
         conn.close()
         return cliente_id
 
-    def _create_receivable(self, orden_id, cliente_id, monto=8.0):
+    def _create_inactive_client(self, nombre="Cliente Inactivo"):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
+            VALUES (?, ?, ?, ?, 0, ?)
+            """,
+            (nombre, "0412-1111111", "V-00000000", "Cliente inactivo", "2026-08-21 10:00:00"),
+        )
+        cliente_id = web_app.obtener_ultimo_id(cursor, "clientes")
+        conn.commit()
+        conn.close()
+        return cliente_id
+
+    def _create_receivable(self, orden_id, cliente_id, monto=8.0, incluir_movimiento=False):
         conn = self._conn()
         cursor = conn.cursor()
         cursor.execute(
@@ -242,9 +257,69 @@ class SalesSnapshotTest(unittest.TestCase):
             ),
         )
         cuenta_id = web_app.obtener_ultimo_id(cursor, "cuentas_por_cobrar")
+        if incluir_movimiento:
+            cursor.execute(
+                """
+                INSERT INTO cuentas_por_cobrar_movimientos (
+                    cuenta_id, tipo, monto_saldo, fecha, usuario_id, observacion
+                )
+                VALUES (?, 'cargo', ?, ?, ?, ?)
+                """,
+                (
+                    cuenta_id,
+                    monto,
+                    "2026-08-21 10:05:00",
+                    self._master_user_id(),
+                    "Cargo inicial generado al cobrar la orden",
+                ),
+            )
         conn.commit()
         conn.close()
         return cuenta_id
+
+    def _cuenta_por_orden(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, saldo_pendiente, estado, monto_original_deuda
+            FROM cuentas_por_cobrar
+            WHERE orden_id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row
+
+    def _movimientos_cuenta(self, cuenta_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT tipo, monto_saldo, moneda_pago, monto_pago, tasa_movimiento,
+                   metodo_pago, referencia, usuario_id, observacion
+            FROM cuentas_por_cobrar_movimientos
+            WHERE cuenta_id=?
+            ORDER BY id
+            """,
+            (cuenta_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def _abonar(self, cuenta_id, metodo="usd", monto=1, referencia="abono-ref", observacion="Abono prueba"):
+        return self.client.post(
+            f"/cuentas_por_cobrar/{cuenta_id}/abono",
+            data={
+                "metodo_pago": metodo,
+                "monto": str(monto),
+                "referencia": referencia,
+                "observacion": observacion,
+            },
+            follow_redirects=False,
+        )
 
     def test_usd_full_payment_snapshot(self):
         orden_id = self._create_order()
@@ -312,6 +387,121 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(pagos, [])
         self.assertEqual(movimientos, [])
         self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+
+    def test_checkout_page_renders_paid_mode_by_default(self):
+        orden_id = self._create_order(price=20.0)
+        response = self.client.get(f"/cobrar/{orden_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'name="modo_cobro"', response.data)
+        self.assertIn(b'value="pagado"', response.data)
+        self.assertIn(b'data-modo="pagado"', response.data)
+        self.assertIn(b'data-modo="parcial"', response.data)
+        self.assertIn(b'data-modo="credito"', response.data)
+        self.assertIn(b"Cr&eacute;dito", response.data)
+        self.assertIn(b"tel&eacute;fono", response.data)
+        self.assertIn(b"cliente_id", response.data)
+        self.assertIn(b"Cliente seleccionado", response.data)
+        self.assertIn(b"clienteResultados", response.data)
+        self.assertNotIn(b"Cr\xc3\x83", response.data)
+        self.assertNotIn(b"\xc3\x83\xc2", response.data)
+
+    def test_checkout_page_shows_active_clients_for_selection(self):
+        orden_id = self._create_order(price=20.0)
+        self._create_client("Ferreteria El Vecino")
+        self._create_inactive_client("Cliente No Visible")
+
+        response = self.client.get(f"/cobrar/{orden_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Ferreteria El Vecino".encode(), response.data)
+        self.assertIn(b"0412-0000000", response.data)
+        self.assertIn(b"J-00000000-0", response.data)
+        self.assertNotIn("Cliente No Visible".encode(), response.data)
+
+    def test_api_clientes_searches_name_phone_and_document_active_only(self):
+        self._create_client("Ferreteria El Vecino")
+        self._create_inactive_client("Ferreteria Inactiva")
+
+        for query in ("Ferre", "0412-0000000", "J-00000000-0"):
+            with self.subTest(query=query):
+                response = self.client.get(f"/api/clientes?q={query}")
+                self.assertEqual(response.status_code, 200)
+                nombres = [cliente["nombre"] for cliente in response.get_json()["clientes"]]
+                self.assertIn("Ferreteria El Vecino", nombres)
+                self.assertNotIn("Ferreteria Inactiva", nombres)
+
+    def test_partial_and_credit_require_real_selected_client_id(self):
+        orden_id = self._create_order(price=20.0)
+        response = self._charge(orden_id, "usd", 12, modo_cobro="parcial", cliente_id="")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"cliente valido", response.data)
+
+        orden_credito = self._create_order(price=20.0)
+        response = self._charge(orden_credito, "", 0, modo_cobro="credito", cliente_id="")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"cliente valido", response.data)
+
+    def test_new_client_from_api_can_be_used_immediately_for_credit(self):
+        cliente = self.client.post("/api/clientes", json={"nombre": "Cliente Uso Inmediato"}).get_json()["cliente"]
+        orden_id = self._create_order(price=20.0)
+        response = self._charge(orden_id, "", 0, modo_cobro="credito", cliente_id=cliente["id"])
+        self.assertEqual(response.status_code, 302)
+        cuenta = self._cuenta_por_orden(orden_id)
+        self.assertEqual(cuenta[1:3], (20.0, "pendiente"))
+
+    def test_api_clientes_lists_active_clients(self):
+        self._create_client("Cliente Activo API")
+        self._create_inactive_client("Cliente Inactivo API")
+
+        response = self.client.get("/api/clientes")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        nombres = [cliente["nombre"] for cliente in data["clientes"]]
+        self.assertIn("Cliente Activo API", nombres)
+        self.assertNotIn("Cliente Inactivo API", nombres)
+
+    def test_api_clientes_creates_valid_client(self):
+        response = self.client.post(
+            "/api/clientes",
+            json={
+                "nombre": "Cliente Nuevo Cobro",
+                "telefono": "0412-2222222",
+                "documento": "J-22222222-2",
+                "notas": "Creado desde cobro",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["cliente"]["nombre"], "Cliente Nuevo Cobro")
+
+        listado = self.client.get("/api/clientes?q=nuevo").get_json()
+        self.assertEqual([c["nombre"] for c in listado["clientes"]], ["Cliente Nuevo Cobro"])
+
+    def test_api_clientes_rejects_empty_name(self):
+        response = self.client.post("/api/clientes", json={"nombre": "   "})
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["ok"])
+
+    def test_inactive_client_cannot_be_used_for_new_receivable(self):
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_inactive_client("Cliente Inactivo CxC")
+
+        response = self._charge(
+            orden_id,
+            "usd",
+            12,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"cliente valido", response.data)
+
+        snapshot, pagos = self._snapshot(orden_id)
+        _, movimientos = self._order_cxc_state(orden_id)
+        self.assertEqual(snapshot[0], "abierta")
+        self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+        self.assertEqual(pagos, [])
+        self.assertEqual(movimientos, [])
 
     def test_partial_usd_payment_creates_receivable_for_remaining_balance(self):
         orden_id = self._create_order(price=20.0)
@@ -1037,6 +1227,442 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         snapshot, _ = self._snapshot(orden_id)
         self.assertEqual(snapshot[1:7], (None, None, None, None, None, None))
+
+    def test_admin_clients_list_shows_balances_and_search_filters(self):
+        cliente_con_saldo = self._create_client("Ferreteria El Vecino")
+        self._create_client("Cliente Sin Saldo")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 12, modo_cobro="parcial", cliente_id=cliente_con_saldo).status_code,
+            302,
+        )
+
+        response = self.client.get("/cuentas_por_cobrar/clientes")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Ferreteria El Vecino", response.data)
+        self.assertIn(b"$ 8.00", response.data)
+        self.assertIn(b"Cliente Sin Saldo", response.data)
+        self.assertIn(b"Cartera de clientes", response.data)
+
+        response = self.client.get("/cuentas_por_cobrar/clientes?q=vecino")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Ferreteria El Vecino", response.data)
+        self.assertNotIn(b"Cliente Sin Saldo", response.data)
+
+        response = self.client.get("/cuentas_por_cobrar/clientes?filtro=con_saldo")
+        self.assertIn(b"Ferreteria El Vecino", response.data)
+        self.assertNotIn(b"Cliente Sin Saldo", response.data)
+
+        response = self.client.get("/cuentas_por_cobrar/clientes?filtro=sin_saldo")
+        self.assertNotIn(b"Ferreteria El Vecino", response.data)
+        self.assertIn(b"Cliente Sin Saldo", response.data)
+
+    def test_admin_client_create_rejects_empty_and_creates_valid_client(self):
+        response = self.client.post("/cuentas_por_cobrar/clientes/nuevo", data={"nombre": "   "})
+        self.assertEqual(response.status_code, 400)
+
+        response = self.client.post(
+            "/cuentas_por_cobrar/clientes/nuevo",
+            data={
+                "nombre": "Cliente Admin",
+                "telefono": "0414-3333333",
+                "documento": "V-33333333",
+                "notas": "Alta administrativa",
+                "activo": "1",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+        response = self.client.get("/cuentas_por_cobrar/clientes?q=admin")
+        self.assertIn(b"Cliente Admin", response.data)
+        self.assertIn(b"0414-3333333", response.data)
+
+    def test_admin_clients_legacy_route_redirects_to_unified_section(self):
+        response = self.client.get("/clientes", follow_redirects=False)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/cuentas_por_cobrar/clientes")
+
+    def test_admin_main_navigation_has_only_unified_cxc_entry(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'href="/cuentas_por_cobrar"', response.data)
+        self.assertIn(b"CxC", response.data)
+        self.assertNotIn(b'href="/clientes"', response.data)
+
+    def test_admin_client_edit_does_not_change_receivable_snapshot(self):
+        cliente_id = self._create_client("Nombre Historico")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 12, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+
+        response = self.client.post(
+            f"/cuentas_por_cobrar/clientes/{cliente_id}/editar",
+            data={
+                "nombre": "Nombre Actualizado",
+                "telefono": "0414-4444444",
+                "documento": "V-44444444",
+                "notas": "Editado",
+                "activo": "1",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT cliente_nombre_snapshot FROM cuentas_por_cobrar WHERE orden_id=?",
+            (orden_id,),
+        )
+        snapshot = cursor.fetchone()[0]
+        cursor.execute("SELECT nombre FROM clientes WHERE id=?", (cliente_id,))
+        nombre_actual = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(snapshot, "Nombre Historico")
+        self.assertEqual(nombre_actual, "Nombre Actualizado")
+
+    def test_admin_client_deactivate_preserves_history_and_hides_from_checkout_selection(self):
+        cliente_id = self._create_client("Cliente Desactivable")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 12, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+
+        response = self.client.post(f"/cuentas_por_cobrar/clientes/{cliente_id}/activar", follow_redirects=False)
+        self.assertEqual(response.status_code, 302)
+
+        detalle = self.client.get(f"/cuentas_por_cobrar/clientes/{cliente_id}")
+        self.assertEqual(detalle.status_code, 200)
+        self.assertIn(b"Inactivo", detalle.data)
+        self.assertIn(b"$ 8.00", detalle.data)
+
+        nueva_orden = self._create_order(price=10.0)
+        checkout = self.client.get(f"/cobrar/{nueva_orden}")
+        self.assertEqual(checkout.status_code, 200)
+        self.assertNotIn(b"Cliente Desactivable", checkout.data)
+
+    def test_admin_client_detail_lists_associated_receivables(self):
+        cliente_id = self._create_client("Cliente Detalle")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 12, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+
+        response = self.client.get(f"/cuentas_por_cobrar/clientes/{cliente_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Cliente Detalle", response.data)
+        self.assertIn(b"Cuentas por cobrar", response.data)
+        self.assertIn(b"$ 8.00", response.data)
+        self.assertIn(b"#1", response.data)
+
+    def test_admin_cxc_empty_list_is_readable(self):
+        response = self.client.get("/cuentas_por_cobrar")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"Resumen", response.data)
+        self.assertIn(b"Cuentas", response.data)
+        self.assertIn(b"Cartera de clientes", response.data)
+        self.assertIn(b"$ 0.00", response.data)
+        self.assertIn(b"No hay cuentas por cobrar", response.data)
+
+        response = self.client.get("/cuentas_por_cobrar/cuentas")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"No hay cuentas por cobrar", response.data)
+
+    def test_admin_cxc_list_filters_and_searches_accounts(self):
+        cliente_id = self._create_client("Cliente Pendiente")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 12, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+
+        cliente_pagado = self._create_client("Cliente Pagado")
+        orden_pagada = self._create_order(price=15.0)
+        cuenta_pagada = self._create_receivable(orden_pagada, cliente_pagado, monto=0.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE cuentas_por_cobrar SET estado='pagada', monto_original_deuda=15, saldo_pendiente=0 WHERE id=?",
+            (cuenta_pagada,),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.client.get("/cuentas_por_cobrar")
+        self.assertIn(b"Cliente Pendiente", response.data)
+        self.assertNotIn(f'href="/cuentas_por_cobrar/clientes/{cliente_pagado}"'.encode(), response.data)
+
+        response = self.client.get("/cuentas_por_cobrar?estado=pagada")
+        self.assertIn(b"Cliente Pagado", response.data)
+        self.assertNotIn(f'href="/cuentas_por_cobrar/clientes/{cliente_id}"'.encode(), response.data)
+
+        response = self.client.get("/cuentas_por_cobrar?estado=todas&q=pendiente")
+        self.assertIn(b"Cliente Pendiente", response.data)
+        self.assertNotIn(f'href="/cuentas_por_cobrar/clientes/{cliente_pagado}"'.encode(), response.data)
+
+    def test_admin_cxc_detail_shows_sale_debt_paid_initial_and_historical_rate(self):
+        cliente_id = self._create_client("Cliente Tasa Historica")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 4, "bs_pago_movil", 1600, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+        self._set_tasa(999)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM cuentas_por_cobrar WHERE orden_id=?", (orden_id,))
+        cuenta_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            SELECT saldo_pendiente,
+                   (SELECT COALESCE(SUM(monto_saldo), 0)
+                    FROM cuentas_por_cobrar_movimientos
+                    WHERE cuenta_id=cuentas_por_cobrar.id)
+            FROM cuentas_por_cobrar
+            WHERE id=?
+            """,
+            (cuenta_id,),
+        )
+        saldo, suma_movimientos = cursor.fetchone()
+        conn.close()
+        self.assertEqual(round(saldo, 2), round(suma_movimientos, 2))
+
+        response = self.client.get(f"/cuentas_por_cobrar/{cuenta_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Valor de venta", response.data)
+        self.assertIn(b"$ 20.00", response.data)
+        self.assertIn(b"Cobrado al cerrar", response.data)
+        self.assertIn(b"$ 12.00", response.data)
+        self.assertIn(b"Deuda generada", response.data)
+        self.assertIn(b"$ 8.00", response.data)
+        self.assertIn(b"Tasa historica", response.data)
+        self.assertIn(b"200.0", response.data)
+        self.assertIn(b"Cliente Tasa Historica", response.data)
+        self.assertIn(b"cargo", response.data)
+        self.assertIn(b"Cargo inicial generado", response.data)
+        self.assertIn(f"/orden/{orden_id}".encode(), response.data)
+
+    def test_admin_cxc_movements_are_chronological_and_show_initial_charge(self):
+        cliente_id = self._create_client("Cliente Movimientos")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 12, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM cuentas_por_cobrar WHERE orden_id=?", (orden_id,))
+        cuenta_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO cuentas_por_cobrar_movimientos (
+                cuenta_id, tipo, monto_saldo, fecha, usuario_id, observacion
+            )
+            VALUES (?, 'abono', -2, '2026-08-23 09:00:00', ?, 'Abono futuro de prueba')
+            """,
+            (cuenta_id, self._master_user_id()),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.client.get(f"/cuentas_por_cobrar/{cuenta_id}")
+        self.assertEqual(response.status_code, 200)
+        data = response.data.decode()
+        self.assertLess(data.index("Cargo inicial generado"), data.index("Abono futuro de prueba"))
+
+    def test_admin_cxc_legacy_order_without_snapshot_does_not_break_lists(self):
+        cliente_id = self._create_client("Cliente Legacy")
+        orden_id = self._create_order(price=10.0, estado="cerrada")
+        cuenta_id = self._create_receivable(orden_id, cliente_id, monto=10.0)
+
+        response = self.client.get("/cuentas_por_cobrar?estado=todas&q=legacy")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Cliente Legacy", response.data)
+
+        response = self.client.get(f"/cuentas_por_cobrar/{cuenta_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Valor de venta", response.data)
+
+    def test_cxc_usd_partial_abono_reduces_balance_and_keeps_pending(self):
+        cliente_id = self._create_client("Cliente Abono USD")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._charge(orden_id, "usd", 10, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+        cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+
+        response = self._abonar(cuenta_id, "usd", 4)
+        self.assertEqual(response.status_code, 302)
+        cuenta = self._cuenta_por_orden(orden_id)
+        movimientos = self._movimientos_cuenta(cuenta_id)
+        self.assertEqual(cuenta[1:3], (6.0, "pendiente"))
+        self.assertEqual(movimientos[-1][0:6], ("abono", -4.0, "USD", 4.0, None, "usd"))
+
+    def test_cxc_usd_full_abono_marks_paid(self):
+        cliente_id = self._create_client("Cliente Pago Total USD")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._charge(orden_id, "usd", 10, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+        cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+
+        response = self._abonar(cuenta_id, "usd", 10)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self._cuenta_por_orden(orden_id)[1:3], (0.0, "pagada"))
+
+        detalle = self.client.get(f"/cuentas_por_cobrar/{cuenta_id}")
+        self.assertIn(b"Cuenta pagada", detalle.data)
+        self.assertNotIn(b"Registrar abono</a>", detalle.data)
+
+    def test_cxc_bs_abono_uses_current_rate_not_sale_rate(self):
+        cliente_id = self._create_client("Cliente Abono Bs")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._charge(orden_id, "usd", 10, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+        cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+        self._set_tasa(250)
+
+        response = self._abonar(cuenta_id, "bs_pago_movil", 1000, referencia="pm-1")
+        self.assertEqual(response.status_code, 302)
+        cuenta = self._cuenta_por_orden(orden_id)
+        movimiento = self._movimientos_cuenta(cuenta_id)[-1]
+        self.assertEqual(cuenta[1:3], (6.0, "pendiente"))
+        self.assertEqual(movimiento[0:7], ("abono", -4.0, "BS", 1000.0, 250.0, "bs_pago_movil", "pm-1"))
+
+    def test_cxc_bs_full_payment_marks_paid(self):
+        cliente_id = self._create_client("Cliente Pago Total Bs")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._charge(orden_id, "usd", 10, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+        cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+        self._set_tasa(250)
+
+        response = self._abonar(cuenta_id, "punto_venta", 2500)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self._cuenta_por_orden(orden_id)[1:3], (0.0, "pagada"))
+
+    def test_cxc_abono_rejects_overpayment_zero_negative_and_invalid_rate_without_writes(self):
+        for monto, tasa, metodo, mensaje in (
+            (11, 200, "usd", b"supera el saldo"),
+            (0, 200, "usd", b"mayor a 0"),
+            (-1, 200, "usd", b"mayor a 0"),
+            (1000, 0, "bs_pago_movil", b"tasa de cambio valida"),
+        ):
+            with self.subTest(monto=monto, tasa=tasa, metodo=metodo):
+                cliente_id = self._create_client(f"Cliente Val {monto} {metodo}")
+                orden_id = self._create_order(price=20.0)
+                self.assertEqual(self._charge(orden_id, "usd", 10, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+                cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+                self._set_tasa(tasa)
+                before = (self._cuenta_por_orden(orden_id), self._movimientos_cuenta(cuenta_id))
+
+                response = self._abonar(cuenta_id, metodo, monto)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(mensaje, response.data)
+                self.assertEqual(self._cuenta_por_orden(orden_id), before[0])
+                self.assertEqual(self._movimientos_cuenta(cuenta_id), before[1])
+                self._clear_operational_data()
+                self._set_tasa(200)
+
+    def test_cxc_abono_rejects_paid_annulled_and_inconsistent_accounts(self):
+        for estado in ("pagada", "anulada"):
+            with self.subTest(estado=estado):
+                cliente_id = self._create_client(f"Cliente {estado}")
+                orden_id = self._create_order(price=20.0)
+                cuenta_id = self._create_receivable(orden_id, cliente_id, monto=10.0, incluir_movimiento=True)
+                conn = self._conn()
+                cursor = conn.cursor()
+                cursor.execute("UPDATE cuentas_por_cobrar SET estado=? WHERE id=?", (estado, cuenta_id))
+                conn.commit()
+                conn.close()
+                response = self._abonar(cuenta_id, "usd", 1)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(b"cuentas pendientes", response.data)
+                self._clear_operational_data()
+                self._set_tasa(200)
+
+        cliente_id = self._create_client("Cliente Inconsistente")
+        orden_id = self._create_order(price=20.0)
+        cuenta_id = self._create_receivable(orden_id, cliente_id, monto=10.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE cuentas_por_cobrar SET saldo_pendiente=9 WHERE id=?", (cuenta_id,))
+        conn.commit()
+        conn.close()
+        response = self._abonar(cuenta_id, "usd", 1)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"inconsistencia", response.data)
+
+    def test_cxc_abono_rolls_back_on_movement_or_balance_failure(self):
+        for patch_target in ("web_app.insertar_movimiento_abono_cxc", "web_app.actualizar_saldo_cxc"):
+            with self.subTest(patch_target=patch_target):
+                cliente_id = self._create_client(f"Cliente Rollback {patch_target}")
+                orden_id = self._create_order(price=20.0)
+                self.assertEqual(self._charge(orden_id, "usd", 10, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+                cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+                before = (self._cuenta_por_orden(orden_id), self._movimientos_cuenta(cuenta_id))
+                with mock.patch(patch_target, side_effect=RuntimeError("fallo abono")):
+                    response = self._abonar(cuenta_id, "usd", 4)
+                self.assertEqual(response.status_code, 500)
+                self.assertEqual(self._cuenta_por_orden(orden_id), before[0])
+                self.assertEqual(self._movimientos_cuenta(cuenta_id), before[1])
+                self._clear_operational_data()
+                self._set_tasa(200)
+
+    def test_cxc_abono_preserves_consistency_user_client_summary_and_original_sale(self):
+        cliente_id = self._create_client("Cliente Consistente")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._charge(orden_id, "", 0, modo_cobro="credito", cliente_id=cliente_id).status_code, 302)
+        snapshot_before, pagos_before = self._snapshot(orden_id)
+        cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+
+        self.assertEqual(self._abonar(cuenta_id, "usd", 7).status_code, 302)
+        self.assertEqual(self._abonar(cuenta_id, "usd", 13).status_code, 302)
+        cuenta = self._cuenta_por_orden(orden_id)
+        movimientos = self._movimientos_cuenta(cuenta_id)
+        suma = round(sum(m[1] for m in movimientos), 2)
+        self.assertEqual(cuenta[1:3], (0.0, "pagada"))
+        self.assertEqual(suma, 0.0)
+        self.assertEqual(movimientos[-1][7], self._master_user_id())
+        self.assertEqual(self._snapshot(orden_id), (snapshot_before, pagos_before))
+
+        cliente_detalle = self.client.get(f"/cuentas_por_cobrar/clientes/{cliente_id}")
+        self.assertIn(b"Cuentas pagadas", cliente_detalle.data)
+        self.assertIn(b"$ 0.00", cliente_detalle.data)
+        resumen = self.client.get("/cuentas_por_cobrar")
+        self.assertIn(b"Cuentas pagadas", resumen.data)
+
+    def test_cxc_abono_detail_shows_actions_and_form(self):
+        cliente_id = self._create_client("Cliente Form Abono")
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._charge(orden_id, "usd", 10, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+        cuenta_id, _, _, _ = self._cuenta_por_orden(orden_id)
+
+        detalle = self.client.get(f"/cuentas_por_cobrar/{cuenta_id}")
+        self.assertIn(b"Registrar abono", detalle.data)
+        self.assertIn(b"Pagar saldo completo", detalle.data)
+
+        form = self.client.get(f"/cuentas_por_cobrar/{cuenta_id}/abono?completo=1")
+        self.assertEqual(form.status_code, 200)
+        self.assertIn(b"Metodo de pago", form.data)
+        self.assertIn(b"Saldo pendiente", form.data)
+
+    def test_admin_cxc_routes_require_master_role(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO usuarios (nombre, pin, rol, activo) VALUES (?, ?, ?, 1)",
+            ("Mesonera Test", "0000", "mesonera"),
+        )
+        usuario_id = web_app.obtener_ultimo_id(cursor, "usuarios")
+        conn.commit()
+        conn.close()
+        with self.client.session_transaction() as sess:
+            sess["usuario_id"] = usuario_id
+            sess["usuario_nombre"] = "Mesonera Test"
+            sess["usuario"] = "Mesonera Test"
+            sess["usuario_rol"] = "mesonera"
+        self.assertEqual(self.client.get("/clientes").status_code, 403)
+        self.assertEqual(self.client.get("/cuentas_por_cobrar").status_code, 403)
 
 
 if __name__ == "__main__":
