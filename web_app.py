@@ -4504,7 +4504,7 @@ def index():
         <a href="/usuarios">👥 Usuarios</a>
         <a href="/cocina">🍳 Cocina</a>
         """
-        menu_links += '<a href="/cuentas_por_cobrar">CxC</a>'
+        menu_links += '<a href="/cuentas_por_cobrar">💰 Cuentas por cobrar</a>'
     elif rol_actual == "socio":
         menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
     elif rol_actual == "mesonera_reportes":
