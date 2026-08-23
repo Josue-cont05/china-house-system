@@ -158,6 +158,40 @@ class SalesSnapshotTest(unittest.TestCase):
         conn.close()
         return row, pagos
 
+    def _financial_snapshot(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT estado, fecha_venta, fecha_cobro, tasa_cobro, subtotal_usd,
+                   descuento_bs_snapshot, total_usd, total_bs,
+                   venta_restaurante_usd, delivery_usd, total_cliente_usd,
+                   delivery_repartidor_id, inventario_descontado
+            FROM ordenes
+            WHERE id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row
+
+    def _delivery_movements(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT repartidor_id, tipo, monto_usd, usuario_id, observacion
+            FROM delivery_movimientos
+            WHERE orden_id=?
+            ORDER BY id
+            """,
+            (orden_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
     def _order_cxc_state(self, orden_id):
         conn = self._conn()
         cursor = conn.cursor()
@@ -299,6 +333,14 @@ class SalesSnapshotTest(unittest.TestCase):
             },
             follow_redirects=False,
         )
+
+    def _create_order_with_delivery(self, price=20.0, delivery=3.0, repartidor_id=None):
+        if repartidor_id is None:
+            repartidor_id = self._insert_repartidor("Repartidor Cobro", activo=1)
+        orden_id = self._create_order(price=price)
+        response = self._set_delivery(orden_id, delivery, repartidor_id)
+        self.assertEqual(response.status_code, 302)
+        return orden_id, repartidor_id
 
     def test_delivery_schema_tables_columns_and_nullable_order_fields(self):
         self.assertIn("repartidores", self._table_names())
@@ -658,11 +700,202 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self._set_delivery(orden_id, 3, repartidor_id).status_code, 302)
 
         response = self._charge(orden_id, "usd", 20)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Pago insuficiente", response.data)
+
+    def test_delivery_phase_three_sale_without_delivery_still_works(self):
+        orden_id = self._create_order(price=10.0)
+        response = self._charge(orden_id, "usd", 10)
+        self.assertEqual(response.status_code, 302)
+        snapshot = self._financial_snapshot(orden_id)
+        self.assertEqual(snapshot[8:11], (10.0, 0.0, 10.0))
+        self.assertEqual(self._delivery_movements(orden_id), [])
+
+    def test_delivery_paid_usd_requires_total_client_and_creates_single_cargo(self):
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+
+        insufficient = self._charge(orden_id, "usd", 20)
+        self.assertEqual(insufficient.status_code, 200)
+        self.assertIn(b"Pago insuficiente", insufficient.data)
+        self.assertEqual(self._delivery_movements(orden_id), [])
+
+        response = self._charge(orden_id, "usd", 23)
         self.assertEqual(response.status_code, 302)
         snapshot, pagos = self._snapshot(orden_id)
+        financial = self._financial_snapshot(orden_id)
         self.assertEqual(snapshot[2:7], (200.0, 20.0, 0.0, 20.0, 4000.0))
-        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 20.0)])
-        self.assertEqual(self._delivery_state(orden_id)[2], 0)
+        self.assertEqual(financial[8:12], (20.0, 3.0, 23.0, repartidor_id))
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 23.0)])
+        self.assertEqual(self._cuenta_por_orden(orden_id), None)
+        self.assertEqual(self._delivery_movements(orden_id), [(repartidor_id, "cargo", 3.0, self._master_user_id(), "Cargo delivery generado al cerrar la orden")])
+
+    def test_delivery_paid_bs_and_mixed_payments_validate_total_client(self):
+        orden_bs, repartidor_bs = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_bs, "bs_pago_movil", 4600).status_code, 302)
+        self.assertEqual(self._financial_snapshot(orden_bs)[8:11], (20.0, 3.0, 23.0))
+        self.assertEqual(self._delivery_movements(orden_bs)[0][0:3], (repartidor_bs, "cargo", 3.0))
+
+        orden_mixta, repartidor_mixto = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_mixta, "usd", 10, "bs_pago_movil", 2600).status_code, 302)
+        _, pagos = self._snapshot(orden_mixta)
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 10.0), ("bs_pago_movil", 2600.0)])
+        self.assertEqual(self._financial_snapshot(orden_mixta)[8:11], (20.0, 3.0, 23.0))
+        self.assertEqual(self._delivery_movements(orden_mixta)[0][0:3], (repartidor_mixto, "cargo", 3.0))
+
+    def test_delivery_discount_applies_only_to_restaurant_consumption(self):
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        response = self._charge(orden_id, "usd", 21, descuento=400)
+        self.assertEqual(response.status_code, 302)
+        financial = self._financial_snapshot(orden_id)
+        self.assertEqual(financial[4:8], (20.0, 400.0, 18.0, 3600.0))
+        self.assertEqual(financial[8:11], (18.0, 3.0, 21.0))
+        self.assertEqual(self._delivery_movements(orden_id)[0][0:3], (repartidor_id, "cargo", 3.0))
+
+    def test_delivery_partial_creates_cxc_for_client_balance_and_delivery_cargo(self):
+        cliente_id = self._create_client("Cliente Delivery Parcial")
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        response = self._charge(orden_id, "usd", 15, modo_cobro="parcial", cliente_id=cliente_id)
+        self.assertEqual(response.status_code, 302)
+        financial = self._financial_snapshot(orden_id)
+        self.assertIsNotNone(financial[2])
+        self.assertEqual(financial[8:11], (20.0, 3.0, 23.0))
+        self.assertEqual(self._cuenta_por_orden(orden_id)[1:4], (8.0, "pendiente", 8.0))
+        cuenta_id = self._cuenta_por_orden(orden_id)[0]
+        self.assertEqual(self._movimientos_cuenta(cuenta_id)[0][0:2], ("cargo", 8.0))
+        self.assertEqual(self._delivery_movements(orden_id)[0][0:3], (repartidor_id, "cargo", 3.0))
+        _, pagos = self._snapshot(orden_id)
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 15.0)])
+
+    def test_delivery_partial_mixed_payment_uses_total_client_balance(self):
+        cliente_id = self._create_client("Cliente Delivery Parcial Mixto")
+        orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        response = self._charge(
+            orden_id,
+            "usd",
+            5,
+            "bs_pago_movil",
+            2000,
+            modo_cobro="parcial",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self._cuenta_por_orden(orden_id)[1:3], (8.0, "pendiente"))
+
+    def test_delivery_credit_creates_full_cxc_delivery_cargo_no_payments_and_inventory(self):
+        cliente_id = self._create_client("Cliente Delivery Credito")
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        response = self._charge(orden_id, "", 0, modo_cobro="credito", cliente_id=cliente_id)
+        self.assertEqual(response.status_code, 302)
+        financial = self._financial_snapshot(orden_id)
+        self.assertIsNotNone(financial[1])
+        self.assertIsNone(financial[2])
+        self.assertEqual(financial[8:11], (20.0, 3.0, 23.0))
+        self.assertEqual(financial[12], 1)
+        self.assertEqual(self._snapshot(orden_id)[1], [])
+        self.assertEqual(self._cuenta_por_orden(orden_id)[1:3], (23.0, "pendiente"))
+        cuenta_id = self._cuenta_por_orden(orden_id)[0]
+        self.assertEqual(self._movimientos_cuenta(cuenta_id)[0][0:2], ("cargo", 23.0))
+        self.assertEqual(self._delivery_movements(orden_id)[0][0:3], (repartidor_id, "cargo", 3.0))
+
+    def test_delivery_checkout_revalidates_repartidor_and_writes_nothing_on_failure(self):
+        for repartidor_id in ("", 999999, self._insert_repartidor("Inactivo Cobro", activo=0)):
+            with self.subTest(repartidor_id=repartidor_id):
+                orden_id = self._create_order(price=20.0)
+                conn = self._conn()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE ordenes SET delivery_usd=3, delivery_repartidor_id=? WHERE id=?",
+                    (repartidor_id or None, orden_id),
+                )
+                conn.commit()
+                conn.close()
+                response = self._charge(orden_id, "usd", 23)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(b"repartidor activo", response.data)
+                self.assertEqual(self._financial_snapshot(orden_id)[0], "abierta")
+                self.assertEqual(self._snapshot(orden_id)[1], [])
+                self.assertEqual(self._cuenta_por_orden(orden_id), None)
+                self.assertEqual(self._delivery_movements(orden_id), [])
+
+    def test_delivery_atomicity_rolls_back_on_delivery_cargo_cxc_movement_and_inventory_failures(self):
+        scenarios = (
+            ("web_app.insertar_cargo_delivery", "pagado"),
+            ("web_app.crear_cuenta_por_cobrar_inicial", "parcial"),
+            ("web_app.insertar_movimiento_cxc_inicial", "parcial"),
+            ("web_app.descontar_inventario_por_orden", "pagado"),
+        )
+        for patch_target, modo in scenarios:
+            with self.subTest(patch_target=patch_target):
+                cliente_id = self._create_client(f"Cliente Atomic {patch_target}")
+                orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+                kwargs = {"modo_cobro": modo}
+                if modo == "parcial":
+                    kwargs["cliente_id"] = cliente_id
+                    monto = 15
+                else:
+                    monto = 23
+                with mock.patch(patch_target, side_effect=RuntimeError("fallo atomico")):
+                    response = self._charge(orden_id, "usd", monto, **kwargs)
+                self.assertEqual(response.status_code, 500)
+                self.assertEqual(self._financial_snapshot(orden_id)[0], "abierta")
+                self.assertEqual(self._snapshot(orden_id)[1], [])
+                self.assertEqual(self._cuenta_por_orden(orden_id), None)
+                self.assertEqual(self._delivery_movements(orden_id), [])
+                self.assertIn(self._inventory_discounted(orden_id), (None, 0))
+                self._clear_operational_data()
+                self._set_tasa(200)
+
+    def test_delivery_recobro_blocks_when_delivery_movements_exist_and_preserves_state(self):
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        snapshot_before = self._financial_snapshot(orden_id)
+        movimientos_before = self._delivery_movements(orden_id)
+        self.assertEqual(movimientos_before[0][0:3], (repartidor_id, "cargo", 3.0))
+
+        self.assertEqual(self.client.post(f"/activar_edicion_emergencia/{orden_id}", data={"clave": "0102"}).status_code, 302)
+        response = self._charge(orden_id, "usd", 23)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"movimientos de delivery", response.data)
+        self.assertEqual(self._financial_snapshot(orden_id), snapshot_before)
+        self.assertEqual(self._delivery_movements(orden_id), movimientos_before)
+
+    def test_delivery_recobro_without_delivery_keeps_existing_cxc_protection(self):
+        orden_id = self._create_order(price=10.0)
+        self.assertEqual(self._charge(orden_id, "usd", 10).status_code, 302)
+        self.assertEqual(self.client.post(f"/activar_edicion_emergencia/{orden_id}", data={"clave": "0102"}).status_code, 302)
+        self.assertEqual(self._charge(orden_id, "usd", 10).status_code, 302)
+
+        cliente_id = self._create_client("Cliente CxC Delivery Proteccion")
+        orden_cxc, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_cxc, "usd", 15, modo_cobro="parcial", cliente_id=cliente_id).status_code, 302)
+        self.assertEqual(self.client.post(f"/activar_edicion_emergencia/{orden_cxc}", data={"clave": "0102"}).status_code, 302)
+        response = self._charge(orden_cxc, "usd", 23)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"cuenta por cobrar asociada", response.data)
+
+    def test_delivery_legacy_order_charges_with_legacy_behavior_without_backfill_or_delivery_cargo(self):
+        delivery_id = self._delivery_product_id("Delivery 3")
+        orden_id = self._create_order(price=20.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (orden_id, "Delivery 3", 3.0),
+        )
+        conn.commit()
+        conn.close()
+
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Delivery 3", page.data)
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{delivery_id}").status_code, 400)
+
+        response = self._charge(orden_id, "usd", 23)
+        self.assertEqual(response.status_code, 302)
+        financial = self._financial_snapshot(orden_id)
+        self.assertEqual(financial[4:8], (23.0, 0.0, 23.0, 4600.0))
+        self.assertEqual(financial[8:11], (None, None, None))
+        self.assertEqual(self._delivery_movements(orden_id), [])
 
     def _create_client(self, nombre="Ferreteria El Vecino"):
         conn = self._conn()

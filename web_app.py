@@ -400,6 +400,84 @@ def calcular_totales_visuales_delivery(items, delivery_usd):
     }
 
 
+def calcular_totales_financieros_delivery(items, tasa, descuento_bs, delivery_usd):
+    tasa_cobro = a_float(tasa)
+    if tasa_cobro <= 0:
+        raise ValueError("La tasa de cobro debe ser mayor a 0")
+
+    descuento_bs = round(a_float(descuento_bs), 2)
+    delivery_explicit = round(a_float(delivery_usd), 2)
+    if delivery_explicit < 0:
+        raise ValueError("El monto de delivery no puede ser negativo")
+
+    subtotal_restaurante_usd = 0.0
+    delivery_legacy_usd = 0.0
+    for item in items:
+        producto = item[0]
+        precio = a_float(item[1])
+        categoria = item[2] if len(item) > 2 else None
+        if es_producto_delivery_legacy(producto, categoria):
+            delivery_legacy_usd += precio
+        else:
+            subtotal_restaurante_usd += precio
+
+    subtotal_restaurante_usd = round(subtotal_restaurante_usd, 2)
+    delivery_legacy_usd = round(delivery_legacy_usd, 2)
+    tiene_delivery_legacy = delivery_legacy_usd > TOLERANCIA_COBRO
+
+    if tiene_delivery_legacy:
+        if delivery_explicit > TOLERANCIA_COBRO:
+            raise ValueError("Esta orden contiene delivery legacy y delivery explicito. Corrige la orden antes de cobrar.")
+        precios_legacy = [item[1] for item in items]
+        totales_legacy = calcular_totales_cobro(precios_legacy, tasa_cobro, descuento_bs)
+        return {
+            "modo": "legacy",
+            "tasa": tasa_cobro,
+            "subtotal_restaurante_usd": totales_legacy["subtotal_usd"],
+            "descuento_bs": totales_legacy["descuento_bs"],
+            "venta_restaurante_usd": totales_legacy["total_usd"],
+            "delivery_usd": 0.0,
+            "delivery_legacy_usd": delivery_legacy_usd,
+            "total_cliente_usd": totales_legacy["total_usd"],
+            "venta_restaurante_bs": totales_legacy["total_bs"],
+            "delivery_bs": 0.0,
+            "total_cliente_bs": totales_legacy["total_bs"],
+            "subtotal_snapshot_usd": totales_legacy["subtotal_usd"],
+            "total_usd": totales_legacy["total_usd"],
+            "total_bs": totales_legacy["total_bs"],
+            "snapshot_delivery_usd": None,
+            "snapshot_venta_restaurante_usd": None,
+            "snapshot_total_cliente_usd": None,
+        }
+
+    subtotal_restaurante_bs = round(subtotal_restaurante_usd * tasa_cobro, 2)
+    venta_restaurante_bs = round(max(subtotal_restaurante_bs - descuento_bs, 0.0), 2)
+    venta_restaurante_usd = round((venta_restaurante_bs / tasa_cobro) if tasa_cobro else 0.0, 2)
+    delivery_bs = round(delivery_explicit * tasa_cobro, 2)
+    total_cliente_bs = round(venta_restaurante_bs + delivery_bs, 2)
+    total_cliente_usd = round(venta_restaurante_usd + delivery_explicit, 2)
+
+    return {
+        "modo": "explicito",
+        "tasa": tasa_cobro,
+        "subtotal_restaurante_usd": subtotal_restaurante_usd,
+        "descuento_bs": descuento_bs,
+        "venta_restaurante_usd": venta_restaurante_usd,
+        "delivery_usd": delivery_explicit,
+        "delivery_legacy_usd": 0.0,
+        "total_cliente_usd": total_cliente_usd,
+        "venta_restaurante_bs": venta_restaurante_bs,
+        "delivery_bs": delivery_bs,
+        "total_cliente_bs": total_cliente_bs,
+        "subtotal_snapshot_usd": subtotal_restaurante_usd,
+        "total_usd": venta_restaurante_usd,
+        "total_bs": venta_restaurante_bs,
+        "snapshot_delivery_usd": delivery_explicit,
+        "snapshot_venta_restaurante_usd": venta_restaurante_usd,
+        "snapshot_total_cliente_usd": total_cliente_usd,
+    }
+
+
 def es_combo_con_favorito(nombre):
     return (nombre or "").strip() in COMBOS_CON_FAVORITO
 
@@ -1771,6 +1849,59 @@ def actualizar_delivery_orden(cursor, orden_id, monto_delivery, repartidor_id):
         (monto, repartidor_id_final, orden_id),
     )
     return {"delivery_usd": monto, "delivery_repartidor_id": repartidor_id_final}
+
+
+def orden_tiene_movimientos_delivery(cursor, orden_id):
+    cursor.execute("SELECT 1 FROM delivery_movimientos WHERE orden_id=? LIMIT 1", (orden_id,))
+    return cursor.fetchone() is not None
+
+
+def validar_recobro_delivery(cursor, orden_id):
+    if orden_tiene_movimientos_delivery(cursor, orden_id):
+        raise ValueError(
+            "Esta orden tiene movimientos de delivery asociados y no puede recobrarse directamente. "
+            "Debe utilizarse un proceso administrativo de reversion."
+        )
+
+
+def validar_repartidor_delivery_cobro(cursor, delivery_usd, repartidor_id):
+    if a_float(delivery_usd) <= TOLERANCIA_COBRO:
+        return None
+    try:
+        repartidor_id_int = int(a_float(repartidor_id))
+    except Exception:
+        repartidor_id_int = 0
+    repartidor = obtener_repartidor(cursor, repartidor_id_int)
+    if not repartidor or int(repartidor[4] or 0) != 1:
+        raise ValueError("Selecciona un repartidor activo para el delivery.")
+    return repartidor_id_int
+
+
+def insertar_cargo_delivery(cursor, orden_id, repartidor_id, monto_usd, fecha, usuario_id):
+    monto_usd = round(a_float(monto_usd), 2)
+    if monto_usd <= TOLERANCIA_COBRO:
+        return None
+    if orden_tiene_movimientos_delivery(cursor, orden_id):
+        raise ValueError("Esta orden ya tiene movimientos de delivery asociados.")
+    cursor.execute(
+        """
+        INSERT INTO delivery_movimientos (
+            orden_id, repartidor_id, tipo, monto_usd, fecha,
+            usuario_id, referencia, observacion, movimiento_revertido_id
+        )
+        VALUES (?, ?, 'cargo', ?, ?, ?, ?, ?, NULL)
+        """,
+        (
+            orden_id,
+            repartidor_id,
+            monto_usd,
+            fecha,
+            usuario_id,
+            f"orden:{orden_id}",
+            "Cargo delivery generado al cerrar la orden",
+        ),
+    )
+    return obtener_ultimo_id(cursor, "delivery_movimientos")
 
 
 def crear_usuarios_iniciales():
@@ -8088,7 +8219,8 @@ def cobrar(orden_id):
     cursor.execute(
         """
         SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
-               o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id, o.cliente_id
+               o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id, o.cliente_id,
+               o.delivery_usd, o.delivery_repartidor_id
         FROM ordenes o
         LEFT JOIN usuarios u ON o.usuario_id = u.id
         WHERE o.id=?
@@ -8104,6 +8236,8 @@ def cobrar(orden_id):
     estado = o[6]
     cierre_id = o[10]
     cliente_id_actual = o[11]
+    delivery_orden_usd = a_float(o[12])
+    delivery_repartidor_id = o[13]
 
     if cierre_id is not None:
         conn.close()
@@ -8113,24 +8247,40 @@ def cobrar(orden_id):
         conn.close()
         return "Orden cerrada, no se puede volver a cobrar sin activar edicion de emergencia"
 
-    cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
+    cursor.execute(
+        """
+        SELECT oi.producto, oi.precio, c.nombre
+        FROM orden_items oi
+        LEFT JOIN productos p ON LOWER(p.nombre)=LOWER(oi.producto)
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE oi.orden_id=?
+        """,
+        (orden_id,),
+    )
     items = cursor.fetchall()
 
     if len(items) == 0:
         conn.close()
         return "No puedes cobrar una orden vacia"
 
-    precios_items = [i[0] for i in items]
     descuento_bs = a_float(o[8])
     try:
         tasa = obtener_tasa_cobro(cursor)
-        totales_cobro = calcular_totales_cobro(precios_items, tasa, descuento_bs)
-    except ValueError:
+        totales_cobro = calcular_totales_financieros_delivery(
+            items,
+            tasa,
+            descuento_bs,
+            delivery_orden_usd,
+        )
+    except ValueError as exc:
         conn.close()
-        return "Tasa de cobro invalida. Corrige la tasa antes de cobrar.", 400
-    total_usd = totales_cobro["subtotal_usd"]
+        mensaje = str(exc) if "delivery" in str(exc).lower() else "Tasa de cobro invalida. Corrige la tasa antes de cobrar."
+        return mensaje, 400
+    total_usd = totales_cobro["subtotal_restaurante_usd"]
     total_bs = round(total_usd * tasa, 2)
-    total_bs_final = totales_cobro["total_bs"]
+    total_bs_final = totales_cobro["total_cliente_bs"]
+    total_cliente_usd = totales_cobro["total_cliente_usd"]
+    total_cliente_bs = totales_cobro["total_cliente_bs"]
 
     error = ""
     metodo1_val = ""
@@ -8195,9 +8345,23 @@ def cobrar(orden_id):
         elif not metodo2_val and monto2 > 0:
             error = "Si colocas monto en pago 2, debes seleccionar el metodo"
         else:
-            totales_cobro = calcular_totales_cobro(precios_items, tasa, descuento)
-            total_bs_final = totales_cobro["total_bs"]
-            total_usd_final = totales_cobro["total_usd"]
+            try:
+                totales_cobro = calcular_totales_financieros_delivery(
+                    items,
+                    tasa,
+                    descuento,
+                    delivery_orden_usd,
+                )
+                repartidor_delivery_cobro = validar_repartidor_delivery_cobro(
+                    cursor,
+                    totales_cobro["delivery_usd"],
+                    delivery_repartidor_id,
+                )
+            except ValueError as exc:
+                conn.close()
+                return str(exc), 400
+            total_bs_final = totales_cobro["total_cliente_bs"]
+            total_usd_final = totales_cobro["total_cliente_usd"]
 
             insertar_pago_1 = False
             insertar_pago_2 = False
@@ -8248,6 +8412,7 @@ def cobrar(orden_id):
 
                 try:
                     validar_recobro_cxc(cursor, orden_id)
+                    validar_recobro_delivery(cursor, orden_id)
                 except ValueError as exc:
                     conn.close()
                     return str(exc), 400
@@ -8285,6 +8450,9 @@ def cobrar(orden_id):
                             descuento_bs_snapshot=?,
                             total_usd=?,
                             total_bs=?,
+                            venta_restaurante_usd=?,
+                            delivery_usd=?,
+                            total_cliente_usd=?,
                             cliente_id=?,
                             cliente=?
                         WHERE id=?
@@ -8295,11 +8463,14 @@ def cobrar(orden_id):
                             totales_cobro["descuento_bs"],
                             fecha,
                             fecha_cobro,
-                            totales_cobro["tasa_cobro"],
-                            totales_cobro["subtotal_usd"],
+                            totales_cobro["tasa"],
+                            totales_cobro["subtotal_snapshot_usd"],
                             totales_cobro["descuento_bs"],
                             totales_cobro["total_usd"],
                             totales_cobro["total_bs"],
+                            totales_cobro["snapshot_venta_restaurante_usd"],
+                            totales_cobro["snapshot_delivery_usd"],
+                            totales_cobro["snapshot_total_cliente_usd"],
                             cliente_id_orden,
                             cliente_nombre_orden,
                             orden_id,
@@ -8318,6 +8489,16 @@ def cobrar(orden_id):
                             cliente_cxc[0],
                             cliente_cxc[1],
                             saldo_cxc_usd,
+                            fecha,
+                            session.get("usuario_id"),
+                        )
+
+                    if totales_cobro["delivery_usd"] > TOLERANCIA_COBRO:
+                        insertar_cargo_delivery(
+                            cursor,
+                            orden_id,
+                            repartidor_delivery_cobro,
+                            totales_cobro["delivery_usd"],
                             fecha,
                             session.get("usuario_id"),
                         )
@@ -8382,6 +8563,9 @@ def cobrar(orden_id):
     .saldo-box {{ background:var(--panel-secundario); border:1px solid var(--borde); border-radius:8px; padding:12px; }}
     .saldo-label {{ color:var(--texto-secundario); font-size:13px; font-weight:700; }}
     .saldo-valor {{ font-size:20px; font-weight:900; margin-top:4px; }}
+    .desglose-cobro {{ background:var(--panel-secundario); border:1px solid var(--borde); border-radius:10px; padding:12px; margin:12px 0; }}
+    .desglose-fila {{ display:flex; justify-content:space-between; gap:10px; padding:4px 0; }}
+    .desglose-fila b {{ color:var(--verde-neko); }}
     .cliente-panel {{ border:1px solid var(--borde); border-radius:10px; padding:14px; background:var(--panel-secundario); margin:12px 0; }}
     .cliente-panel.oculto, .nuevo-cliente.oculto, .pagos-panel.oculto, .cliente-busqueda.oculto, .cliente-seleccion.oculto {{ display:none; }}
     .cliente-resultados {{ display:grid; gap:8px; margin:10px 0; }}
@@ -8407,8 +8591,13 @@ def cobrar(orden_id):
     <b>👩 Mesonera:</b> {o[9] if o[9] else '-'}
     </div>
     <div class="sep"></div>
-    <div class="total">USD: ${round(total_usd, 2)}</div>
-    <div class="total">Bs: {round(total_bs, 2)}</div>
+    <div class="desglose-cobro">
+        <div class="desglose-fila"><span>Consumo Neko Wok</span><b>${total_usd:.2f}</b></div>
+        <div class="desglose-fila"><span>Delivery</span><b>${totales_cobro["delivery_usd"]:.2f}</b></div>
+        <div class="desglose-fila"><span>Total a pagar</span><b>${total_cliente_usd:.2f}</b></div>
+    </div>
+    <div class="total">USD total cliente: ${total_cliente_usd:.2f}</div>
+    <div class="total">Bs total cliente: {total_cliente_bs:.2f}</div>
     <div class="total">Tasa: Bs {round(tasa, 2)}</div>
     <div class="total">Total final Bs: {round(total_bs_final, 2)}</div>
     <div class="sep"></div>
@@ -8525,7 +8714,9 @@ def cobrar(orden_id):
     let clientesActivos = {clientes_cobro_json};
     let clienteSeleccionado = null;
     let clienteBusquedaTimer = null;
-    const totalUSD = {round(total_usd, 2)};
+    const subtotalRestauranteUSD = {round(totales_cobro["subtotal_restaurante_usd"], 2)};
+    const deliveryUSD = {round(totales_cobro["delivery_usd"], 2)};
+    const totalUSD = {round(total_cliente_usd, 2)};
     const tasa = {round(tasa, 6)};
 
     function metodoEsUSD(metodo) {{
@@ -8547,7 +8738,8 @@ def cobrar(orden_id):
 
     function totalFinalUSD() {{
         const descuentoBs = Math.max(numero(descuento.value), 0);
-        return Math.max(totalUSD - (tasa ? descuentoBs / tasa : 0), 0);
+        const restauranteNeto = Math.max(subtotalRestauranteUSD - (tasa ? descuentoBs / tasa : 0), 0);
+        return restauranteNeto + deliveryUSD;
     }}
 
     function totalFinalBs() {{
