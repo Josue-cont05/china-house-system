@@ -24,7 +24,6 @@ from app.shared.constants.system import (
     SABORES_REFRESCO,
 )
 
-
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
 
