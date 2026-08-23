@@ -1565,6 +1565,50 @@ def crear_tablas_cuentas_por_cobrar():
     asegurar_columna("cuentas_por_cobrar_movimientos", "movimiento_revertido_id", "INTEGER")
 
 
+def crear_tablas_delivery():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS repartidores (
+            id {pk_autoincrement_sql()},
+            nombre TEXT NOT NULL,
+            telefono TEXT,
+            notas TEXT,
+            activo INTEGER DEFAULT 1,
+            fecha_creacion TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS delivery_movimientos (
+            id {pk_autoincrement_sql()},
+            orden_id INTEGER,
+            repartidor_id INTEGER NOT NULL,
+            tipo TEXT NOT NULL
+                CHECK (tipo IN ('cargo', 'pago', 'ajuste', 'anulacion')),
+            monto_usd REAL NOT NULL,
+            fecha TEXT,
+            usuario_id INTEGER,
+            referencia TEXT,
+            observacion TEXT,
+            movimiento_revertido_id INTEGER
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+    asegurar_columna("ordenes", "venta_restaurante_usd", "REAL")
+    asegurar_columna("ordenes", "delivery_usd", "REAL")
+    asegurar_columna("ordenes", "total_cliente_usd", "REAL")
+    asegurar_columna("ordenes", "delivery_repartidor_id", "INTEGER")
+
+
 def crear_usuarios_iniciales():
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
 
@@ -3131,6 +3175,7 @@ def init_db():
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
     crear_tablas_cuentas_por_cobrar()
+    crear_tablas_delivery()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
     asegurar_columna("producciones", "merma", "REAL DEFAULT 0")

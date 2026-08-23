@@ -40,11 +40,13 @@ class SalesSnapshotTest(unittest.TestCase):
         conn = self._conn()
         cursor = conn.cursor()
         for table in (
+            "delivery_movimientos",
             "cuentas_por_cobrar_movimientos",
             "cuentas_por_cobrar",
             "pagos",
             "orden_items",
             "ordenes",
+            "repartidores",
             "clientes",
             "cierre_detalle",
             "cierres_caja",
@@ -200,6 +202,235 @@ class SalesSnapshotTest(unittest.TestCase):
         columns = {row[1]: row for row in cursor.fetchall()}
         conn.close()
         return columns
+
+    def _table_names(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        names = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        return names
+
+    def _insert_repartidor(self, nombre="Juan Delivery", activo=1):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO repartidores (nombre, telefono, notas, activo, fecha_creacion)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (nombre, "0412-3333333", "Repartidor de prueba", activo, "2026-08-23 10:00:00"),
+        )
+        repartidor_id = web_app.obtener_ultimo_id(cursor, "repartidores")
+        conn.commit()
+        conn.close()
+        return repartidor_id
+
+    def _insert_delivery_movimiento(
+        self,
+        repartidor_id,
+        tipo="cargo",
+        monto=3.0,
+        orden_id=None,
+        movimiento_revertido_id=None,
+    ):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO delivery_movimientos (
+                orden_id, repartidor_id, tipo, monto_usd, fecha,
+                usuario_id, referencia, observacion, movimiento_revertido_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                orden_id,
+                repartidor_id,
+                tipo,
+                monto,
+                "2026-08-23 10:05:00",
+                self._master_user_id(),
+                "delivery-test",
+                "Movimiento de prueba",
+                movimiento_revertido_id,
+            ),
+        )
+        movimiento_id = web_app.obtener_ultimo_id(cursor, "delivery_movimientos")
+        conn.commit()
+        conn.close()
+        return movimiento_id
+
+    def test_delivery_schema_tables_columns_and_nullable_order_fields(self):
+        self.assertIn("repartidores", self._table_names())
+        self.assertIn("delivery_movimientos", self._table_names())
+
+        orden_columns = self._columns("ordenes")
+        for column in (
+            "venta_restaurante_usd",
+            "delivery_usd",
+            "total_cliente_usd",
+            "delivery_repartidor_id",
+        ):
+            with self.subTest(column=column):
+                self.assertIn(column, orden_columns)
+                self.assertEqual(orden_columns[column][3], 0)
+                self.assertIsNone(orden_columns[column][4])
+
+        repartidor_columns = self._columns("repartidores")
+        self.assertEqual(repartidor_columns["nombre"][2].upper(), "TEXT")
+        self.assertEqual(repartidor_columns["nombre"][3], 1)
+        self.assertEqual(repartidor_columns["activo"][4], "1")
+        for column in ("id", "telefono", "notas", "fecha_creacion"):
+            self.assertIn(column, repartidor_columns)
+
+        movimiento_columns = self._columns("delivery_movimientos")
+        for column in (
+            "id",
+            "orden_id",
+            "repartidor_id",
+            "tipo",
+            "monto_usd",
+            "fecha",
+            "usuario_id",
+            "referencia",
+            "observacion",
+            "movimiento_revertido_id",
+        ):
+            self.assertIn(column, movimiento_columns)
+        self.assertEqual(movimiento_columns["repartidor_id"][3], 1)
+        self.assertEqual(movimiento_columns["tipo"][3], 1)
+        self.assertEqual(movimiento_columns["monto_usd"][3], 1)
+
+    def test_delivery_schema_idempotence_preserves_data_and_columns(self):
+        repartidor_id = self._insert_repartidor("Idempotente")
+        self._insert_delivery_movimiento(repartidor_id, "cargo", 3.0)
+
+        before_orden_columns = list(self._columns("ordenes"))
+        before_tables = self._table_names()
+        web_app.init_db()
+        web_app.init_db()
+        after_orden_columns = list(self._columns("ordenes"))
+        after_tables = self._table_names()
+
+        self.assertEqual(before_orden_columns, after_orden_columns)
+        self.assertEqual(before_tables, after_tables)
+        self.assertEqual(len(after_orden_columns), len(set(after_orden_columns)))
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT nombre, activo FROM repartidores WHERE id=?", (repartidor_id,))
+        repartidor = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) FROM delivery_movimientos WHERE repartidor_id=?", (repartidor_id,))
+        movimientos = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(repartidor, ("Idempotente", 1))
+        self.assertEqual(movimientos, 1)
+
+    def test_repartidores_require_name_and_preserve_active_state(self):
+        activo_id = self._insert_repartidor("Activo", activo=1)
+        inactivo_id = self._insert_repartidor("Inactivo", activo=0)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT activo FROM repartidores WHERE id=?", (activo_id,))
+        self.assertEqual(cursor.fetchone()[0], 1)
+        cursor.execute("SELECT activo FROM repartidores WHERE id=?", (inactivo_id,))
+        self.assertEqual(cursor.fetchone()[0], 0)
+        with self.assertRaises(Exception):
+            cursor.execute(
+                "INSERT INTO repartidores (nombre, activo, fecha_creacion) VALUES (?, ?, ?)",
+                (None, 1, "2026-08-23 10:00:00"),
+            )
+        conn.rollback()
+        conn.close()
+
+    def test_delivery_movimientos_signed_deltas_types_and_annulment_reference(self):
+        repartidor_id = self._insert_repartidor("Movimientos")
+        cargo_id = self._insert_delivery_movimiento(repartidor_id, "cargo", 3.0)
+        self._insert_delivery_movimiento(repartidor_id, "pago", -3.0)
+        self._insert_delivery_movimiento(repartidor_id, "ajuste", 2.0)
+        self._insert_delivery_movimiento(repartidor_id, "ajuste", -1.0)
+        self._insert_delivery_movimiento(
+            repartidor_id,
+            "anulacion",
+            -3.0,
+            movimiento_revertido_id=cargo_id,
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT ROUND(COALESCE(SUM(monto_usd), 0), 2)
+            FROM delivery_movimientos
+            WHERE repartidor_id=?
+            """,
+            (repartidor_id,),
+        )
+        self.assertEqual(cursor.fetchone()[0], -2.0)
+        cursor.execute(
+            """
+            SELECT tipo, monto_usd, movimiento_revertido_id
+            FROM delivery_movimientos
+            WHERE tipo='anulacion'
+            """
+        )
+        self.assertEqual(cursor.fetchone(), ("anulacion", -3.0, cargo_id))
+        with self.assertRaises(Exception):
+            cursor.execute(
+                """
+                INSERT INTO delivery_movimientos (repartidor_id, tipo, monto_usd)
+                VALUES (?, ?, ?)
+                """,
+                (repartidor_id, "invalido", 1.0),
+            )
+        conn.rollback()
+        conn.close()
+
+    def test_legacy_order_delivery_fields_remain_unknown_null(self):
+        orden_id = self._create_order(price=20.0, estado="cerrada")
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT venta_restaurante_usd, delivery_usd, total_cliente_usd,
+                   delivery_repartidor_id
+            FROM ordenes
+            WHERE id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        self.assertEqual(row, (None, None, None, None))
+
+    def test_delivery_phase_one_does_not_change_existing_checkout_and_cxc_snapshots(self):
+        cliente_id = self._create_client("Cliente Regresion Delivery")
+        pagado = self._create_order(price=10.0)
+        parcial = self._create_order(price=20.0)
+        credito = self._create_order(price=15.0)
+
+        self.assertEqual(self._charge(pagado, "usd", 10).status_code, 302)
+        self.assertEqual(
+            self._charge(parcial, "usd", 12, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+        self.assertEqual(
+            self._charge(credito, "", 0, modo_cobro="credito", cliente_id=cliente_id).status_code,
+            302,
+        )
+
+        snapshot_pagado, pagos_pagado = self._snapshot(pagado)
+        self.assertEqual(snapshot_pagado[2:7], (200.0, 10.0, 0.0, 10.0, 2000.0))
+        self.assertEqual([(p[0], p[1]) for p in pagos_pagado], [("usd", 10.0)])
+        self.assertEqual(self._cuenta_por_orden(parcial)[1:3], (8.0, "pendiente"))
+        self.assertEqual(self._cuenta_por_orden(credito)[1:3], (15.0, "pendiente"))
+
+        cxc_admin = self.client.get("/cuentas_por_cobrar")
+        self.assertEqual(cxc_admin.status_code, 200)
+        self.assertIn(b"Cliente Regresion Delivery", cxc_admin.data)
 
     def _create_client(self, nombre="Ferreteria El Vecino"):
         conn = self._conn()
@@ -1286,7 +1517,7 @@ class SalesSnapshotTest(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'href="/cuentas_por_cobrar"', response.data)
-        self.assertIn(b"CxC", response.data)
+        self.assertIn("💰 Cuentas por cobrar".encode(), response.data)
         self.assertNotIn(b'href="/clientes"', response.data)
 
     def test_admin_client_edit_does_not_change_receivable_snapshot(self):
@@ -1463,7 +1694,7 @@ class SalesSnapshotTest(unittest.TestCase):
             INSERT INTO cuentas_por_cobrar_movimientos (
                 cuenta_id, tipo, monto_saldo, fecha, usuario_id, observacion
             )
-            VALUES (?, 'abono', -2, '2026-08-23 09:00:00', ?, 'Abono futuro de prueba')
+            VALUES (?, 'abono', -2, '2099-08-23 09:00:00', ?, 'Abono futuro de prueba')
             """,
             (cuenta_id, self._master_user_id()),
         )
