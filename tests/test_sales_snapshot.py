@@ -261,6 +261,45 @@ class SalesSnapshotTest(unittest.TestCase):
         conn.close()
         return movimiento_id
 
+    def _delivery_product_id(self, nombre="Delivery 3"):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM productos WHERE nombre=? ORDER BY id LIMIT 1", (nombre,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0]
+
+    def _delivery_state(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT delivery_usd, delivery_repartidor_id
+            FROM ordenes
+            WHERE id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        cursor.execute("SELECT producto, precio FROM orden_items WHERE orden_id=? ORDER BY id", (orden_id,))
+        items = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM delivery_movimientos")
+        delivery_movimientos = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM movimientos_inventario")
+        inventario_movimientos = cursor.fetchone()[0]
+        conn.close()
+        return row, items, delivery_movimientos, inventario_movimientos
+
+    def _set_delivery(self, orden_id, monto, repartidor_id=""):
+        return self.client.post(
+            f"/orden/{orden_id}/delivery",
+            data={
+                "delivery_usd": str(monto),
+                "delivery_repartidor_id": str(repartidor_id),
+            },
+            follow_redirects=False,
+        )
+
     def test_delivery_schema_tables_columns_and_nullable_order_fields(self):
         self.assertIn("repartidores", self._table_names())
         self.assertIn("delivery_movimientos", self._table_names())
@@ -431,6 +470,199 @@ class SalesSnapshotTest(unittest.TestCase):
         cxc_admin = self.client.get("/cuentas_por_cobrar")
         self.assertEqual(cxc_admin.status_code, 200)
         self.assertIn(b"Cliente Regresion Delivery", cxc_admin.data)
+
+    def test_repartidores_admin_lists_creates_edits_and_toggles_without_delete(self):
+        response = self.client.get("/repartidores")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Nuevo repartidor", response.data)
+
+        response = self.client.post(
+            "/repartidores/nuevo",
+            data={"nombre": "Juan Moto", "telefono": "0412", "notas": "Zona centro"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM repartidores WHERE nombre='Juan Moto'")
+        repartidor_id = cursor.fetchone()[0]
+        conn.close()
+
+        response = self.client.get("/repartidores")
+        self.assertIn(b"Juan Moto", response.data)
+        self.assertIn(b"0412", response.data)
+
+        response = self.client.post(
+            f"/repartidores/{repartidor_id}/editar",
+            data={"nombre": "Juan Editado", "telefono": "0414", "notas": "Actualizado"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        response = self.client.post(f"/repartidores/{repartidor_id}/activar", follow_redirects=False)
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT nombre, telefono, notas, activo FROM repartidores WHERE id=?", (repartidor_id,))
+        self.assertEqual(cursor.fetchone(), ("Juan Editado", "0414", "Actualizado", 0))
+        conn.close()
+
+    def test_repartidores_reject_empty_name_and_inactive_not_selectable_for_new_delivery(self):
+        response = self.client.post("/repartidores/nuevo", data={"nombre": "   "})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("nombre del repartidor es obligatorio".encode(), response.data)
+
+        activo_id = self._insert_repartidor("Repartidor Activo", activo=1)
+        inactivo_id = self._insert_repartidor("Repartidor Inactivo", activo=0)
+        orden_id = self._create_order(price=10.0)
+
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertIn(b"Repartidor Activo", page.data)
+        self.assertNotIn(b"Repartidor Inactivo", page.data)
+        self.assertEqual(self._set_delivery(orden_id, 3, activo_id).status_code, 302)
+        self.assertEqual(self._set_delivery(self._create_order(price=10.0), 3, inactivo_id).status_code, 400)
+
+    def test_repartidor_deactivation_preserves_order_history(self):
+        repartidor_id = self._insert_repartidor("Historial Delivery", activo=1)
+        orden_id = self._create_order(price=10.0)
+        self.assertEqual(self._set_delivery(orden_id, 3, repartidor_id).status_code, 302)
+        self.assertEqual(self.client.post(f"/repartidores/{repartidor_id}/activar").status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT activo FROM repartidores WHERE id=?", (repartidor_id,))
+        self.assertEqual(cursor.fetchone()[0], 0)
+        cursor.execute("SELECT delivery_repartidor_id FROM ordenes WHERE id=?", (orden_id,))
+        self.assertEqual(cursor.fetchone()[0], repartidor_id)
+        conn.close()
+
+    def test_quick_repartidor_api_creates_active_repartidor(self):
+        response = self.client.post("/api/repartidores", json={"nombre": "Rapido", "telefono": "0416"})
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["repartidor"]["nombre"], "Rapido")
+
+        listado = self.client.get("/api/repartidores").get_json()["repartidores"]
+        self.assertIn("Rapido", [rep["nombre"] for rep in listado])
+
+    def test_order_without_delivery_shows_zero_visual_delivery(self):
+        orden_id = self._create_order(price=20.0)
+        response = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Delivery: $0.00", response.data)
+        self.assertIn(b"Total cliente: $20.00", response.data)
+
+    def test_delivery_save_validations_and_updates_without_touching_items_movements_or_inventory(self):
+        repartidor_id = self._insert_repartidor("Valido Delivery", activo=1)
+        orden_id = self._create_order(price=20.0)
+        before = self._delivery_state(orden_id)
+
+        self.assertEqual(self._set_delivery(orden_id, 3, repartidor_id).status_code, 302)
+        state, items, delivery_movimientos, inventario_movimientos = self._delivery_state(orden_id)
+        self.assertEqual(state, (3.0, repartidor_id))
+        self.assertEqual(items, before[1])
+        self.assertEqual(delivery_movimientos, 0)
+        self.assertEqual(inventario_movimientos, 0)
+
+        response = self.client.get(f"/orden/{orden_id}")
+        self.assertIn(b"Consumo Neko Wok: $20.00", response.data)
+        self.assertIn(b"Delivery: $3.00", response.data)
+        self.assertIn(b"Total cliente: $23.00", response.data)
+
+        self.assertEqual(self._set_delivery(orden_id, 2, repartidor_id).status_code, 302)
+        self.assertEqual(self._delivery_state(orden_id)[0], (2.0, repartidor_id))
+        self.assertEqual(self._set_delivery(orden_id, 0, "").status_code, 302)
+        self.assertEqual(self._delivery_state(orden_id)[0], (0.0, None))
+
+    def test_delivery_rejects_negative_missing_invalid_and_inactive_repartidor(self):
+        repartidor_id = self._insert_repartidor("Activo Validacion", activo=1)
+        inactivo_id = self._insert_repartidor("Inactivo Validacion", activo=0)
+
+        for monto, repartidor, mensaje in (
+            (-1, repartidor_id, b"maximo 2 decimales"),
+            (3, "", b"repartidor activo"),
+            (3, 999999, b"repartidor activo"),
+            (3, inactivo_id, b"repartidor activo"),
+            ("1.999", repartidor_id, b"maximo 2 decimales"),
+        ):
+            with self.subTest(monto=monto, repartidor=repartidor):
+                orden_id = self._create_order(price=10.0)
+                response = self._set_delivery(orden_id, monto, repartidor)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(mensaje, response.data)
+                self.assertEqual(self._delivery_state(orden_id)[0], (None, None))
+
+    def test_delivery_legacy_products_are_preserved_hidden_and_blocked_for_new_adds(self):
+        delivery_id = self._delivery_product_id("Delivery 3")
+        self.assertIsNotNone(delivery_id)
+
+        orden_id = self._create_order(price=20.0)
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn(b"Delivery 3", page.data)
+
+        response = self.client.get(f"/agregar/{orden_id}/{delivery_id}")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"delivery ahora se registra", response.data)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (orden_id, "Delivery 3", 3.0),
+        )
+        conn.commit()
+        conn.close()
+
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertIn(b"Delivery 3", page.data)
+        self.assertIn("sistema anterior".encode(), page.data)
+
+    def test_open_order_with_legacy_delivery_is_not_auto_converted_and_blocks_explicit_delivery(self):
+        repartidor_id = self._insert_repartidor("Bloqueo Legacy", activo=1)
+        orden_id = self._create_order(price=20.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (orden_id, "Delivery 3", 3.0),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._set_delivery(orden_id, 3, repartidor_id)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("sistema anterior".encode(), response.data)
+
+        state, items, delivery_movimientos, _ = self._delivery_state(orden_id)
+        self.assertEqual(state, (None, None))
+        self.assertIn(("Delivery 3", 3.0), items)
+        self.assertEqual(delivery_movimientos, 0)
+
+    def test_visual_delivery_totals_helper_excludes_legacy_from_restaurant_consumption(self):
+        items = [
+            ("Producto prueba", 20.0, 1, "", None),
+            ("Delivery 3", 3.0, 2, "", "Delivery"),
+        ]
+        totales = web_app.calcular_totales_visuales_delivery(items, 0)
+        self.assertEqual(totales["venta_restaurante_usd"], 20.0)
+        self.assertEqual(totales["delivery_legacy_usd"], 3.0)
+        self.assertEqual(totales["total_cliente_usd"], 23.0)
+
+    def test_delivery_phase_two_does_not_alter_checkout_snapshot(self):
+        repartidor_id = self._insert_repartidor("Sin Cobro Afectado", activo=1)
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._set_delivery(orden_id, 3, repartidor_id).status_code, 302)
+
+        response = self._charge(orden_id, "usd", 20)
+        self.assertEqual(response.status_code, 302)
+        snapshot, pagos = self._snapshot(orden_id)
+        self.assertEqual(snapshot[2:7], (200.0, 20.0, 0.0, 20.0, 4000.0))
+        self.assertEqual([(p[0], p[1]) for p in pagos], [("usd", 20.0)])
+        self.assertEqual(self._delivery_state(orden_id)[2], 0)
 
     def _create_client(self, nombre="Ferreteria El Vecino"):
         conn = self._conn()

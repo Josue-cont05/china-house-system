@@ -117,6 +117,8 @@ PROMOCIONES_JSON = {
 PROMOCIONES_CON_POLLO = {"Familiar", "Mega Familiar"}
 PROMO_EXTRA_LUMPIAS_NOMBRE = "Promo extra: Ración de Lumpias"
 PROMO_EXTRA_LUMPIAS_PRECIO = 3.00
+DELIVERY_MONTOS_RAPIDOS = [0.50, 1.00, 1.50, 2.00, 2.50, 3.00, 3.50]
+DELIVERY_MONTO_MAXIMO = 100.0
 
 PRODUCTOS_MENU_NEKO = [
     ("Neko Combo 1", 5.30, "Neko Combos"),
@@ -351,6 +353,51 @@ def normalizar_metodo_pago(metodo):
 
 def es_producto_refresco(nombre):
     return "refresco" in (nombre or "").lower()
+
+
+def es_categoria_delivery(categoria):
+    return (categoria or "").strip().lower() == "delivery"
+
+
+def es_producto_delivery_legacy(nombre, categoria=None):
+    nombre_limpio = (nombre or "").strip().lower()
+    if es_categoria_delivery(categoria):
+        return True
+    return bool(re.fullmatch(r"delivery\s+\d+(?:[.,]\d{1,2})?", nombre_limpio))
+
+
+def normalizar_monto_delivery(valor):
+    texto = str(valor if valor is not None else "").strip().replace(",", ".")
+    if texto == "":
+        texto = "0"
+    if not re.fullmatch(r"\d+(?:\.\d{1,2})?", texto):
+        raise ValueError("El monto de delivery debe ser cero o positivo, con maximo 2 decimales.")
+    monto = round(float(texto), 2)
+    if monto < 0:
+        raise ValueError("El monto de delivery no puede ser negativo.")
+    if monto > DELIVERY_MONTO_MAXIMO:
+        raise ValueError(f"El monto de delivery no puede superar ${DELIVERY_MONTO_MAXIMO:.2f}.")
+    return monto
+
+
+def calcular_totales_visuales_delivery(items, delivery_usd):
+    venta_restaurante = 0.0
+    delivery_legacy = 0.0
+    for item in items:
+        producto = item[0]
+        precio = a_float(item[1])
+        categoria = item[4] if len(item) > 4 else None
+        if es_producto_delivery_legacy(producto, categoria):
+            delivery_legacy += precio
+        else:
+            venta_restaurante += precio
+    delivery_explicit = a_float(delivery_usd)
+    return {
+        "venta_restaurante_usd": round(venta_restaurante, 2),
+        "delivery_usd": round(delivery_explicit, 2),
+        "delivery_legacy_usd": round(delivery_legacy, 2),
+        "total_cliente_usd": round(venta_restaurante + delivery_legacy + delivery_explicit, 2),
+    }
 
 
 def es_combo_con_favorito(nombre):
@@ -1607,6 +1654,123 @@ def crear_tablas_delivery():
     asegurar_columna("ordenes", "delivery_usd", "REAL")
     asegurar_columna("ordenes", "total_cliente_usd", "REAL")
     asegurar_columna("ordenes", "delivery_repartidor_id", "INTEGER")
+
+
+def listar_repartidores(cursor, solo_activos=False):
+    where = "WHERE COALESCE(activo, 1)=1" if solo_activos else ""
+    cursor.execute(
+        f"""
+        SELECT id, nombre, COALESCE(telefono, ''), COALESCE(notas, ''),
+               COALESCE(activo, 1), fecha_creacion
+        FROM repartidores
+        {where}
+        ORDER BY COALESCE(activo, 1) DESC, LOWER(nombre), id
+        """
+    )
+    return cursor.fetchall()
+
+
+def obtener_repartidor(cursor, repartidor_id):
+    cursor.execute(
+        """
+        SELECT id, nombre, COALESCE(telefono, ''), COALESCE(notas, ''),
+               COALESCE(activo, 1), fecha_creacion
+        FROM repartidores
+        WHERE id=?
+        """,
+        (repartidor_id,),
+    )
+    return cursor.fetchone()
+
+
+def normalizar_nombre_repartidor(nombre):
+    nombre = (nombre or "").strip()
+    if not nombre:
+        raise ValueError("El nombre del repartidor es obligatorio.")
+    return nombre[:120]
+
+
+def crear_repartidor(cursor, nombre, telefono="", notas="", activo=1):
+    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """
+        INSERT INTO repartidores (nombre, telefono, notas, activo, fecha_creacion)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            normalizar_nombre_repartidor(nombre),
+            (telefono or "").strip()[:80],
+            (notas or "").strip()[:500],
+            1 if int(a_float(activo, 1)) == 1 else 0,
+            fecha,
+        ),
+    )
+    return obtener_ultimo_id(cursor, "repartidores")
+
+
+def orden_tiene_cxc(cursor, orden_id):
+    cursor.execute("SELECT 1 FROM cuentas_por_cobrar WHERE orden_id=? LIMIT 1", (orden_id,))
+    return cursor.fetchone() is not None
+
+
+def orden_tiene_delivery_legacy(cursor, orden_id):
+    cursor.execute(
+        """
+        SELECT oi.producto, c.nombre
+        FROM orden_items oi
+        LEFT JOIN productos p ON LOWER(p.nombre)=LOWER(oi.producto)
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE oi.orden_id=?
+        """,
+        (orden_id,),
+    )
+    return any(es_producto_delivery_legacy(producto, categoria) for producto, categoria in cursor.fetchall())
+
+
+def validar_orden_delivery_modificable(cursor, orden_id):
+    cursor.execute(
+        """
+        SELECT estado, cierre_id
+        FROM ordenes
+        WHERE id=?
+        """,
+        (orden_id,),
+    )
+    orden_row = cursor.fetchone()
+    if not orden_row:
+        raise ValueError("Orden no encontrada")
+    estado, cierre_id = orden_row
+    if cierre_id is not None:
+        raise ValueError("No puedes modificar delivery en una orden archivada en cierre de jornada.")
+    if estado == "cerrada":
+        raise ValueError("No puedes modificar delivery en una orden cerrada.")
+    if orden_tiene_cxc(cursor, orden_id):
+        raise ValueError("No puedes modificar delivery en una orden con cuenta por cobrar asociada.")
+    return estado
+
+
+def actualizar_delivery_orden(cursor, orden_id, monto_delivery, repartidor_id):
+    validar_orden_delivery_modificable(cursor, orden_id)
+    monto = normalizar_monto_delivery(monto_delivery)
+
+    repartidor_id_final = None
+    if monto > 0:
+        if orden_tiene_delivery_legacy(cursor, orden_id):
+            raise ValueError("Esta orden contiene un delivery agregado con el sistema anterior. No se puede agregar delivery explicito.")
+        repartidor_id_final = int(a_float(repartidor_id))
+        repartidor = obtener_repartidor(cursor, repartidor_id_final)
+        if not repartidor or int(repartidor[4] or 0) != 1:
+            raise ValueError("Debes seleccionar un repartidor activo para guardar delivery.")
+
+    cursor.execute(
+        """
+        UPDATE ordenes
+        SET delivery_usd=?, delivery_repartidor_id=?
+        WHERE id=?
+        """,
+        (monto, repartidor_id_final, orden_id),
+    )
+    return {"delivery_usd": monto, "delivery_repartidor_id": repartidor_id_final}
 
 
 def crear_usuarios_iniciales():
@@ -2907,6 +3071,10 @@ def proteger_sistema():
         "cuentas_por_cobrar_admin",
         "detalle_cuenta_por_cobrar",
         "registrar_abono_cxc",
+        "repartidores",
+        "nuevo_repartidor",
+        "editar_repartidor",
+        "activar_repartidor",
         "activar_edicion_emergencia",
         "ordenes_listas",
         "reset_neko",
@@ -2931,7 +3099,9 @@ def proteger_sistema():
         "factura",
         "cobrar",
         "api_clientes",
+        "api_repartidores",
         "editar_orden",
+        "actualizar_delivery",
         "actualizar_indicacion_item",
         "eliminar_item",
     }
@@ -6090,6 +6260,244 @@ def editar_producto(id):
     return html
 
 
+@app.route("/repartidores")
+def repartidores():
+    conn = get_connection()
+    cursor = conn.cursor()
+    repartidores_db = listar_repartidores(cursor)
+    conn.close()
+
+    filas = ""
+    for rep in repartidores_db:
+        rep_id, nombre, telefono, notas, activo, fecha = rep
+        estado = "Activo" if int(activo or 0) == 1 else "Inactivo"
+        texto_accion = "Desactivar" if int(activo or 0) == 1 else "Activar"
+        filas += f"""
+        <tr>
+            <td>{html_lib.escape(nombre)}</td>
+            <td>{html_lib.escape(telefono or '-')}</td>
+            <td>{html_lib.escape(notas or '-')}</td>
+            <td>{estado}</td>
+            <td>{html_lib.escape(fecha or '-')}</td>
+            <td>
+                <a class="btn-mini" href="/repartidores/{rep_id}/editar">Editar</a>
+                <form method="post" action="/repartidores/{rep_id}/activar" style="display:inline;">
+                    <button class="btn-mini btn-sec" type="submit">{texto_accion}</button>
+                </form>
+            </td>
+        </tr>
+        """
+
+    if not filas:
+        filas = '<tr><td colspan="6">No hay repartidores registrados.</td></tr>'
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; max-width:980px; margin:0 auto; }}
+    .panel-admin {{ background:var(--tarjeta); border:1px solid var(--borde); border-radius:12px; padding:18px; box-shadow:var(--sombra-suave); }}
+    table {{ width:100%; border-collapse:collapse; }}
+    th, td {{ padding:11px; border-bottom:1px solid var(--borde); text-align:left; }}
+    .btn-mini {{ display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 11px; border-radius:8px; background:var(--verde-neko); color:#0F1115; text-decoration:none; font-weight:800; border:none; cursor:pointer; }}
+    .btn-sec {{ background:var(--panel-secundario); color:var(--texto); border:1px solid var(--borde); }}
+    .acciones {{ display:flex; gap:8px; margin-bottom:14px; }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">Inicio</a><a href="/menu">Menú</a>')}
+    <div class="contenido">
+        <h1>Repartidores</h1>
+        <div class="acciones">
+            <a class="btn-mini" href="/repartidores/nuevo">Nuevo repartidor</a>
+        </div>
+        <div class="panel-admin">
+            <table>
+                <thead><tr><th>Nombre</th><th>Teléfono</th><th>Notas</th><th>Estado</th><th>Creado</th><th>Acciones</th></tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/repartidores/nuevo", methods=["GET", "POST"])
+def nuevo_repartidor():
+    error = ""
+    nombre_val = ""
+    telefono_val = ""
+    notas_val = ""
+
+    if request.method == "POST":
+        nombre_val = (request.form.get("nombre") or "").strip()
+        telefono_val = (request.form.get("telefono") or "").strip()
+        notas_val = (request.form.get("notas") or "").strip()
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            crear_repartidor(cursor, nombre_val, telefono_val, notas_val, 1)
+            conn.commit()
+            conn.close()
+            return redirect("/repartidores")
+        except ValueError as exc:
+            conn.rollback()
+            conn.close()
+            error = str(exc)
+
+    return formulario_repartidor("Nuevo repartidor", "/repartidores/nuevo", nombre_val, telefono_val, notas_val, error)
+
+
+@app.route("/repartidores/<int:repartidor_id>/editar", methods=["GET", "POST"])
+def editar_repartidor(repartidor_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    rep = obtener_repartidor(cursor, repartidor_id)
+    if not rep:
+        conn.close()
+        return "Repartidor no encontrado", 404
+
+    error = ""
+    nombre_val = rep[1]
+    telefono_val = rep[2]
+    notas_val = rep[3]
+
+    if request.method == "POST":
+        nombre_val = (request.form.get("nombre") or "").strip()
+        telefono_val = (request.form.get("telefono") or "").strip()
+        notas_val = (request.form.get("notas") or "").strip()
+        try:
+            cursor.execute(
+                """
+                UPDATE repartidores
+                SET nombre=?, telefono=?, notas=?
+                WHERE id=?
+                """,
+                (
+                    normalizar_nombre_repartidor(nombre_val),
+                    telefono_val[:80],
+                    notas_val[:500],
+                    repartidor_id,
+                ),
+            )
+            conn.commit()
+            conn.close()
+            return redirect("/repartidores")
+        except ValueError as exc:
+            conn.rollback()
+            error = str(exc)
+
+    conn.close()
+    return formulario_repartidor(
+        "Editar repartidor",
+        f"/repartidores/{repartidor_id}/editar",
+        nombre_val,
+        telefono_val,
+        notas_val,
+        error,
+    )
+
+
+def formulario_repartidor(titulo, action, nombre, telefono, notas, error=""):
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ margin:0; }}
+    .contenido {{ padding:18px; max-width:620px; margin:0 auto; }}
+    .panel-admin {{ background:var(--tarjeta); border:1px solid var(--borde); border-radius:12px; padding:18px; box-shadow:var(--sombra-suave); }}
+    input, textarea {{ width:100%; margin:6px 0 12px; }}
+    .btn-form {{ width:100%; border:none; background:var(--verde-neko); color:#0F1115; padding:13px; border-radius:10px; font-weight:900; }}
+    .error {{ background:#3b1616; color:#fecaca; border:1px solid #7f1d1d; padding:10px; border-radius:8px; margin-bottom:12px; }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/repartidores">Repartidores</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>{html_lib.escape(titulo)}</h1>
+        <div class="panel-admin">
+            {"<div class='error'>" + html_lib.escape(error) + "</div>" if error else ""}
+            <form method="post" action="{html_lib.escape(action, quote=True)}">
+                <label>Nombre</label>
+                <input name="nombre" value="{html_lib.escape(nombre or '', quote=True)}" required>
+                <label>Teléfono</label>
+                <input name="telefono" value="{html_lib.escape(telefono or '', quote=True)}">
+                <label>Notas</label>
+                <textarea name="notas">{html_lib.escape(notas or '')}</textarea>
+                <button class="btn-form" type="submit">Guardar</button>
+            </form>
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
+
+@app.route("/repartidores/<int:repartidor_id>/activar", methods=["POST"])
+def activar_repartidor(repartidor_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    rep = obtener_repartidor(cursor, repartidor_id)
+    if not rep:
+        conn.close()
+        return "Repartidor no encontrado", 404
+    nuevo_estado = 0 if int(rep[4] or 0) == 1 else 1
+    cursor.execute("UPDATE repartidores SET activo=? WHERE id=?", (nuevo_estado, repartidor_id))
+    conn.commit()
+    conn.close()
+    return redirect("/repartidores")
+
+
+@app.route("/api/repartidores", methods=["GET", "POST"])
+def api_repartidores():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        try:
+            repartidor_id = crear_repartidor(
+                cursor,
+                data.get("nombre"),
+                data.get("telefono", ""),
+                data.get("notas", ""),
+                1,
+            )
+            conn.commit()
+            repartidor = obtener_repartidor(cursor, repartidor_id)
+            conn.close()
+            return jsonify({"ok": True, "repartidor": repartidor_json_desde_fila(repartidor)})
+        except ValueError as exc:
+            conn.rollback()
+            conn.close()
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    repartidores_activos = [
+        repartidor_json_desde_fila(rep)
+        for rep in listar_repartidores(cursor, solo_activos=True)
+    ]
+    conn.close()
+    return jsonify({"ok": True, "repartidores": repartidores_activos})
+
+
+def repartidor_json_desde_fila(rep):
+    return {
+        "id": rep[0],
+        "nombre": rep[1] or "",
+        "telefono": rep[2] or "",
+        "notas": rep[3] or "",
+        "activo": int(rep[4] or 0),
+    }
+
+
 @app.route("/nueva_orden")
 def nueva_orden():
     return redirect("/")
@@ -6129,7 +6537,8 @@ def orden(orden_id):
     cursor.execute(
         """
         SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
-               o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id
+               o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id,
+               o.delivery_usd, o.delivery_repartidor_id
         FROM ordenes o
         LEFT JOIN usuarios u ON o.usuario_id = u.id
         WHERE o.id=?
@@ -6156,19 +6565,29 @@ def orden(orden_id):
 
     cursor.execute(
         """
-        SELECT producto, precio, id, COALESCE(indicacion, '')
-        FROM orden_items
-        WHERE orden_id=?
+        SELECT oi.producto, oi.precio, oi.id, COALESCE(oi.indicacion, ''), c.nombre
+        FROM orden_items oi
+        LEFT JOIN productos p ON LOWER(p.nombre)=LOWER(oi.producto)
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE oi.orden_id=?
         """,
         (orden_id,),
     )
     items = cursor.fetchall()
 
+    repartidores_activos = listar_repartidores(cursor, solo_activos=True)
     tasa = obtener_tasa_actual(cursor)
     conn.close()
 
-    total_usd = sum(float(i[1]) for i in items)
+    delivery_usd = a_float(o[11])
+    delivery_repartidor_id = o[12]
+    totales_visuales = calcular_totales_visuales_delivery(items, delivery_usd)
+    total_usd = totales_visuales["venta_restaurante_usd"]
     total_bs = total_usd * tasa
+    total_cliente_usd = totales_visuales["total_cliente_usd"]
+    total_cliente_bs = total_cliente_usd * tasa
+    delivery_legacy_usd = totales_visuales["delivery_legacy_usd"]
+    tiene_delivery_legacy = delivery_legacy_usd > TOLERANCIA_COBRO
     descuento = o[8] if o[8] else 0
     total_bs_final = max(total_bs - descuento, 0)
     bloqueada_por_cierre = o[10] is not None
@@ -6248,11 +6667,24 @@ def orden(orden_id):
     .extra-lumpia-btn:hover {{ background:#252A32; border-color:#3C4350; }}
     .extra-lumpia-btn.activo {{ background:var(--verde-neko); color:white; border-color:var(--verde-neko); }}
     .combo-aceptar {{ width:100%; margin-top:4px; background:var(--verde-neko); color:#0F1115; position:sticky; bottom:0; }}
+    .delivery-panel {{ border:1px solid var(--borde); background:var(--panel-secundario); border-radius:12px; padding:14px; margin:14px 0; }}
+    .delivery-panel h3 {{ margin-top:0; }}
+    .delivery-grid {{ display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin:8px 0; }}
+    .delivery-monto-btn {{ min-height:44px; border:1px solid var(--borde); border-radius:9px; background:var(--tarjeta); color:var(--texto); font-weight:900; cursor:pointer; }}
+    .delivery-monto-btn.activo {{ background:var(--verde-neko); color:#0F1115; border-color:var(--verde-neko); }}
+    .delivery-form-row {{ display:grid; grid-template-columns:1fr; gap:8px; }}
+    .delivery-actions {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }}
+    .delivery-help {{ color:var(--texto-secundario); font-size:13px; margin:6px 0; }}
+    .delivery-alerta {{ background:#3b2b12; color:#fde68a; border:1px solid #92400e; border-radius:8px; padding:10px; margin:8px 0; }}
+    .delivery-nuevo {{ display:none; margin-top:10px; border-top:1px solid var(--borde); padding-top:10px; }}
+    .delivery-nuevo.activo {{ display:block; }}
+    .total-cliente {{ color:var(--verde-neko); }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; border-left: none; }}
         .sabores-grid {{ grid-template-columns:1fr 1fr; }}
         .extra-lumpia-opciones {{ grid-template-columns:1fr; }}
+        .delivery-grid, .delivery-actions {{ grid-template-columns:1fr 1fr; }}
         .modal-refresco {{ padding:12px; }}
         .modal-contenido {{ width:calc(100% - 24px); padding:14px; }}
     }}
@@ -6285,6 +6717,8 @@ def orden(orden_id):
     cats_dict = defaultdict(list)
     for p in productos:
         cat_nombre = p[3] if p[3] else "Sin categoria"
+        if es_producto_delivery_legacy(p[1], cat_nombre):
+            continue
         cats_dict[cat_nombre].append(p)
 
     orden_cat_map = {nombre: i for i, nombre in enumerate(ORDEN_CATEGORIAS_POS)}
@@ -6360,6 +6794,34 @@ def orden(orden_id):
             </form>
             """
 
+    repartidor_options = '<option value="">Sin repartidor</option>'
+    for rep in repartidores_activos:
+        selected = "selected" if rep[0] == delivery_repartidor_id else ""
+        repartidor_options += (
+            f'<option value="{rep[0]}" {selected}>{html_lib.escape(rep[1])}</option>'
+        )
+
+    botones_delivery = ""
+    for monto_rapido in DELIVERY_MONTOS_RAPIDOS:
+        activo = "activo" if abs(delivery_usd - monto_rapido) <= TOLERANCIA_COBRO else ""
+        botones_delivery += (
+            f'<button type="button" class="delivery-monto-btn {activo}" '
+            f'data-delivery-monto="{monto_rapido:.2f}">${monto_rapido:.2f}</button>'
+        )
+
+    delivery_bloqueado = (not puede_modificar_orden) or tiene_delivery_legacy
+    delivery_disabled = "disabled" if delivery_bloqueado else ""
+    delivery_aviso = ""
+    if tiene_delivery_legacy:
+        delivery_aviso = (
+            "<div class='delivery-alerta'>"
+            "Esta orden contiene un delivery agregado con el sistema anterior. "
+            "No se puede agregar delivery explícito para evitar doble cargo."
+            "</div>"
+        )
+    elif not puede_modificar_orden:
+        delivery_aviso = "<div class='delivery-alerta'>Delivery bloqueado para esta orden.</div>"
+
     html += f"""
     <div class="panel">
         <h2>🧾 Orden {texto_numero_orden(o[1])}</h2>
@@ -6422,10 +6884,39 @@ def orden(orden_id):
         """
 
     html += f"""
-        <div class="total">USD: ${round(total_usd, 2)}</div>
-        <div class="total">Bs: {round(total_bs, 2)}</div>
+        <div class="delivery-panel">
+            <h3>Delivery</h3>
+            {delivery_aviso}
+            <form method="post" action="/orden/{orden_id}/delivery" id="deliveryForm">
+                <label>Monto USD</label>
+                <div class="delivery-grid">{botones_delivery}</div>
+                <input name="delivery_usd" id="delivery_usd" type="number" min="0" max="{DELIVERY_MONTO_MAXIMO:.2f}" step="0.01" value="{delivery_usd:.2f}" {delivery_disabled}>
+                <label>Repartidor</label>
+                <select name="delivery_repartidor_id" id="delivery_repartidor_id" {delivery_disabled}>
+                    {repartidor_options}
+                </select>
+                <div class="delivery-help">Si el delivery es $0.00, no hace falta seleccionar repartidor.</div>
+                <div class="delivery-actions">
+                    <button class="btn" type="submit" {delivery_disabled}>Guardar delivery</button>
+                    <button class="btn" type="button" id="mostrarNuevoRepartidor" {delivery_disabled}>+ Nuevo repartidor</button>
+                </div>
+            </form>
+            <div class="delivery-nuevo" id="nuevoRepartidorPanel">
+                <input id="nuevoRepartidorNombre" placeholder="Nombre del repartidor">
+                <input id="nuevoRepartidorTelefono" placeholder="Teléfono">
+                <button class="btn" type="button" id="guardarNuevoRepartidor">Crear y seleccionar</button>
+                <div class="delivery-help" id="nuevoRepartidorMensaje"></div>
+                <a href="/repartidores" class="delivery-help">Administrar repartidores</a>
+            </div>
+        </div>
+        <div class="total">Consumo Neko Wok: ${total_usd:.2f}</div>
+        <div class="total">Delivery: ${(delivery_usd + delivery_legacy_usd):.2f}</div>
+        <div class="total total-cliente">Total cliente: ${total_cliente_usd:.2f}</div>
+        <div class="total">USD: ${total_usd:.2f}</div>
+        <div class="total">Bs: {total_bs:.2f}</div>
         <p>Descuento: Bs {round(descuento, 2)}</p>
-        <div class="total">Total Final Bs: {round(total_bs_final, 2)}</div>
+        <div class="total">Total Final Bs: {total_bs_final:.2f}</div>
+        <div class="delivery-help">Total cliente Bs visual: {total_cliente_bs:.2f}</div>
         {boton_reimprimir}
     """
 
@@ -6489,6 +6980,72 @@ def orden(orden_id):
     const saboresRefrescoGrid = document.getElementById("sabores-refresco-grid");
     const cerrarModalRefresco = document.getElementById("cerrar-modal-refresco");
     let refrescoSeleccionadoUrl = "";
+    const deliveryMonto = document.getElementById("delivery_usd");
+    const deliveryRepartidor = document.getElementById("delivery_repartidor_id");
+    const nuevoRepartidorPanel = document.getElementById("nuevoRepartidorPanel");
+    const mostrarNuevoRepartidor = document.getElementById("mostrarNuevoRepartidor");
+    const guardarNuevoRepartidor = document.getElementById("guardarNuevoRepartidor");
+    const nuevoRepartidorNombre = document.getElementById("nuevoRepartidorNombre");
+    const nuevoRepartidorTelefono = document.getElementById("nuevoRepartidorTelefono");
+    const nuevoRepartidorMensaje = document.getElementById("nuevoRepartidorMensaje");
+
+    document.querySelectorAll(".delivery-monto-btn").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{
+            if (!deliveryMonto || deliveryMonto.disabled) {{
+                return;
+            }}
+            deliveryMonto.value = btn.dataset.deliveryMonto;
+            document.querySelectorAll(".delivery-monto-btn").forEach(function(opcion) {{
+                opcion.classList.toggle("activo", opcion === btn);
+            }});
+        }});
+    }});
+
+    if (mostrarNuevoRepartidor && nuevoRepartidorPanel) {{
+        mostrarNuevoRepartidor.addEventListener("click", function() {{
+            nuevoRepartidorPanel.classList.toggle("activo");
+            if (nuevoRepartidorPanel.classList.contains("activo") && nuevoRepartidorNombre) {{
+                nuevoRepartidorNombre.focus();
+            }}
+        }});
+    }}
+
+    if (guardarNuevoRepartidor) {{
+        guardarNuevoRepartidor.addEventListener("click", function() {{
+            const nombre = (nuevoRepartidorNombre.value || "").trim();
+            const telefono = (nuevoRepartidorTelefono.value || "").trim();
+            if (!nombre) {{
+                nuevoRepartidorMensaje.textContent = "El nombre es obligatorio.";
+                nuevoRepartidorNombre.focus();
+                return;
+            }}
+            fetch("/api/repartidores", {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{nombre: nombre, telefono: telefono}})
+            }})
+            .then(function(response) {{ return response.json().then(function(data) {{ return {{status: response.status, data: data}}; }}); }})
+            .then(function(result) {{
+                if (!result.data.ok) {{
+                    nuevoRepartidorMensaje.textContent = result.data.error || "No se pudo crear el repartidor.";
+                    return;
+                }}
+                const rep = result.data.repartidor;
+                const option = document.createElement("option");
+                option.value = String(rep.id);
+                option.textContent = rep.nombre;
+                option.selected = true;
+                deliveryRepartidor.appendChild(option);
+                nuevoRepartidorNombre.value = "";
+                nuevoRepartidorTelefono.value = "";
+                nuevoRepartidorMensaje.textContent = "Repartidor creado y seleccionado.";
+                nuevoRepartidorPanel.classList.remove("activo");
+            }})
+            .catch(function() {{
+                nuevoRepartidorMensaje.textContent = "No se pudo crear el repartidor.";
+            }});
+        }});
+    }}
 
     function cerrarSelectorRefresco() {{
         refrescoSeleccionadoUrl = "";
@@ -6948,6 +7505,26 @@ def orden(orden_id):
     return html
 
 
+@app.route("/orden/<int:orden_id>/delivery", methods=["POST"])
+def actualizar_delivery(orden_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        actualizar_delivery_orden(
+            cursor,
+            orden_id,
+            request.form.get("delivery_usd"),
+            request.form.get("delivery_repartidor_id"),
+        )
+        conn.commit()
+        conn.close()
+        return redirect(f"/orden/{orden_id}")
+    except ValueError as exc:
+        conn.rollback()
+        conn.close()
+        return str(exc), 400
+
+
 @app.route("/agregar/<int:orden_id>/<int:producto_id>")
 def agregar(orden_id, producto_id):
     conn = get_connection()
@@ -6967,13 +7544,31 @@ def agregar(orden_id, producto_id):
         conn.close()
         return "No puedes agregar productos a una orden cerrada"
 
-    cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (producto_id,))
+    cursor.execute(
+        """
+        SELECT p.nombre, p.precio, c.nombre
+        FROM productos p
+        LEFT JOIN categorias c ON p.categoria_id = c.id
+        WHERE p.id=?
+        """,
+        (producto_id,),
+    )
     p = cursor.fetchone()
     if not p:
         conn.close()
         return "Producto no encontrado"
 
     producto_nombre = p[0]
+    if es_producto_delivery_legacy(producto_nombre, p[2]):
+        conn.close()
+        return "El delivery ahora se registra desde el campo Delivery de la orden.", 400
+
+    cursor.execute("SELECT COALESCE(delivery_usd, 0) FROM ordenes WHERE id=?", (orden_id,))
+    delivery_actual = a_float(cursor.fetchone()[0])
+    if delivery_actual > TOLERANCIA_COBRO and es_producto_delivery_legacy(producto_nombre, p[2]):
+        conn.close()
+        return "Esta orden ya tiene delivery explícito configurado.", 400
+
     indicacion = ""
     if es_producto_refresco(producto_nombre):
         sabor = normalizar_sabor_refresco(request.args.get("sabor"))
