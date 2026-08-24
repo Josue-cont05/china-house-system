@@ -832,6 +832,64 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(cursor.fetchone(), cxc_mov_before)
         conn.close()
 
+    def test_factura_without_delivery_keeps_existing_item_total(self):
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._charge(orden_id, "usd", 20).status_code, 302)
+
+        response = self.client.get(f"/factura/{orden_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Producto prueba", response.data)
+        self.assertIn(b"TOTAL: $20.0", response.data)
+        self.assertNotIn(b"Consumo Neko Wok", response.data)
+
+    def test_factura_with_explicit_delivery_shows_restaurant_delivery_and_total_client_without_double_count(self):
+        orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+
+        response = self.client.get(f"/factura/{orden_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Consumo Neko Wok", response.data)
+        self.assertIn(b"$20.0", response.data)
+        self.assertIn(b"Delivery", response.data)
+        self.assertIn(b"$3.0", response.data)
+        self.assertIn(b"TOTAL: $23.0", response.data)
+        self.assertNotIn(b"TOTAL: $26", response.data)
+        self.assertNotIn(b"Producto prueba - $20.0", response.data)
+
+    def test_facturas_pendientes_payload_uses_explicit_delivery_breakdown_for_printer(self):
+        orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET facturar=1 WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        response = self.client.get("/facturas_pendientes")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        factura = next(item for item in payload if item["id"] == orden_id)
+        self.assertEqual(factura["items"], ["Consumo Neko Wok - $20.0", "Delivery - $3.0"])
+        self.assertEqual(factura["total"], 23.0)
+
+    def test_factura_legacy_delivery_item_keeps_legacy_behavior(self):
+        orden_id = self._create_order(price=20.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (orden_id, "Delivery 3", 3.0),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.client.get(f"/factura/{orden_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Producto prueba", response.data)
+        self.assertIn(b"Delivery 3", response.data)
+        self.assertIn(b"TOTAL: $23.0", response.data)
+        self.assertNotIn(b"Consumo Neko Wok", response.data)
+
     def test_order_without_delivery_shows_zero_visual_delivery(self):
         orden_id = self._create_order(price=20.0)
         response = self.client.get(f"/orden/{orden_id}")

@@ -862,6 +862,29 @@ def agrupar_items_factura(items):
     return resultado
 
 
+def preparar_lineas_factura(items, venta_restaurante_usd=None, delivery_usd=None, total_cliente_usd=None):
+    delivery_explicito = round(a_float(delivery_usd), 2)
+    if delivery_explicito > TOLERANCIA_COBRO:
+        consumo = (
+            round(a_float(venta_restaurante_usd), 2)
+            if venta_restaurante_usd is not None
+            else round(sum(a_float(item[1]) for item in items), 2)
+        )
+        total = (
+            round(a_float(total_cliente_usd), 2)
+            if total_cliente_usd is not None
+            else round(consumo + delivery_explicito, 2)
+        )
+        return [
+            {"texto": "Consumo Neko Wok", "precio_total": consumo},
+            {"texto": "Delivery", "precio_total": delivery_explicito},
+        ], total
+
+    items_agrupados = agrupar_items_factura(items)
+    total = round(sum(a_float(i[1]) for i in items), 2)
+    return items_agrupados, total
+
+
 def etiqueta_metodo_pago(metodo):
     return ETIQUETAS_METODO_PAGO.get(normalizar_metodo_pago(metodo), metodo or "-")
 
@@ -10605,7 +10628,8 @@ def factura(orden_id):
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT o.numero_orden, o.tipo, o.referencia, o.cliente, u.nombre
+        SELECT o.numero_orden, o.tipo, o.referencia, o.cliente, u.nombre,
+               o.venta_restaurante_usd, o.delivery_usd, o.total_cliente_usd
         FROM ordenes o
         LEFT JOIN usuarios u ON o.usuario_id = u.id
         WHERE o.id=?
@@ -10628,8 +10652,7 @@ def factura(orden_id):
     items = cursor.fetchall()
     conn.close()
 
-    total = sum(i[1] for i in items)
-    items_agrupados = agrupar_items_factura(items)
+    items_agrupados, total = preparar_lineas_factura(items, o[5], o[6], o[7])
     html = f"""
     <html>
     <head>
@@ -10703,7 +10726,8 @@ def facturas_pendientes():
         cursor.execute(
             """
             SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
-                   o.factura_reimpresion_token
+                   o.factura_reimpresion_token,
+                   o.venta_restaurante_usd, o.delivery_usd, o.total_cliente_usd
             FROM ordenes o
             LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
@@ -10735,7 +10759,7 @@ def facturas_pendientes():
 
         for o in ordenes:
             items = items_por_orden[o[0]]
-            items_agrupados = agrupar_items_factura(items)
+            items_agrupados, total_factura = preparar_lineas_factura(items, o[7], o[8], o[9])
 
             resultado.append(
                 {
@@ -10750,7 +10774,7 @@ def facturas_pendientes():
                         f"{quitar_prefijo_cantidad_visual(item['texto'])} - ${round(item['precio_total'], 2)}"
                         for item in items_agrupados
                     ],
-                    "total": sum(a_float(i[1]) for i in items),
+                    "total": total_factura,
                 }
             )
 
