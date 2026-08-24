@@ -2003,6 +2003,43 @@ def detalle_delivery_repartidor(cursor, repartidor_id):
     }
 
 
+def registrar_pago_delivery_repartidor(cursor, repartidor_id, monto_usd, referencia, observacion, usuario_id):
+    repartidor = obtener_repartidor(cursor, repartidor_id)
+    if not repartidor:
+        raise ValueError("Repartidor no encontrado")
+
+    monto = round(a_float(monto_usd), 2)
+    if monto <= TOLERANCIA_COBRO:
+        raise ValueError("El monto del pago debe ser mayor a 0.")
+
+    detalle = detalle_delivery_repartidor(cursor, repartidor_id)
+    saldo_actual = round(a_float(detalle["resumen"]["pendiente"] if detalle else 0), 2)
+    if saldo_actual <= TOLERANCIA_COBRO:
+        raise ValueError("Este repartidor no tiene saldo pendiente.")
+    if monto > saldo_actual + TOLERANCIA_COBRO:
+        raise ValueError("El pago no puede superar el saldo pendiente.")
+
+    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute(
+        """
+        INSERT INTO delivery_movimientos (
+            orden_id, repartidor_id, tipo, monto_usd, fecha,
+            usuario_id, referencia, observacion, movimiento_revertido_id
+        )
+        VALUES (NULL, ?, 'pago', ?, ?, ?, ?, ?, NULL)
+        """,
+        (
+            repartidor_id,
+            -monto,
+            fecha,
+            usuario_id,
+            (referencia or "").strip()[:120],
+            (observacion or "").strip()[:500],
+        ),
+    )
+    return obtener_ultimo_id(cursor, "delivery_movimientos")
+
+
 def crear_usuarios_iniciales():
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
 
@@ -3303,6 +3340,7 @@ def proteger_sistema():
         "registrar_abono_cxc",
         "delivery_admin",
         "delivery_repartidor_detalle",
+        "registrar_pago_delivery",
         "repartidores",
         "nuevo_repartidor",
         "editar_repartidor",
@@ -6592,6 +6630,29 @@ def delivery_repartidor_detalle(repartidor_id):
     if not movimientos_html:
         movimientos_html = '<tr><td colspan="7">Este repartidor no tiene movimientos de delivery.</td></tr>'
 
+    formulario_pago = ""
+    if resumen["pendiente"] > TOLERANCIA_COBRO:
+        formulario_pago = f"""
+        <div class="card-admin">
+            <h2>Registrar pago</h2>
+            <form method="post" action="/delivery/repartidor/{repartidor[0]}/pago" class="form-grid">
+                <div><label>Monto USD</label><input name="monto_usd" type="number" min="0.01" step="0.01" required></div>
+                <div><label>Referencia</label><input name="referencia" maxlength="120"></div>
+                <div class="full"><label>Observacion</label><textarea name="observacion" maxlength="500"></textarea></div>
+                <div class="acciones full">
+                    <button type="submit">Registrar pago</button>
+                </div>
+            </form>
+        </div>
+        """
+    else:
+        formulario_pago = """
+        <div class="card-admin">
+            <h2>Registrar pago</h2>
+            <p>No hay saldo pendiente para pagar.</p>
+        </div>
+        """
+
     return f"""
     <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
@@ -6615,6 +6676,7 @@ def delivery_repartidor_detalle(repartidor_id):
             <div class="metrica"><small>Ajustes netos</small><b>{formato_usd(resumen["ajustes_netos"])}</b></div>
             <div class="metrica"><small>Pendiente actual</small><b>{formato_usd(resumen["pendiente"])}</b></div>
         </div>
+        {formulario_pago}
         <div class="card-admin">
             <h2>Historial de movimientos</h2>
             <table>
@@ -6624,6 +6686,32 @@ def delivery_repartidor_detalle(repartidor_id):
         </div>
     </div></body></html>
     """
+
+
+@app.route("/delivery/repartidor/<int:repartidor_id>/pago", methods=["POST"])
+def registrar_pago_delivery(repartidor_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        registrar_pago_delivery_repartidor(
+            cursor,
+            repartidor_id,
+            request.form.get("monto_usd"),
+            request.form.get("referencia"),
+            request.form.get("observacion"),
+            session.get("usuario_id"),
+        )
+        conn.commit()
+    except ValueError as exc:
+        conn.rollback()
+        conn.close()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+    conn.close()
+    return redirect(f"/delivery/repartidor/{repartidor_id}")
 
 
 @app.route("/repartidores")

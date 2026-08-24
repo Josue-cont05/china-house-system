@@ -296,6 +296,33 @@ class SalesSnapshotTest(unittest.TestCase):
         conn.close()
         return movimiento_id
 
+    def _delivery_movements_for_repartidor(self, repartidor_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT orden_id, tipo, monto_usd, usuario_id, referencia, observacion
+            FROM delivery_movimientos
+            WHERE repartidor_id=?
+            ORDER BY id
+            """,
+            (repartidor_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def _post_delivery_payment(self, repartidor_id, monto, referencia="", observacion=""):
+        return self.client.post(
+            f"/delivery/repartidor/{repartidor_id}/pago",
+            data={
+                "monto_usd": str(monto),
+                "referencia": referencia,
+                "observacion": observacion,
+            },
+            follow_redirects=False,
+        )
+
     def _delivery_product_id(self, nombre="Delivery 3"):
         conn = self._conn()
         cursor = conn.cursor()
@@ -684,10 +711,10 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertIn(b"$ 1.50", response.data)
         self.assertIn(f'href="/orden/{orden_id}"'.encode(), response.data)
 
-        anulacion_pos = response.data.index(b"anulacion")
-        ajuste_pos = response.data.index(b"ajuste")
-        pago_pos = response.data.index(b"pago")
-        cargo_pos = response.data.index(b"cargo")
+        anulacion_pos = response.data.index(b"2026-08-23 12:00")
+        ajuste_pos = response.data.index(b"2026-08-23 11:00")
+        pago_pos = response.data.index(b"2026-08-23 10:00")
+        cargo_pos = response.data.index(b"2026-08-23 09:00")
         self.assertLess(anulacion_pos, ajuste_pos)
         self.assertLess(ajuste_pos, pago_pos)
         self.assertLess(pago_pos, cargo_pos)
@@ -711,6 +738,99 @@ class SalesSnapshotTest(unittest.TestCase):
         dashboard = self.client.get("/delivery")
         self.assertIn(f'href="/delivery/repartidor/{juan_id}"'.encode(), dashboard.data)
         self.assertIn(f'href="/delivery/repartidor/{pedro_id}"'.encode(), dashboard.data)
+
+    def test_delivery_driver_payment_partial_reduces_balance_and_preserves_reference_observation_user(self):
+        repartidor_id = self._insert_repartidor("Pago Parcial", activo=1)
+        self._insert_delivery_movimiento(repartidor_id, "cargo", 3, orden_id=self._create_order())
+        self._insert_delivery_movimiento(repartidor_id, "cargo", 2, orden_id=self._create_order())
+
+        response = self._post_delivery_payment(repartidor_id, 4, "zelle-123", "Pago parcial")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], f"/delivery/repartidor/{repartidor_id}")
+
+        movimientos = self._delivery_movements_for_repartidor(repartidor_id)
+        self.assertEqual(movimientos[-1], (None, "pago", -4.0, self._master_user_id(), "zelle-123", "Pago parcial"))
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        detalle = web_app.detalle_delivery_repartidor(cursor, repartidor_id)
+        conn.close()
+        self.assertEqual(detalle["resumen"]["pendiente"], 1.0)
+        self.assertEqual(detalle["resumen"]["pagado"], 4.0)
+
+    def test_delivery_driver_payment_total_leaves_zero_balance(self):
+        repartidor_id = self._insert_repartidor("Pago Total", activo=1)
+        self._insert_delivery_movimiento(repartidor_id, "cargo", 10, orden_id=self._create_order())
+
+        response = self._post_delivery_payment(repartidor_id, 10)
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        detalle = web_app.detalle_delivery_repartidor(cursor, repartidor_id)
+        conn.close()
+        self.assertEqual(detalle["resumen"]["pendiente"], 0.0)
+        self.assertIn(b"No hay saldo pendiente para pagar", self.client.get(f"/delivery/repartidor/{repartidor_id}").data)
+
+    def test_delivery_driver_payment_rejects_overpayment_zero_negative_and_missing_repartidor(self):
+        repartidor_id = self._insert_repartidor("Pago Validacion", activo=1)
+        self._insert_delivery_movimiento(repartidor_id, "cargo", 5, orden_id=self._create_order())
+
+        for monto, mensaje in (
+            (6, b"superar el saldo pendiente"),
+            (0, b"mayor a 0"),
+            (-1, b"mayor a 0"),
+        ):
+            with self.subTest(monto=monto):
+                response = self._post_delivery_payment(repartidor_id, monto)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(mensaje, response.data)
+                self.assertEqual(len(self._delivery_movements_for_repartidor(repartidor_id)), 1)
+
+        response = self._post_delivery_payment(999999, 1)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Repartidor no encontrado", response.data)
+
+    def test_delivery_driver_payment_allows_inactive_repartidor_with_pending_balance(self):
+        repartidor_id = self._insert_repartidor("Pago Inactivo", activo=0)
+        self._insert_delivery_movimiento(repartidor_id, "cargo", 7, orden_id=self._create_order())
+
+        response = self._post_delivery_payment(repartidor_id, 2)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self._delivery_movements_for_repartidor(repartidor_id)[-1][1:3], ("pago", -2.0))
+
+    def test_delivery_driver_payment_does_not_modify_orders_or_cxc(self):
+        repartidor_id = self._insert_repartidor("Pago Sin Efectos", activo=1)
+        orden_delivery = self._create_order(price=20.0)
+        self._insert_delivery_movimiento(repartidor_id, "cargo", 5, orden_id=orden_delivery)
+        cliente_id = self._create_client("Cliente No Tocar CxC")
+        orden_cxc = self._create_order(price=20.0)
+        self.assertEqual(
+            self._charge(orden_cxc, "usd", 12, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ordenes WHERE id=? ", (orden_delivery,))
+        orden_before = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*), COALESCE(SUM(saldo_pendiente), 0) FROM cuentas_por_cobrar")
+        cxc_before = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*), COALESCE(SUM(monto_saldo), 0) FROM cuentas_por_cobrar_movimientos")
+        cxc_mov_before = cursor.fetchone()
+        conn.close()
+
+        self.assertEqual(self._post_delivery_payment(repartidor_id, 3).status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ordenes WHERE id=? ", (orden_delivery,))
+        self.assertEqual(cursor.fetchone(), orden_before)
+        cursor.execute("SELECT COUNT(*), COALESCE(SUM(saldo_pendiente), 0) FROM cuentas_por_cobrar")
+        self.assertEqual(cursor.fetchone(), cxc_before)
+        cursor.execute("SELECT COUNT(*), COALESCE(SUM(monto_saldo), 0) FROM cuentas_por_cobrar_movimientos")
+        self.assertEqual(cursor.fetchone(), cxc_mov_before)
+        conn.close()
 
     def test_order_without_delivery_shows_zero_visual_delivery(self):
         orden_id = self._create_order(price=20.0)
