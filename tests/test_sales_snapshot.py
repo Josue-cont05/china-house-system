@@ -323,6 +323,13 @@ class SalesSnapshotTest(unittest.TestCase):
             follow_redirects=False,
         )
 
+    def _set_delivery_movement_dates(self, repartidor_id, fecha="2026-08-20 15:00:00"):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE delivery_movimientos SET fecha=? WHERE repartidor_id=?", (fecha, repartidor_id))
+        conn.commit()
+        conn.close()
+
     def _delivery_product_id(self, nombre="Delivery 3"):
         conn = self._conn()
         cursor = conn.cursor()
@@ -889,6 +896,93 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertIn(b"Delivery 3", response.data)
         self.assertIn(b"TOTAL: $23.0", response.data)
         self.assertNotIn(b"Consumo Neko Wok", response.data)
+
+    def test_reporte_delivery_explicit_counts_restaurant_sale_only_and_excludes_delivery_from_product_ranking(self):
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        self._set_delivery_movement_dates(repartidor_id)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20")
+        conn.close()
+
+        self.assertEqual(reporte["total_vendido_usd"], 20.0)
+        self.assertEqual(reporte["delivery_generado_usd"], 3.0)
+        self.assertEqual(reporte["delivery_pagado_usd"], 0.0)
+        self.assertEqual(reporte["delivery_pendiente_actual_usd"], 3.0)
+        self.assertEqual(reporte["ventas_por_orden"][0]["total_usd"], 20.0)
+        self.assertEqual(reporte["ventas_por_orden"][0]["delivery_usd"], 3.0)
+        self.assertEqual(reporte["ventas_por_orden"][0]["total_cliente_usd"], 23.0)
+        self.assertEqual(reporte["ventas_por_dia"][0]["total_usd"], 20.0)
+        productos = [plato["producto"] for plato in reporte["platos_vendidos"]]
+        self.assertIn("Producto prueba", productos)
+        self.assertNotIn("Delivery", productos)
+        self.assertNotIn("Delivery 3", productos)
+
+    def test_cierre_delivery_shows_generated_paid_and_current_balance_from_movements(self):
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        self._set_delivery_movement_dates(repartidor_id)
+        self.assertEqual(self._post_delivery_payment(repartidor_id, 2).status_code, 302)
+        self._set_delivery_movement_dates(repartidor_id)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        resumen = web_app.construir_resumen_cierre(cursor)
+        conn.close()
+
+        self.assertEqual(resumen["total_ventas_usd"], 20.0)
+        self.assertEqual(resumen["delivery_generado_usd"], 3.0)
+        self.assertEqual(resumen["delivery_pagado_usd"], 2.0)
+        self.assertEqual(resumen["delivery_pendiente_actual_usd"], 1.0)
+        self.assertEqual(resumen["productos"], [("Producto prueba", 1)])
+
+    def test_reporte_delivery_multiple_sales_and_drivers_sum_activity_and_current_balance(self):
+        orden_juan, juan_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_juan, "usd", 23).status_code, 302)
+        pedro_id = self._insert_repartidor("Reporte Pedro", activo=1)
+        orden_pedro, _ = self._create_order_with_delivery(price=10.0, delivery=4.0, repartidor_id=pedro_id)
+        self.assertEqual(self._charge(orden_pedro, "usd", 14).status_code, 302)
+        self._set_delivery_movement_dates(juan_id)
+        self._set_delivery_movement_dates(pedro_id)
+        self.assertEqual(self._post_delivery_payment(juan_id, 3).status_code, 302)
+        self._set_delivery_movement_dates(juan_id)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20")
+        resumen = web_app.construir_resumen_cierre(cursor)
+        conn.close()
+
+        self.assertEqual(reporte["total_vendido_usd"], 30.0)
+        self.assertEqual(reporte["delivery_generado_usd"], 7.0)
+        self.assertEqual(reporte["delivery_pagado_usd"], 3.0)
+        self.assertEqual(reporte["delivery_pendiente_actual_usd"], 4.0)
+        self.assertEqual(resumen["total_ventas_usd"], 30.0)
+        self.assertEqual(resumen["delivery_generado_usd"], 7.0)
+        self.assertEqual(resumen["delivery_pagado_usd"], 3.0)
+        self.assertEqual(resumen["delivery_pendiente_actual_usd"], 4.0)
+
+    def test_reporte_sale_without_delivery_and_legacy_delivery_keep_previous_behavior(self):
+        sin_delivery = self._create_order(price=12.0)
+        self.assertEqual(self._charge(sin_delivery, "usd", 12).status_code, 302)
+        legacy = self._create_order(price=20.0, estado="cerrada")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (legacy, "Delivery 3", 3.0),
+        )
+        conn.commit()
+        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20")
+        conn.close()
+
+        self.assertEqual(reporte["total_vendido_usd"], 35.0)
+        productos = {plato["producto"]: plato["cantidad"] for plato in reporte["platos_vendidos"]}
+        self.assertEqual(productos["Producto prueba"], 2)
+        self.assertEqual(productos["Delivery 3"], 1)
+        self.assertEqual(reporte["delivery_generado_usd"], 0.0)
 
     def test_order_without_delivery_shows_zero_visual_delivery(self):
         orden_id = self._create_order(price=20.0)

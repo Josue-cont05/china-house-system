@@ -1971,6 +1971,41 @@ def resumen_delivery_por_repartidor(cursor):
     return cursor.fetchall()
 
 
+def resumen_delivery_movimientos(cursor, inicio=None, fin=None, solo_ordenes_sin_cierre=False):
+    where_periodo = []
+    params_periodo = []
+    if inicio:
+        where_periodo.append("dm.fecha >= ?")
+        params_periodo.append(inicio)
+    if fin:
+        where_periodo.append("dm.fecha <= ?")
+        params_periodo.append(fin)
+    where_sql = "WHERE " + " AND ".join(where_periodo) if where_periodo else ""
+    condicion_cargo = "dm.tipo='cargo'"
+    if solo_ordenes_sin_cierre:
+        condicion_cargo += " AND dm.orden_id IS NOT NULL AND o.cierre_id IS NULL"
+
+    cursor.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(CASE WHEN {condicion_cargo} THEN dm.monto_usd ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN dm.tipo='pago' THEN ABS(dm.monto_usd) ELSE 0 END), 0)
+        FROM delivery_movimientos dm
+        LEFT JOIN ordenes o ON o.id = dm.orden_id
+        {where_sql}
+        """,
+        params_periodo,
+    )
+    generado, pagado = cursor.fetchone()
+    cursor.execute("SELECT COALESCE(SUM(monto_usd), 0) FROM delivery_movimientos")
+    pendiente_actual = cursor.fetchone()[0]
+    return {
+        "generado": round(a_float(generado), 2),
+        "pagado": round(a_float(pagado), 2),
+        "pendiente_actual": round(a_float(pendiente_actual), 2),
+    }
+
+
 def detalle_delivery_repartidor(cursor, repartidor_id):
     repartidor = obtener_repartidor(cursor, repartidor_id)
     if not repartidor:
@@ -2861,12 +2896,16 @@ def construir_resumen_cierre(cursor):
             o.numero_orden,
             COALESCE(o.cliente, ''),
             COALESCE(o.descuento, 0),
-            COALESCE(SUM(oi.precio), 0)
+            COALESCE(SUM(oi.precio), 0),
+            o.venta_restaurante_usd,
+            o.delivery_usd,
+            o.total_cliente_usd
         FROM ordenes o
         LEFT JOIN orden_items oi ON oi.orden_id = o.id
         WHERE o.cierre_id IS NULL
           AND o.estado = 'cerrada'
-        GROUP BY o.id, o.numero_orden, o.cliente, o.descuento
+        GROUP BY o.id, o.numero_orden, o.cliente, o.descuento,
+                 o.venta_restaurante_usd, o.delivery_usd, o.total_cliente_usd
         ORDER BY o.id ASC
         """
     )
@@ -2878,12 +2917,18 @@ def construir_resumen_cierre(cursor):
     total_ventas_usd = 0.0
     total_ventas_bs = 0.0
 
-    for orden_id, numero_orden, cliente, descuento_bs, subtotal_usd in filas_ordenes:
+    for orden_id, numero_orden, cliente, descuento_bs, subtotal_usd, venta_restaurante_usd, delivery_usd, total_cliente_usd in filas_ordenes:
         subtotal_usd = a_float(subtotal_usd)
         descuento_bs = a_float(descuento_bs)
         descuento_usd = (descuento_bs / tasa) if tasa else 0.0
-        total_neto_usd = max(subtotal_usd - descuento_usd, 0.0)
-        total_neto_bs = max((subtotal_usd * tasa) - descuento_bs, 0.0)
+        if venta_restaurante_usd is not None:
+            total_neto_usd = max(a_float(venta_restaurante_usd), 0.0)
+            subtotal_reporte_usd = total_neto_usd
+            total_neto_bs = round(total_neto_usd * tasa, 2)
+        else:
+            total_neto_usd = max(subtotal_usd - descuento_usd, 0.0)
+            subtotal_reporte_usd = subtotal_usd
+            total_neto_bs = max((subtotal_usd * tasa) - descuento_bs, 0.0)
 
         total_ventas_usd += total_neto_usd
         total_ventas_bs += total_neto_bs
@@ -2895,9 +2940,11 @@ def construir_resumen_cierre(cursor):
                 "numero_orden": numero_orden,
                 "cliente": cliente,
                 "descuento_bs": descuento_bs,
-                "subtotal_usd": subtotal_usd,
+                "subtotal_usd": subtotal_reporte_usd,
                 "total_neto_usd": total_neto_usd,
                 "total_neto_bs": total_neto_bs,
+                "delivery_usd": a_float(delivery_usd),
+                "total_cliente_usd": a_float(total_cliente_usd),
             }
         )
 
@@ -2964,6 +3011,12 @@ def construir_resumen_cierre(cursor):
         """
     )
     productos = cursor.fetchall()
+    inicio_delivery = inicio_jornada if inicio_jornada != "Sin ordenes pendientes" else None
+    delivery_resumen = resumen_delivery_movimientos(
+        cursor,
+        inicio=inicio_delivery,
+        solo_ordenes_sin_cierre=True,
+    )
 
     total_cobrado_equiv_bs = (
         total_punto_venta_bs + total_pago_movil_bs + total_efectivo_bs + (total_efectivo_usd * tasa)
@@ -2985,6 +3038,9 @@ def construir_resumen_cierre(cursor):
         "total_ventas_usd": round(total_ventas_usd, 2),
         "total_ventas_bs": round(total_ventas_bs, 2),
         "total_ventas": round(total_ventas_bs, 2),
+        "delivery_generado_usd": delivery_resumen["generado"],
+        "delivery_pagado_usd": delivery_resumen["pagado"],
+        "delivery_pendiente_actual_usd": delivery_resumen["pendiente_actual"],
         "total_punto_venta_bs": round(total_punto_venta_bs, 2),
         "total_pago_movil_bs": round(total_pago_movil_bs, 2),
         "total_efectivo_bs": round(total_efectivo_bs, 2),
@@ -3046,7 +3102,10 @@ def construir_reporte_rango(cursor, desde, hasta):
             COALESCE(o.descuento, 0),
             o.cierre_id,
             COALESCE(u.nombre, ''),
-            COALESCE(SUM(oi.precio), 0)
+            COALESCE(SUM(oi.precio), 0),
+            o.venta_restaurante_usd,
+            o.delivery_usd,
+            o.total_cliente_usd
         FROM ordenes o
         LEFT JOIN usuarios u ON o.usuario_id = u.id
         LEFT JOIN orden_items oi ON oi.orden_id = o.id
@@ -3054,7 +3113,8 @@ def construir_reporte_rango(cursor, desde, hasta):
           AND o.fecha_hora >= ?
           AND o.fecha_hora <= ?
         GROUP BY o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia,
-                 o.cliente, o.descuento, o.cierre_id, u.nombre
+                 o.cliente, o.descuento, o.cierre_id, u.nombre,
+                 o.venta_restaurante_usd, o.delivery_usd, o.total_cliente_usd
         ORDER BY o.fecha_hora ASC, o.id ASC
         """,
         (inicio, fin),
@@ -3079,12 +3139,21 @@ def construir_reporte_rango(cursor, desde, hasta):
             cierre_id,
             mesonera,
             subtotal_usd,
+            venta_restaurante_usd,
+            delivery_usd,
+            total_cliente_usd,
         ) = orden
         subtotal_usd = a_float(subtotal_usd)
         descuento_bs = a_float(descuento_bs)
         descuento_usd = (descuento_bs / tasa) if tasa else 0.0
-        total_neto_usd = max(subtotal_usd - descuento_usd, 0.0)
-        total_neto_bs = max((subtotal_usd * tasa) - descuento_bs, 0.0)
+        if venta_restaurante_usd is not None:
+            total_neto_usd = max(a_float(venta_restaurante_usd), 0.0)
+            subtotal_reporte_usd = total_neto_usd
+            total_neto_bs = round(total_neto_usd * tasa, 2)
+        else:
+            total_neto_usd = max(subtotal_usd - descuento_usd, 0.0)
+            subtotal_reporte_usd = subtotal_usd
+            total_neto_bs = max((subtotal_usd * tasa) - descuento_bs, 0.0)
         dia = (fecha_hora or "")[:10]
 
         total_vendido_usd += total_neto_usd
@@ -3104,10 +3173,12 @@ def construir_reporte_rango(cursor, desde, hasta):
                 "cliente": cliente,
                 "cierre_id": cierre_id,
                 "mesonera": mesonera,
-                "subtotal_usd": round(subtotal_usd, 2),
+                "subtotal_usd": round(subtotal_reporte_usd, 2),
                 "descuento_bs": round(descuento_bs, 2),
                 "total_usd": round(total_neto_usd, 2),
                 "total_bs": round(total_neto_bs, 2),
+                "delivery_usd": round(a_float(delivery_usd), 2),
+                "total_cliente_usd": round(a_float(total_cliente_usd), 2),
             }
         )
 
@@ -3196,6 +3267,7 @@ def construir_reporte_rango(cursor, desde, hasta):
     total_equiv_usd = total_efectivo_usd + (
         ((total_punto_venta_bs + total_pago_movil_bs + total_efectivo_bs) / tasa) if tasa else 0.0
     )
+    delivery_resumen = resumen_delivery_movimientos(cursor, inicio=inicio, fin=fin)
 
     ventas_por_dia_lista = []
     for dia in sorted(ventas_por_dia):
@@ -3229,6 +3301,9 @@ def construir_reporte_rango(cursor, desde, hasta):
         "tasa": round(tasa, 2),
         "total_vendido_usd": round(total_vendido_usd, 2),
         "total_vendido_bs": round(total_vendido_bs, 2),
+        "delivery_generado_usd": delivery_resumen["generado"],
+        "delivery_pagado_usd": delivery_resumen["pagado"],
+        "delivery_pendiente_actual_usd": delivery_resumen["pendiente_actual"],
         "total_punto_venta_bs": round(total_punto_venta_bs, 2),
         "total_pago_movil_bs": round(total_pago_movil_bs, 2),
         "total_efectivo_bs": round(total_efectivo_bs, 2),
@@ -9732,7 +9807,10 @@ def reportes():
         </div>
 
         <div class="metricas">
-            <div class="metrica"><small>Total vendido USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
+            <div class="metrica"><small>Venta Neko Wok USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
+            <div class="metrica"><small>Delivery generado USD</small><b>$ {reporte["delivery_generado_usd"]}</b></div>
+            <div class="metrica"><small>Delivery pagado USD</small><b>$ {reporte["delivery_pagado_usd"]}</b></div>
+            <div class="metrica"><small>Delivery pendiente actual</small><b>$ {reporte["delivery_pendiente_actual_usd"]}</b></div>
             <div class="metrica"><small>Punto de venta Bs</small><b>Bs {reporte["total_punto_venta_bs"]}</b></div>
             <div class="metrica"><small>Pago m&oacute;vil Bs</small><b>Bs {reporte["total_pago_movil_bs"]}</b></div>
             <div class="metrica"><small>Efectivo Bs</small><b>Bs {reporte["total_efectivo_bs"]}</b></div>
@@ -9747,7 +9825,7 @@ def reportes():
             <h2>🧾 Ventas por orden</h2>
             <div class="tabla-wrap">
                 <table>
-                    <thead><tr><th>Orden</th><th>Fecha</th><th>Cliente</th><th>Mesonera</th><th>Total USD</th><th>Total Bs</th><th>Cierre</th><th>Accion</th></tr></thead>
+                    <thead><tr><th>Orden</th><th>Fecha</th><th>Cliente</th><th>Mesonera</th><th>Venta Neko Wok USD</th><th>Total Bs</th><th>Cierre</th><th>Accion</th></tr></thead>
                     <tbody>{ordenes_html}</tbody>
                 </table>
             </div>
@@ -9802,7 +9880,10 @@ def exportar_reporte():
         ["Desde", reporte["desde"]],
         ["Hasta", reporte["hasta"]],
         ["Tasa", reporte["tasa"]],
-        ["Total vendido USD", reporte["total_vendido_usd"]],
+        ["Venta Neko Wok USD", reporte["total_vendido_usd"]],
+        ["Delivery generado USD", reporte["delivery_generado_usd"]],
+        ["Delivery pagado USD", reporte["delivery_pagado_usd"]],
+        ["Delivery pendiente actual USD", reporte["delivery_pendiente_actual_usd"]],
         ["Total punto de venta Bs", reporte["total_punto_venta_bs"]],
         ["Total Pago m&oacute;vil Bs", reporte["total_pago_movil_bs"]],
         ["Total efectivo Bs", reporte["total_efectivo_bs"]],
@@ -9822,8 +9903,10 @@ def exportar_reporte():
         "Mesonera",
         "Subtotal USD",
         "Descuento Bs",
-        "Total USD",
+        "Venta Neko Wok USD",
         "Total Bs",
+        "Delivery USD",
+        "Total cliente USD",
     ]]
     for orden in reporte["ventas_por_orden"]:
         ventas.append([
@@ -9838,6 +9921,8 @@ def exportar_reporte():
             orden["descuento_bs"],
             orden["total_usd"],
             orden["total_bs"],
+            orden["delivery_usd"],
+            orden["total_cliente_usd"],
         ])
 
     pagos = [[
@@ -10001,7 +10086,10 @@ def dashboard():
         </div>
 
         <div class="resumen-top">
-            <div class="metrica"><small>Total facturado USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
+            <div class="metrica"><small>Venta Neko Wok USD</small><b>$ {reporte["total_vendido_usd"]}</b></div>
+            <div class="metrica"><small>Delivery generado USD</small><b>$ {reporte["delivery_generado_usd"]}</b></div>
+            <div class="metrica"><small>Delivery pagado USD</small><b>$ {reporte["delivery_pagado_usd"]}</b></div>
+            <div class="metrica"><small>Delivery pendiente actual</small><b>$ {reporte["delivery_pendiente_actual_usd"]}</b></div>
             <div class="metrica"><small>Total facturado Bs</small><b>Bs {reporte["total_vendido_bs"]}</b></div>
             <div class="metrica"><small>Ordenes cerradas</small><b>{reporte["cantidad_ordenes"]}</b></div>
             <div class="metrica"><small>Total cobrado USD equiv.</small><b>$ {reporte["total_equiv_usd"]}</b></div>
@@ -10129,7 +10217,10 @@ def cierre():
 
         <div class="bloque">
             <div class="titulo-bloque">💵 VENTAS</div>
-            <div class="dato"><b>Total vendido en USD:</b> ${round(resumen["total_ventas_usd"], 2)}</div>
+            <div class="dato"><b>Venta Neko Wok en USD:</b> ${round(resumen["total_ventas_usd"], 2)}</div>
+            <div class="dato"><b>Delivery generado:</b> ${round(resumen["delivery_generado_usd"], 2)}</div>
+            <div class="dato"><b>Delivery pagado:</b> ${round(resumen["delivery_pagado_usd"], 2)}</div>
+            <div class="dato"><b>Delivery pendiente actual:</b> ${round(resumen["delivery_pendiente_actual_usd"], 2)}</div>
         </div>
 
         <div class="bloque">
@@ -10281,7 +10372,10 @@ def cerrar_jornada():
         <p>Inicio de jornada: {resumen["inicio_jornada"]}</p>
         <p>Fecha de cierre: {fecha_cierre}</p>
         <p>Ordenes cerradas: {resumen["cantidad_ordenes_cerradas"]}</p>
-        <div class="total">Total vendido: $ {round(resumen["total_ventas_usd"], 2)}</div>
+        <div class="total">Venta Neko Wok: $ {round(resumen["total_ventas_usd"], 2)}</div>
+        <div class="total">Delivery generado: $ {round(resumen["delivery_generado_usd"], 2)}</div>
+        <div class="total">Delivery pagado: $ {round(resumen["delivery_pagado_usd"], 2)}</div>
+        <div class="total">Delivery pendiente actual: $ {round(resumen["delivery_pendiente_actual_usd"], 2)}</div>
         <div class="total">Total cobrado equivalente: Bs {round(resumen["total_cobrado_equiv_bs"], 2)} / $ {round(resumen["total_cobrado_equiv_usd"], 2)}</div>
         <div class="total">Diferencia: $ {round(resumen["diferencia_usd"], 2)}</div>
         <h2>🍽️ Productos vendidos</h2>
