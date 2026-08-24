@@ -1948,6 +1948,61 @@ def resumen_delivery_por_repartidor(cursor):
     return cursor.fetchall()
 
 
+def detalle_delivery_repartidor(cursor, repartidor_id):
+    repartidor = obtener_repartidor(cursor, repartidor_id)
+    if not repartidor:
+        return None
+
+    cursor.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN tipo='cargo' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN tipo='cargo' THEN monto_usd ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN tipo='pago' THEN ABS(monto_usd) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN tipo IN ('ajuste', 'anulacion') THEN monto_usd ELSE 0 END), 0),
+            COALESCE(SUM(monto_usd), 0)
+        FROM delivery_movimientos
+        WHERE repartidor_id=?
+        """,
+        (repartidor_id,),
+    )
+    servicios, generado, pagado, ajustes_netos, pendiente = cursor.fetchone()
+
+    cursor.execute(
+        """
+        SELECT
+            dm.fecha,
+            dm.tipo,
+            dm.orden_id,
+            o.id,
+            o.numero_orden,
+            dm.monto_usd,
+            dm.referencia,
+            u.nombre,
+            dm.observacion
+        FROM delivery_movimientos dm
+        LEFT JOIN ordenes o ON o.id = dm.orden_id
+        LEFT JOIN usuarios u ON u.id = dm.usuario_id
+        WHERE dm.repartidor_id=?
+        ORDER BY dm.fecha DESC, dm.id DESC
+        """,
+        (repartidor_id,),
+    )
+    movimientos = cursor.fetchall()
+
+    return {
+        "repartidor": repartidor,
+        "resumen": {
+            "servicios": int(servicios or 0),
+            "generado": a_float(generado),
+            "pagado": a_float(pagado),
+            "ajustes_netos": a_float(ajustes_netos),
+            "pendiente": a_float(pendiente),
+        },
+        "movimientos": movimientos,
+    }
+
+
 def crear_usuarios_iniciales():
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
 
@@ -3247,6 +3302,7 @@ def proteger_sistema():
         "detalle_cuenta_por_cobrar",
         "registrar_abono_cxc",
         "delivery_admin",
+        "delivery_repartidor_detalle",
         "repartidores",
         "nuevo_repartidor",
         "editar_repartidor",
@@ -6462,11 +6518,12 @@ def delivery_admin():
             <td class="monto">{formato_usd(pagado)}</td>
             <td class="monto">{formato_usd(pendiente)}</td>
             <td>{delivery_estado_badge(activo)}</td>
+            <td><a class="btn-mini" href="/delivery/repartidor/{repartidor_id}">Ver</a></td>
         </tr>
         """
 
     if not filas:
-        filas = '<tr><td colspan="6">No hay repartidores ni movimientos de delivery registrados.</td></tr>'
+        filas = '<tr><td colspan="7">No hay repartidores ni movimientos de delivery registrados.</td></tr>'
 
     return f"""
     <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -6488,8 +6545,81 @@ def delivery_admin():
             </div>
             <h2>Repartidores</h2>
             <table>
-                <thead><tr><th>Repartidor</th><th>Servicios</th><th>Generado</th><th>Pagado</th><th>Pendiente</th><th>Estado</th></tr></thead>
+                <thead><tr><th>Repartidor</th><th>Servicios</th><th>Generado</th><th>Pagado</th><th>Pendiente</th><th>Estado</th><th>Accion</th></tr></thead>
                 <tbody>{filas}</tbody>
+            </table>
+        </div>
+    </div></body></html>
+    """
+
+
+@app.route("/delivery/repartidor/<int:repartidor_id>")
+def delivery_repartidor_detalle(repartidor_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    detalle = detalle_delivery_repartidor(cursor, repartidor_id)
+    conn.close()
+
+    if not detalle:
+        return "Repartidor no encontrado", 404
+
+    repartidor = detalle["repartidor"]
+    resumen = detalle["resumen"]
+    movimientos_html = ""
+    for mov in detalle["movimientos"]:
+        fecha, tipo, orden_id, orden_existente_id, numero_orden, monto, referencia, usuario, observacion = mov
+        orden_texto = "-"
+        if orden_id:
+            orden_label = html_lib.escape(str(numero_orden or orden_id))
+            orden_texto = (
+                f'<a href="/orden/{orden_existente_id}">#{orden_label}</a>'
+                if orden_existente_id
+                else f"#{html_lib.escape(str(orden_id))}"
+            )
+        signo = "+" if a_float(monto) > 0 else ""
+        movimientos_html += f"""
+        <tr>
+            <td>{texto_fecha_corta(fecha)}</td>
+            <td>{html_lib.escape(tipo or '')}</td>
+            <td>{orden_texto}</td>
+            <td class="monto">{signo}{formato_usd(monto)}</td>
+            <td>{html_lib.escape(referencia or '-')}</td>
+            <td>{html_lib.escape(usuario or '-')}</td>
+            <td>{html_lib.escape(observacion or '-')}</td>
+        </tr>
+        """
+
+    if not movimientos_html:
+        movimientos_html = '<tr><td colspan="7">Este repartidor no tiene movimientos de delivery.</td></tr>'
+
+    return f"""
+    <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/delivery">Delivery</a><a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>🛵 Delivery</h1>
+        <div class="card-admin">
+            <h2>{html_lib.escape(repartidor[1] or '')}</h2>
+            <p><b>Telefono:</b> {html_lib.escape(repartidor[2] or '-')}</p>
+            <p><b>Estado:</b> {delivery_estado_badge(repartidor[4])}</p>
+            <div class="acciones" style="margin-top:12px;">
+                <a class="btn-mini btn-sec" href="/delivery">Volver a Delivery</a>
+                <a class="btn-mini" href="/repartidores/{repartidor[0]}/editar">Editar repartidor</a>
+            </div>
+        </div>
+        <div class="metricas">
+            <div class="metrica"><small>Servicios</small><b>{resumen["servicios"]}</b></div>
+            <div class="metrica"><small>Generado</small><b>{formato_usd(resumen["generado"])}</b></div>
+            <div class="metrica"><small>Pagado</small><b>{formato_usd(resumen["pagado"])}</b></div>
+            <div class="metrica"><small>Ajustes netos</small><b>{formato_usd(resumen["ajustes_netos"])}</b></div>
+            <div class="metrica"><small>Pendiente actual</small><b>{formato_usd(resumen["pendiente"])}</b></div>
+        </div>
+        <div class="card-admin">
+            <h2>Historial de movimientos</h2>
+            <table>
+                <thead><tr><th>Fecha</th><th>Tipo</th><th>Orden</th><th>Monto</th><th>Referencia</th><th>Usuario</th><th>Observacion</th></tr></thead>
+                <tbody>{movimientos_html}</tbody>
             </table>
         </div>
     </div></body></html>

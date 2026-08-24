@@ -267,6 +267,7 @@ class SalesSnapshotTest(unittest.TestCase):
         monto=3.0,
         orden_id=None,
         movimiento_revertido_id=None,
+        fecha="2026-08-23 10:05:00",
     ):
         conn = self._conn()
         cursor = conn.cursor()
@@ -283,7 +284,7 @@ class SalesSnapshotTest(unittest.TestCase):
                 repartidor_id,
                 tipo,
                 monto,
-                "2026-08-23 10:05:00",
+                fecha,
                 self._master_user_id(),
                 "delivery-test",
                 "Movimiento de prueba",
@@ -659,6 +660,57 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertIn(b"Repartidor Inactivo", response.data)
         self.assertIn(b"Inactivo", response.data)
         self.assertIn(b"$ 5.00", response.data)
+
+    def test_delivery_repartidor_detail_access_summary_history_and_inactive(self):
+        repartidor_id = self._insert_repartidor("Detalle Inactivo", activo=0)
+        orden_id = self._create_order(price=20.0)
+        self._insert_delivery_movimiento(
+            repartidor_id, "cargo", 3, orden_id=orden_id, fecha="2026-08-23 09:00:00"
+        )
+        self._insert_delivery_movimiento(repartidor_id, "pago", -2, fecha="2026-08-23 10:00:00")
+        self._insert_delivery_movimiento(repartidor_id, "ajuste", 1, fecha="2026-08-23 11:00:00")
+        self._insert_delivery_movimiento(repartidor_id, "anulacion", -0.5, fecha="2026-08-23 12:00:00")
+
+        response = self.client.get(f"/delivery/repartidor/{repartidor_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Detalle Inactivo", response.data)
+        self.assertIn(b"0412-3333333", response.data)
+        self.assertIn(b"Inactivo", response.data)
+        self.assertIn(b"Servicios", response.data)
+        self.assertIn(b"<b>1</b>", response.data)
+        self.assertIn(b"$ 3.00", response.data)
+        self.assertIn(b"$ 2.00", response.data)
+        self.assertIn(b"$ 0.50", response.data)
+        self.assertIn(b"$ 1.50", response.data)
+        self.assertIn(f'href="/orden/{orden_id}"'.encode(), response.data)
+
+        anulacion_pos = response.data.index(b"anulacion")
+        ajuste_pos = response.data.index(b"ajuste")
+        pago_pos = response.data.index(b"pago")
+        cargo_pos = response.data.index(b"cargo")
+        self.assertLess(anulacion_pos, ajuste_pos)
+        self.assertLess(ajuste_pos, pago_pos)
+        self.assertLess(pago_pos, cargo_pos)
+
+    def test_delivery_repartidor_detail_isolates_movements_between_repartidores(self):
+        juan_id = self._insert_repartidor("Juan Detalle", activo=1)
+        pedro_id = self._insert_repartidor("Pedro Detalle", activo=1)
+        self._insert_delivery_movimiento(juan_id, "cargo", 3, orden_id=self._create_order())
+        self._insert_delivery_movimiento(juan_id, "pago", -1)
+        self._insert_delivery_movimiento(pedro_id, "cargo", 9, orden_id=self._create_order())
+
+        juan = self.client.get(f"/delivery/repartidor/{juan_id}")
+        self.assertEqual(juan.status_code, 200)
+        self.assertIn(b"Juan Detalle", juan.data)
+        self.assertNotIn(b"Pedro Detalle", juan.data)
+        self.assertIn(b"$ 3.00", juan.data)
+        self.assertIn(b"$ 1.00", juan.data)
+        self.assertIn(b"$ 2.00", juan.data)
+        self.assertNotIn(b"$ 9.00", juan.data)
+
+        dashboard = self.client.get("/delivery")
+        self.assertIn(f'href="/delivery/repartidor/{juan_id}"'.encode(), dashboard.data)
+        self.assertIn(f'href="/delivery/repartidor/{pedro_id}"'.encode(), dashboard.data)
 
     def test_order_without_delivery_shows_zero_visual_delivery(self):
         orden_id = self._create_order(price=20.0)
