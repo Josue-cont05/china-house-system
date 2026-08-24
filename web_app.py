@@ -23,6 +23,17 @@ from app.shared.constants.system import (
     ROLES_USUARIO_VALIDOS,
     SABORES_REFRESCO,
 )
+from app.domain.sales.calculations import (
+    DELIVERY_MONTO_MAXIMO,
+    TOLERANCIA_COBRO,
+    calcular_totales_cobro,
+    calcular_totales_financieros_delivery,
+    convertir_pago_equivalente,
+    es_categoria_delivery,
+    es_producto_delivery_legacy,
+    normalizar_metodo_pago,
+    normalizar_monto_delivery,
+)
 
 
 CLAVE_SUPERVISOR = "0102"
@@ -118,7 +129,6 @@ PROMOCIONES_CON_POLLO = {"Familiar", "Mega Familiar"}
 PROMO_EXTRA_LUMPIAS_NOMBRE = "Promo extra: Ración de Lumpias"
 PROMO_EXTRA_LUMPIAS_PRECIO = 3.00
 DELIVERY_MONTOS_RAPIDOS = [0.50, 1.00, 1.50, 2.00, 2.50, 3.00, 3.50]
-DELIVERY_MONTO_MAXIMO = 100.0
 
 PRODUCTOS_MENU_NEKO = [
     ("Neko Combo 1", 5.30, "Neko Combos"),
@@ -344,40 +354,8 @@ def a_float(valor, default=0.0):
         return default
 
 
-def normalizar_metodo_pago(metodo):
-    metodo = (metodo or "").strip()
-    if metodo == "pago_movil":
-        return "bs_pago_movil"
-    return metodo
-
-
 def es_producto_refresco(nombre):
     return "refresco" in (nombre or "").lower()
-
-
-def es_categoria_delivery(categoria):
-    return (categoria or "").strip().lower() == "delivery"
-
-
-def es_producto_delivery_legacy(nombre, categoria=None):
-    nombre_limpio = (nombre or "").strip().lower()
-    if es_categoria_delivery(categoria):
-        return True
-    return bool(re.fullmatch(r"delivery\s+\d+(?:[.,]\d{1,2})?", nombre_limpio))
-
-
-def normalizar_monto_delivery(valor):
-    texto = str(valor if valor is not None else "").strip().replace(",", ".")
-    if texto == "":
-        texto = "0"
-    if not re.fullmatch(r"\d+(?:\.\d{1,2})?", texto):
-        raise ValueError("El monto de delivery debe ser cero o positivo, con maximo 2 decimales.")
-    monto = round(float(texto), 2)
-    if monto < 0:
-        raise ValueError("El monto de delivery no puede ser negativo.")
-    if monto > DELIVERY_MONTO_MAXIMO:
-        raise ValueError(f"El monto de delivery no puede superar ${DELIVERY_MONTO_MAXIMO:.2f}.")
-    return monto
 
 
 def calcular_totales_visuales_delivery(items, delivery_usd):
@@ -397,84 +375,6 @@ def calcular_totales_visuales_delivery(items, delivery_usd):
         "delivery_usd": round(delivery_explicit, 2),
         "delivery_legacy_usd": round(delivery_legacy, 2),
         "total_cliente_usd": round(venta_restaurante + delivery_legacy + delivery_explicit, 2),
-    }
-
-
-def calcular_totales_financieros_delivery(items, tasa, descuento_bs, delivery_usd):
-    tasa_cobro = a_float(tasa)
-    if tasa_cobro <= 0:
-        raise ValueError("La tasa de cobro debe ser mayor a 0")
-
-    descuento_bs = round(a_float(descuento_bs), 2)
-    delivery_explicit = round(a_float(delivery_usd), 2)
-    if delivery_explicit < 0:
-        raise ValueError("El monto de delivery no puede ser negativo")
-
-    subtotal_restaurante_usd = 0.0
-    delivery_legacy_usd = 0.0
-    for item in items:
-        producto = item[0]
-        precio = a_float(item[1])
-        categoria = item[2] if len(item) > 2 else None
-        if es_producto_delivery_legacy(producto, categoria):
-            delivery_legacy_usd += precio
-        else:
-            subtotal_restaurante_usd += precio
-
-    subtotal_restaurante_usd = round(subtotal_restaurante_usd, 2)
-    delivery_legacy_usd = round(delivery_legacy_usd, 2)
-    tiene_delivery_legacy = delivery_legacy_usd > TOLERANCIA_COBRO
-
-    if tiene_delivery_legacy:
-        if delivery_explicit > TOLERANCIA_COBRO:
-            raise ValueError("Esta orden contiene delivery legacy y delivery explicito. Corrige la orden antes de cobrar.")
-        precios_legacy = [item[1] for item in items]
-        totales_legacy = calcular_totales_cobro(precios_legacy, tasa_cobro, descuento_bs)
-        return {
-            "modo": "legacy",
-            "tasa": tasa_cobro,
-            "subtotal_restaurante_usd": totales_legacy["subtotal_usd"],
-            "descuento_bs": totales_legacy["descuento_bs"],
-            "venta_restaurante_usd": totales_legacy["total_usd"],
-            "delivery_usd": 0.0,
-            "delivery_legacy_usd": delivery_legacy_usd,
-            "total_cliente_usd": totales_legacy["total_usd"],
-            "venta_restaurante_bs": totales_legacy["total_bs"],
-            "delivery_bs": 0.0,
-            "total_cliente_bs": totales_legacy["total_bs"],
-            "subtotal_snapshot_usd": totales_legacy["subtotal_usd"],
-            "total_usd": totales_legacy["total_usd"],
-            "total_bs": totales_legacy["total_bs"],
-            "snapshot_delivery_usd": None,
-            "snapshot_venta_restaurante_usd": None,
-            "snapshot_total_cliente_usd": None,
-        }
-
-    subtotal_restaurante_bs = round(subtotal_restaurante_usd * tasa_cobro, 2)
-    venta_restaurante_bs = round(max(subtotal_restaurante_bs - descuento_bs, 0.0), 2)
-    venta_restaurante_usd = round((venta_restaurante_bs / tasa_cobro) if tasa_cobro else 0.0, 2)
-    delivery_bs = round(delivery_explicit * tasa_cobro, 2)
-    total_cliente_bs = round(venta_restaurante_bs + delivery_bs, 2)
-    total_cliente_usd = round(venta_restaurante_usd + delivery_explicit, 2)
-
-    return {
-        "modo": "explicito",
-        "tasa": tasa_cobro,
-        "subtotal_restaurante_usd": subtotal_restaurante_usd,
-        "descuento_bs": descuento_bs,
-        "venta_restaurante_usd": venta_restaurante_usd,
-        "delivery_usd": delivery_explicit,
-        "delivery_legacy_usd": 0.0,
-        "total_cliente_usd": total_cliente_usd,
-        "venta_restaurante_bs": venta_restaurante_bs,
-        "delivery_bs": delivery_bs,
-        "total_cliente_bs": total_cliente_bs,
-        "subtotal_snapshot_usd": subtotal_restaurante_usd,
-        "total_usd": venta_restaurante_usd,
-        "total_bs": venta_restaurante_bs,
-        "snapshot_delivery_usd": delivery_explicit,
-        "snapshot_venta_restaurante_usd": venta_restaurante_usd,
-        "snapshot_total_cliente_usd": total_cliente_usd,
     }
 
 
@@ -924,38 +824,6 @@ def estado_cxc_badge(estado):
     )
 
 
-def convertir_pago_equivalente(metodo, monto, tasa):
-    metodo = normalizar_metodo_pago(metodo)
-    monto = a_float(monto)
-
-    if metodo == "usd":
-        return monto * tasa, monto
-
-    if metodo in ("punto_venta", "bs_pago_movil", "bs_efectivo"):
-        usd = (monto / tasa) if tasa else 0.0
-        return monto, usd
-
-    return 0.0, 0.0
-
-
-def calcular_totales_cobro(precios_items, tasa, descuento_bs):
-    subtotal_usd = round(sum(a_float(precio) for precio in precios_items), 2)
-    tasa_cobro = a_float(tasa)
-    if tasa_cobro <= 0:
-        raise ValueError("La tasa de cobro debe ser mayor a 0")
-    descuento_bs = round(a_float(descuento_bs), 2)
-    total_bs = round(max((subtotal_usd * tasa_cobro) - descuento_bs, 0.0), 2)
-    total_usd = round((total_bs / tasa_cobro) if tasa_cobro else 0.0, 2)
-
-    return {
-        "subtotal_usd": subtotal_usd,
-        "tasa_cobro": tasa_cobro,
-        "descuento_bs": descuento_bs,
-        "total_usd": total_usd,
-        "total_bs": total_bs,
-    }
-
-
 def obtener_tasa_actual(cursor):
     cursor.execute("SELECT valor FROM tasa LIMIT 1")
     row = cursor.fetchone()
@@ -974,7 +842,6 @@ def obtener_tasa_cobro(cursor):
 
 
 MODOS_COBRO_VALIDOS = {"pagado", "parcial", "credito"}
-TOLERANCIA_COBRO = 0.0001
 
 
 def normalizar_modo_cobro(modo):
@@ -10199,6 +10066,11 @@ def cierre():
     .bloque {{ background: #f0fdf4; padding: 14px; border-radius: 12px; margin-bottom: 14px; border: 1px solid #bbf7d0; }}
     .titulo-bloque {{ font-size: 17px; font-weight: 800; margin-bottom: 10px; color: #1a6b4a; }}
     .dato {{ margin: 6px 0; font-size: 16px; }}
+    .metricas-cierre {{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }}
+    .metrica-cierre {{ background:white; border:1px solid #bbf7d0; border-radius:10px; padding:12px; }}
+    .metrica-cierre small {{ display:block; color:#4b5563; font-weight:800; margin-bottom:6px; }}
+    .metrica-cierre b {{ display:block; color:#111827; font-size:22px; }}
+    .metrica-cierre .nota {{ color:#6b7280; font-size:12px; margin-top:4px; }}
     .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:var(--panel-secundario); color:var(--texto); text-decoration:none; border-radius:10px; font-weight:800; border:1px solid var(--borde); }}
     .tabla-wrap {{ overflow:auto; }}
     table {{ width:100%; border-collapse: collapse; background:white; border-radius:10px; overflow:hidden; }}
@@ -10217,10 +10089,34 @@ def cierre():
 
         <div class="bloque">
             <div class="titulo-bloque">💵 VENTAS</div>
-            <div class="dato"><b>Venta Neko Wok en USD:</b> ${round(resumen["total_ventas_usd"], 2)}</div>
-            <div class="dato"><b>Delivery generado:</b> ${round(resumen["delivery_generado_usd"], 2)}</div>
-            <div class="dato"><b>Delivery pagado:</b> ${round(resumen["delivery_pagado_usd"], 2)}</div>
-            <div class="dato"><b>Delivery pendiente actual:</b> ${round(resumen["delivery_pendiente_actual_usd"], 2)}</div>
+            <div class="metricas-cierre">
+                <div class="metrica-cierre">
+                    <small>Venta Neko Wok</small>
+                    <b>${round(resumen["total_ventas_usd"], 2)}</b>
+                    <div class="nota">Excluye delivery explicito.</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="bloque">
+            <div class="titulo-bloque">DELIVERY</div>
+            <div class="metricas-cierre">
+                <div class="metrica-cierre">
+                    <small>Delivery generado</small>
+                    <b>${round(resumen["delivery_generado_usd"], 2)}</b>
+                    <div class="nota">Cargos delivery de la jornada.</div>
+                </div>
+                <div class="metrica-cierre">
+                    <small>Delivery pagado</small>
+                    <b>${round(resumen["delivery_pagado_usd"], 2)}</b>
+                    <div class="nota">Pagos a repartidores de la jornada.</div>
+                </div>
+                <div class="metrica-cierre">
+                    <small>Delivery pendiente actual</small>
+                    <b>${round(resumen["delivery_pendiente_actual_usd"], 2)}</b>
+                    <div class="nota">Saldo actual historico de delivery_movimientos.</div>
+                </div>
+            </div>
         </div>
 
         <div class="bloque">
