@@ -1904,6 +1904,46 @@ def insertar_cargo_delivery(cursor, orden_id, repartidor_id, monto_usd, fecha, u
     return obtener_ultimo_id(cursor, "delivery_movimientos")
 
 
+def resumen_delivery_admin(cursor):
+    cursor.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN tipo='cargo' THEN monto_usd ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN tipo='pago' THEN ABS(monto_usd) ELSE 0 END), 0),
+            COALESCE(SUM(monto_usd), 0),
+            COALESCE(SUM(CASE WHEN tipo='cargo' AND orden_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+        FROM delivery_movimientos
+        """
+    )
+    generado, pagado, pendiente, servicios = cursor.fetchone()
+    return {
+        "generado": a_float(generado),
+        "pagado": a_float(pagado),
+        "pendiente": a_float(pendiente),
+        "servicios": int(servicios or 0),
+    }
+
+
+def resumen_delivery_por_repartidor(cursor):
+    cursor.execute(
+        """
+        SELECT
+            r.id,
+            r.nombre,
+            COALESCE(r.activo, 1),
+            COALESCE(SUM(CASE WHEN dm.tipo='cargo' AND dm.orden_id IS NOT NULL THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN dm.tipo='cargo' THEN dm.monto_usd ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN dm.tipo='pago' THEN ABS(dm.monto_usd) ELSE 0 END), 0),
+            COALESCE(SUM(dm.monto_usd), 0)
+        FROM repartidores r
+        LEFT JOIN delivery_movimientos dm ON dm.repartidor_id = r.id
+        GROUP BY r.id, r.nombre, r.activo
+        ORDER BY COALESCE(SUM(dm.monto_usd), 0) DESC, LOWER(r.nombre), r.id
+        """
+    )
+    return cursor.fetchall()
+
+
 def crear_usuarios_iniciales():
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
 
@@ -3202,6 +3242,7 @@ def proteger_sistema():
         "cuentas_por_cobrar_admin",
         "detalle_cuenta_por_cobrar",
         "registrar_abono_cxc",
+        "delivery_admin",
         "repartidores",
         "nuevo_repartidor",
         "editar_repartidor",
@@ -4851,6 +4892,7 @@ def index():
         <a href="/cocina">🍳 Cocina</a>
         """
         menu_links += '<a href="/cuentas_por_cobrar">💰 Cuentas por cobrar</a>'
+        menu_links += '<a href="/delivery">🛵 Delivery</a>'
     elif rol_actual == "socio":
         menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
     elif rol_actual == "mesonera_reportes":
@@ -6391,6 +6433,65 @@ def editar_producto(id):
     return html
 
 
+def delivery_estado_badge(activo):
+    if int(activo or 0) == 1:
+        return '<span class="badge-estado estado-pagada">Activo</span>'
+    return '<span class="badge-estado estado-anulada">Inactivo</span>'
+
+
+@app.route("/delivery")
+def delivery_admin():
+    conn = get_connection()
+    cursor = conn.cursor()
+    resumen = resumen_delivery_admin(cursor)
+    repartidores_resumen = resumen_delivery_por_repartidor(cursor)
+    conn.close()
+
+    filas = ""
+    for row in repartidores_resumen:
+        repartidor_id, nombre, activo, servicios, generado, pagado, pendiente = row
+        filas += f"""
+        <tr>
+            <td><b>{html_lib.escape(nombre or '')}</b></td>
+            <td class="monto">{int(servicios or 0)}</td>
+            <td class="monto">{formato_usd(generado)}</td>
+            <td class="monto">{formato_usd(pagado)}</td>
+            <td class="monto">{formato_usd(pendiente)}</td>
+            <td>{delivery_estado_badge(activo)}</td>
+        </tr>
+        """
+
+    if not filas:
+        filas = '<tr><td colspan="6">No hay repartidores ni movimientos de delivery registrados.</td></tr>'
+
+    return f"""
+    <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+    <body>
+    {barra_superior('<a href="/">Inicio</a>')}
+    <div class="contenido">
+        <h1>🛵 Delivery</h1>
+        <div class="metricas">
+            <div class="metrica"><small>Delivery generado</small><b>{formato_usd(resumen["generado"])}</b></div>
+            <div class="metrica"><small>Delivery pagado</small><b>{formato_usd(resumen["pagado"])}</b></div>
+            <div class="metrica"><small>Pendiente actual</small><b>{formato_usd(resumen["pendiente"])}</b></div>
+            <div class="metrica"><small>Cantidad de servicios</small><b>{resumen["servicios"]}</b></div>
+        </div>
+        <div class="card-admin">
+            <div class="acciones" style="margin-bottom:12px;">
+                <a class="btn-mini" href="/repartidores/nuevo">Nuevo repartidor</a>
+                <a class="btn-mini btn-sec" href="/repartidores">Administrar repartidores</a>
+            </div>
+            <h2>Repartidores</h2>
+            <table>
+                <thead><tr><th>Repartidor</th><th>Servicios</th><th>Generado</th><th>Pagado</th><th>Pendiente</th><th>Estado</th></tr></thead>
+                <tbody>{filas}</tbody>
+            </table>
+        </div>
+    </div></body></html>
+    """
+
+
 @app.route("/repartidores")
 def repartidores():
     conn = get_connection()
@@ -6442,8 +6543,10 @@ def repartidores():
     <body>
     {barra_superior('<a href="/">Inicio</a><a href="/menu">Menú</a>')}
     <div class="contenido">
-        <h1>Repartidores</h1>
+        <h1>🛵 Delivery</h1>
+        <h2>Repartidores</h2>
         <div class="acciones">
+            <a class="btn-mini btn-sec" href="/delivery">Resumen delivery</a>
             <a class="btn-mini" href="/repartidores/nuevo">Nuevo repartidor</a>
         </div>
         <div class="panel-admin">

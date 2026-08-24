@@ -590,6 +590,76 @@ class SalesSnapshotTest(unittest.TestCase):
         listado = self.client.get("/api/repartidores").get_json()["repartidores"]
         self.assertIn("Rapido", [rep["nombre"] for rep in listado])
 
+    def test_delivery_admin_route_requires_master_and_renders_summary(self):
+        response = self.client.get("/delivery")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Delivery generado".encode(), response.data)
+        self.assertIn("Cantidad de servicios".encode(), response.data)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO usuarios (nombre, pin, rol, activo) VALUES (?, ?, ?, 1)",
+            ("Mesonera Delivery", "0000", "mesonera"),
+        )
+        usuario_id = web_app.obtener_ultimo_id(cursor, "usuarios")
+        conn.commit()
+        conn.close()
+
+        with self.client.session_transaction() as sess:
+            sess["usuario_id"] = usuario_id
+            sess["usuario_nombre"] = "Mesonera Delivery"
+            sess["usuario"] = "Mesonera Delivery"
+            sess["usuario_rol"] = "mesonera"
+
+        self.assertEqual(self.client.get("/delivery").status_code, 403)
+
+    def test_delivery_admin_summary_and_multiple_repartidores(self):
+        juan_id = self._insert_repartidor("Juan", activo=1)
+        pedro_id = self._insert_repartidor("Pedro", activo=1)
+
+        for monto in (3, 2):
+            self._insert_delivery_movimiento(juan_id, "cargo", monto, orden_id=self._create_order())
+        self._insert_delivery_movimiento(juan_id, "pago", -4)
+        for monto in (3, 4):
+            self._insert_delivery_movimiento(pedro_id, "cargo", monto, orden_id=self._create_order())
+        self._insert_delivery_movimiento(pedro_id, "pago", -2)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        resumen = web_app.resumen_delivery_admin(cursor)
+        repartidores = {
+            row[1]: {
+                "servicios": row[3],
+                "generado": row[4],
+                "pagado": row[5],
+                "pendiente": row[6],
+            }
+            for row in web_app.resumen_delivery_por_repartidor(cursor)
+        }
+        conn.close()
+
+        self.assertEqual(resumen, {"generado": 12.0, "pagado": 6.0, "pendiente": 6.0, "servicios": 4})
+        self.assertEqual(repartidores["Juan"], {"servicios": 2, "generado": 5.0, "pagado": 4.0, "pendiente": 1.0})
+        self.assertEqual(repartidores["Pedro"], {"servicios": 2, "generado": 7.0, "pagado": 2.0, "pendiente": 5.0})
+
+        response = self.client.get("/delivery")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Juan", response.data)
+        self.assertIn(b"Pedro", response.data)
+        self.assertIn(b"$ 12.00", response.data)
+        self.assertIn(b"$ 6.00", response.data)
+
+    def test_delivery_admin_shows_inactive_repartidor_with_movements(self):
+        inactivo_id = self._insert_repartidor("Repartidor Inactivo", activo=0)
+        self._insert_delivery_movimiento(inactivo_id, "cargo", 5, orden_id=self._create_order())
+
+        response = self.client.get("/delivery")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Repartidor Inactivo", response.data)
+        self.assertIn(b"Inactivo", response.data)
+        self.assertIn(b"$ 5.00", response.data)
+
     def test_order_without_delivery_shows_zero_visual_delivery(self):
         orden_id = self._create_order(price=20.0)
         response = self.client.get(f"/orden/{orden_id}")
