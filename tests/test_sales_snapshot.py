@@ -689,13 +689,12 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self._set_delivery(orden_id, 0, "").status_code, 302)
         self.assertEqual(self._delivery_state(orden_id)[0], (0.0, None))
 
-    def test_delivery_rejects_negative_missing_invalid_and_inactive_repartidor(self):
+    def test_delivery_rejects_negative_invalid_and_inactive_repartidor(self):
         repartidor_id = self._insert_repartidor("Activo Validacion", activo=1)
         inactivo_id = self._insert_repartidor("Inactivo Validacion", activo=0)
 
         for monto, repartidor, mensaje in (
             (-1, repartidor_id, b"maximo 2 decimales"),
-            (3, "", b"repartidor activo"),
             (3, 999999, b"repartidor activo"),
             (3, inactivo_id, b"repartidor activo"),
             ("1.999", repartidor_id, b"maximo 2 decimales"),
@@ -706,6 +705,61 @@ class SalesSnapshotTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertIn(mensaje, response.data)
                 self.assertEqual(self._delivery_state(orden_id)[0], (None, None))
+
+    def test_delivery_allows_pending_repartidor_then_later_assignment_without_touching_items(self):
+        repartidor_id = self._insert_repartidor("Asignacion Diferida", activo=1)
+        orden_id = self._create_order(price=20.0)
+        before = self._delivery_state(orden_id)
+
+        response = self._set_delivery(orden_id, 3, "")
+        self.assertEqual(response.status_code, 302)
+        state, items, delivery_movimientos, inventario_movimientos = self._delivery_state(orden_id)
+        self.assertEqual(state, (3.0, None))
+        self.assertEqual(items, before[1])
+        self.assertEqual(delivery_movimientos, 0)
+        self.assertEqual(inventario_movimientos, 0)
+
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b"Repartidor: Pendiente de asignar", page.data)
+        self.assertIn(b"Delivery: $3.00", page.data)
+
+        response = self._set_delivery(orden_id, 3, repartidor_id)
+        self.assertEqual(response.status_code, 302)
+        state, items, delivery_movimientos, inventario_movimientos = self._delivery_state(orden_id)
+        self.assertEqual(state, (3.0, repartidor_id))
+        self.assertEqual(items, before[1])
+        self.assertEqual(delivery_movimientos, 0)
+        self.assertEqual(inventario_movimientos, 0)
+
+    def test_delivery_pending_repartidor_blocks_checkout_without_financial_writes_then_charges_after_assignment(self):
+        repartidor_id = self._insert_repartidor("Cobro Asignado", activo=1)
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._set_delivery(orden_id, 3, "").status_code, 302)
+        snapshot_before = self._financial_snapshot(orden_id)
+
+        response = self._charge(orden_id, "usd", 23)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Debes asignar un repartidor antes de cobrar esta orden.", response.data)
+        self.assertEqual(self._financial_snapshot(orden_id), snapshot_before)
+        self.assertEqual(self._snapshot(orden_id)[1], [])
+        self.assertEqual(self._cuenta_por_orden(orden_id), None)
+        self.assertEqual(self._delivery_movements(orden_id), [])
+
+        self.assertEqual(self._set_delivery(orden_id, 3, repartidor_id).status_code, 302)
+        response = self._charge(orden_id, "usd", 23)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self._financial_snapshot(orden_id)[8:12], (20.0, 3.0, 23.0, repartidor_id))
+        self.assertEqual(self._delivery_movements(orden_id)[0][0:3], (repartidor_id, "cargo", 3.0))
+
+    def test_delivery_zero_does_not_require_repartidor_and_clears_assignment(self):
+        repartidor_id = self._insert_repartidor("Delivery Cero", activo=1)
+        orden_id = self._create_order(price=20.0)
+        self.assertEqual(self._set_delivery(orden_id, 3, repartidor_id).status_code, 302)
+        self.assertEqual(self._set_delivery(orden_id, 0, "").status_code, 302)
+        self.assertEqual(self._delivery_state(orden_id)[0], (0.0, None))
+        self.assertEqual(self._charge(orden_id, "usd", 20).status_code, 302)
+        self.assertEqual(self._delivery_movements(orden_id), [])
 
     def test_delivery_legacy_products_are_preserved_hidden_and_blocked_for_new_adds(self):
         delivery_id = self._delivery_product_id("Delivery 3")
@@ -868,7 +922,12 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self._delivery_movements(orden_id)[0][0:3], (repartidor_id, "cargo", 3.0))
 
     def test_delivery_checkout_revalidates_repartidor_and_writes_nothing_on_failure(self):
-        for repartidor_id in ("", 999999, self._insert_repartidor("Inactivo Cobro", activo=0)):
+        casos = (
+            ("", b"Debes asignar un repartidor antes de cobrar esta orden."),
+            (999999, b"repartidor activo"),
+            (self._insert_repartidor("Inactivo Cobro", activo=0), b"repartidor activo"),
+        )
+        for repartidor_id, mensaje in casos:
             with self.subTest(repartidor_id=repartidor_id):
                 orden_id = self._create_order(price=20.0)
                 conn = self._conn()
@@ -881,7 +940,7 @@ class SalesSnapshotTest(unittest.TestCase):
                 conn.close()
                 response = self._charge(orden_id, "usd", 23)
                 self.assertEqual(response.status_code, 400)
-                self.assertIn(b"repartidor activo", response.data)
+                self.assertIn(mensaje, response.data)
                 self.assertEqual(self._financial_snapshot(orden_id)[0], "abierta")
                 self.assertEqual(self._snapshot(orden_id)[1], [])
                 self.assertEqual(self._cuenta_por_orden(orden_id), None)

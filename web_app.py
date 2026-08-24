@@ -1835,10 +1835,12 @@ def actualizar_delivery_orden(cursor, orden_id, monto_delivery, repartidor_id):
     if monto > 0:
         if orden_tiene_delivery_legacy(cursor, orden_id):
             raise ValueError("Esta orden contiene un delivery agregado con el sistema anterior. No se puede agregar delivery explicito.")
-        repartidor_id_final = int(a_float(repartidor_id))
-        repartidor = obtener_repartidor(cursor, repartidor_id_final)
-        if not repartidor or int(repartidor[4] or 0) != 1:
-            raise ValueError("Debes seleccionar un repartidor activo para guardar delivery.")
+        repartidor_id_texto = (str(repartidor_id or "")).strip()
+        if repartidor_id_texto:
+            repartidor_id_final = int(a_float(repartidor_id_texto))
+            repartidor = obtener_repartidor(cursor, repartidor_id_final)
+            if not repartidor or int(repartidor[4] or 0) != 1:
+                raise ValueError("Debes seleccionar un repartidor activo para guardar delivery.")
 
     cursor.execute(
         """
@@ -1871,6 +1873,8 @@ def validar_repartidor_delivery_cobro(cursor, delivery_usd, repartidor_id):
         repartidor_id_int = int(a_float(repartidor_id))
     except Exception:
         repartidor_id_int = 0
+    if repartidor_id_int <= 0:
+        raise ValueError("Debes asignar un repartidor antes de cobrar esta orden.")
     repartidor = obtener_repartidor(cursor, repartidor_id_int)
     if not repartidor or int(repartidor[4] or 0) != 1:
         raise ValueError("Selecciona un repartidor activo para el delivery.")
@@ -6810,6 +6814,7 @@ def orden(orden_id):
     items = cursor.fetchall()
 
     repartidores_activos = listar_repartidores(cursor, solo_activos=True)
+    repartidor_delivery_actual = obtener_repartidor(cursor, o[12]) if o[12] else None
     tasa = obtener_tasa_actual(cursor)
     conn.close()
 
@@ -7035,6 +7040,13 @@ def orden(orden_id):
             f'<option value="{rep[0]}" {selected}>{html_lib.escape(rep[1])}</option>'
         )
 
+    if delivery_usd > TOLERANCIA_COBRO and not delivery_repartidor_id:
+        delivery_estado_repartidor = "Repartidor: Pendiente de asignar"
+    elif delivery_repartidor_id and repartidor_delivery_actual:
+        delivery_estado_repartidor = f"Repartidor: {html_lib.escape(repartidor_delivery_actual[1] or '')}"
+    else:
+        delivery_estado_repartidor = "Repartidor: Sin delivery"
+
     botones_delivery = ""
     for monto_rapido in DELIVERY_MONTOS_RAPIDOS:
         activo = "activo" if abs(delivery_usd - monto_rapido) <= TOLERANCIA_COBRO else ""
@@ -7129,7 +7141,8 @@ def orden(orden_id):
                 <select name="delivery_repartidor_id" id="delivery_repartidor_id" {delivery_disabled}>
                     {repartidor_options}
                 </select>
-                <div class="delivery-help">Si el delivery es $0.00, no hace falta seleccionar repartidor.</div>
+                <div class="delivery-help">{delivery_estado_repartidor}</div>
+                <div class="delivery-help">Puedes guardar el monto y asignar el repartidor mas tarde. Para cobrar, debe estar asignado.</div>
                 <div class="delivery-actions">
                     <button class="btn" type="submit" {delivery_disabled}>Guardar delivery</button>
                     <button class="btn" type="button" id="mostrarNuevoRepartidor" {delivery_disabled}>+ Nuevo repartidor</button>
