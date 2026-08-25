@@ -55,7 +55,6 @@ from app.domain.sales.item_descriptions import (
     texto_item_con_indicacion,
 )
 
-
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
 
