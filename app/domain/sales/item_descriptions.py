@@ -132,7 +132,7 @@ def texto_descripcion_combo_orden(producto, indicacion):
     combo = datos_combo_desde_indicacion(producto, indicacion)
     if not combo:
         return ""
-    return "\n".join(f"â€¢ {linea}" for linea in combo["lineas"])
+    return "\n".join(f"• {linea}" for linea in combo["lineas"])
 
 
 def texto_descripcion_combo_cocina(producto, indicacion):
@@ -155,14 +155,14 @@ def texto_descripcion_combo_factura(producto, indicacion):
     combo = datos_combo_desde_indicacion(producto, indicacion)
     if not combo:
         return ""
-    return "\n".join(f"â€¢ {linea}" for linea in combo["lineas"])
+    return "\n".join(f"• {linea}" for linea in combo["lineas"])
 
 
 def texto_descripcion_promocion_orden(producto, indicacion):
     promocion = datos_promocion_desde_indicacion(producto, indicacion)
     if not promocion:
         return ""
-    return "\n".join(f"â€¢ {linea}" for linea in promocion["lineas"])
+    return "\n".join(f"• {linea}" for linea in promocion["lineas"])
 
 
 def texto_descripcion_promocion_cocina(producto, indicacion):
@@ -191,7 +191,7 @@ def texto_descripcion_promocion_factura(producto, indicacion):
     promocion = datos_promocion_desde_indicacion(producto, indicacion)
     if not promocion:
         return ""
-    return "\n".join(f"â€¢ {linea}" for linea in promocion["lineas"])
+    return "\n".join(f"• {linea}" for linea in promocion["lineas"])
 
 
 def texto_item_con_indicacion(producto, indicacion):
