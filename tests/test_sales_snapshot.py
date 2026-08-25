@@ -938,6 +938,25 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(resumen["delivery_pendiente_actual_usd"], 1.0)
         self.assertEqual(resumen["productos"], [("Producto prueba", 1)])
 
+    def test_cierre_delivery_render_shows_neko_wok_and_delivery_metrics(self):
+        orden_id, repartidor_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        self._set_delivery_movement_dates(repartidor_id)
+        self.assertEqual(self._post_delivery_payment(repartidor_id, 2).status_code, 302)
+        self._set_delivery_movement_dates(repartidor_id)
+
+        response = self.client.get("/cierre")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"<small>Venta Neko Wok</small>", response.data)
+        self.assertIn(b"<small>Delivery generado</small>", response.data)
+        self.assertIn(b"<small>Delivery pagado</small>", response.data)
+        self.assertIn(b"<small>Delivery pendiente actual</small>", response.data)
+        self.assertIn(b"Excluye delivery explicito.", response.data)
+        self.assertIn(b"Saldo actual historico de delivery_movimientos.", response.data)
+        for monto in (b"$20.0", b"$3.0", b"$2.0", b"$1.0"):
+            self.assertIn(monto, response.data)
+
     def test_reporte_delivery_multiple_sales_and_drivers_sum_activity_and_current_balance(self):
         orden_juan, juan_id = self._create_order_with_delivery(price=20.0, delivery=3.0)
         self.assertEqual(self._charge(orden_juan, "usd", 23).status_code, 302)
