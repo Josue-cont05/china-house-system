@@ -73,6 +73,18 @@ class SalesSnapshotTest(unittest.TestCase):
         conn.close()
 
     def _create_order(self, price=10.0, estado="abierta"):
+        orden_id = self._create_empty_order(estado=estado)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, ?)",
+            (orden_id, "Producto prueba", price, ""),
+        )
+        conn.commit()
+        conn.close()
+        return orden_id
+
+    def _create_empty_order(self, estado="abierta"):
         conn = self._conn()
         cursor = conn.cursor()
         cursor.execute(
@@ -85,13 +97,28 @@ class SalesSnapshotTest(unittest.TestCase):
             (1, "2026-08-20 12:00:00", "2026-08-20", "mesa", "A1", "Test", estado, self._master_user_id()),
         )
         orden_id = web_app.obtener_ultimo_id(cursor, "ordenes")
-        cursor.execute(
-            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, ?)",
-            (orden_id, "Producto prueba", price, ""),
-        )
         conn.commit()
         conn.close()
         return orden_id
+
+    def _insert_product(self, nombre, precio, categoria="Bebidas", activo=1):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM categorias WHERE nombre=? ORDER BY id LIMIT 1", (categoria,))
+        row = cursor.fetchone()
+        if row:
+            categoria_id = row[0]
+        else:
+            cursor.execute("INSERT INTO categorias (nombre, activo) VALUES (?, 1)", (categoria,))
+            categoria_id = web_app.obtener_ultimo_id(cursor, "categorias")
+        cursor.execute(
+            "INSERT INTO productos (nombre, precio, categoria_id, activo) VALUES (?, ?, ?, ?)",
+            (nombre, precio, categoria_id, activo),
+        )
+        producto_id = web_app.obtener_ultimo_id(cursor, "productos")
+        conn.commit()
+        conn.close()
+        return producto_id
 
     def _charge(
         self,
@@ -1007,8 +1034,10 @@ class SalesSnapshotTest(unittest.TestCase):
         orden_id = self._create_order(price=20.0)
         response = self.client.get(f"/orden/{orden_id}")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Delivery: $0.00", response.data)
-        self.assertIn(b"Total cliente: $20.00", response.data)
+        self.assertIn(b"Total Orden: $20.00", response.data)
+        self.assertIn(b"Bs: 4.000,00", response.data)
+        self.assertNotIn(b"Delivery: $0.00", response.data)
+        self.assertNotIn(b"Total cliente:", response.data)
 
     def test_delivery_save_validations_and_updates_without_touching_items_movements_or_inventory(self):
         repartidor_id = self._insert_repartidor("Valido Delivery", activo=1)
@@ -1023,9 +1052,11 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(inventario_movimientos, 0)
 
         response = self.client.get(f"/orden/{orden_id}")
-        self.assertIn(b"Consumo Neko Wok: $20.00", response.data)
-        self.assertIn(b"Delivery: $3.00", response.data)
-        self.assertIn(b"Total cliente: $23.00", response.data)
+        self.assertIn(b"Total Orden: $23.00", response.data)
+        self.assertIn(b"Bs: 4.600,00", response.data)
+        self.assertNotIn(b"Consumo Neko Wok", response.data)
+        self.assertNotIn(b"Delivery: $3.00", response.data)
+        self.assertNotIn(b"Total cliente:", response.data)
 
         self.assertEqual(self._set_delivery(orden_id, 2, repartidor_id).status_code, 302)
         self.assertEqual(self._delivery_state(orden_id)[0], (2.0, repartidor_id))
@@ -1065,7 +1096,9 @@ class SalesSnapshotTest(unittest.TestCase):
         page = self.client.get(f"/orden/{orden_id}")
         self.assertEqual(page.status_code, 200)
         self.assertIn(b"Repartidor: Pendiente de asignar", page.data)
-        self.assertIn(b"Delivery: $3.00", page.data)
+        self.assertIn(b"Total Orden: $23.00", page.data)
+        self.assertIn(b"Bs: 4.600,00", page.data)
+        self.assertNotIn(b"Delivery: $3.00", page.data)
 
         response = self._set_delivery(orden_id, 3, repartidor_id)
         self.assertEqual(response.status_code, 302)
@@ -1129,6 +1162,64 @@ class SalesSnapshotTest(unittest.TestCase):
         page = self.client.get(f"/orden/{orden_id}")
         self.assertIn(b"Delivery 3", page.data)
         self.assertIn("sistema anterior".encode(), page.data)
+
+    def test_duplicate_beer_products_do_not_duplicate_one_order_item_or_checkout_total(self):
+        beer_ids = [self._insert_product("Cerveza Polar", 2.5, "Bebidas") for _ in range(4)]
+        orden_id = self._create_empty_order()
+
+        response = self.client.get(f"/agregar/{orden_id}/{beer_ids[0]}")
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, producto, precio FROM orden_items WHERE orden_id=?", (orden_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1:], ("Cerveza Polar", 2.5))
+
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.data.count(b"Cerveza Polar - $2.5"), 1)
+
+        charge_response = self._charge(orden_id, "usd", 2.5)
+        self.assertEqual(charge_response.status_code, 302)
+
+    def test_duplicate_beer_items_delete_only_selected_line(self):
+        beer_id = self._insert_product("Cerveza Polar", 2.5, "Bebidas")
+        for _ in range(3):
+            self._insert_product("Cerveza Polar", 2.5, "Bebidas")
+        orden_id = self._create_empty_order()
+
+        for _ in range(4):
+            self.assertEqual(self.client.get(f"/agregar/{orden_id}/{beer_id}").status_code, 302)
+
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(page.data.count(b"Cerveza Polar - $2.5"), 4)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM orden_items WHERE orden_id=? ORDER BY id", (orden_id,))
+        item_ids = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        response = self.client.post(
+            f"/eliminar_item/{item_ids[0]}/{orden_id}",
+            data={"clave": web_app.CLAVE_SUPERVISOR},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, producto FROM orden_items WHERE orden_id=? ORDER BY id", (orden_id,))
+        remaining = cursor.fetchall()
+        conn.close()
+        self.assertEqual([row[0] for row in remaining], item_ids[1:])
+        self.assertEqual([row[1] for row in remaining], ["Cerveza Polar"] * 3)
+
+        page = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(page.data.count(b"Cerveza Polar - $2.5"), 3)
 
     def test_open_order_with_legacy_delivery_is_not_auto_converted_and_blocks_explicit_delivery(self):
         repartidor_id = self._insert_repartidor("Bloqueo Legacy", activo=1)
