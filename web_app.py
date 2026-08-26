@@ -1432,6 +1432,66 @@ def crear_tablas_delivery():
     asegurar_columna("ordenes", "delivery_repartidor_id", "INTEGER")
 
 
+def crear_tablas_self_ordering():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS self_order_links (
+            id {pk_autoincrement_sql()},
+            orden_id INTEGER,
+            token TEXT NOT NULL UNIQUE,
+            canal TEXT NOT NULL
+                CHECK (canal IN ('mesa', 'pickup', 'delivery', 'whatsapp')),
+            estado TEXT NOT NULL
+                CHECK (estado IN ('activo', 'expirado', 'revocado')),
+            fecha_creacion TEXT,
+            fecha_expiracion TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS self_order_requests (
+            id {pk_autoincrement_sql()},
+            self_order_link_id INTEGER,
+            orden_id INTEGER,
+            canal TEXT NOT NULL
+                CHECK (canal IN ('mesa', 'pickup', 'delivery', 'whatsapp')),
+            estado TEXT NOT NULL
+                CHECK (estado IN ('pendiente', 'aceptada', 'rechazada', 'cancelada')),
+            fecha_creacion TEXT,
+            fecha_resolucion TEXT,
+            usuario_resolucion_id INTEGER,
+            nombre_cliente TEXT,
+            telefono_cliente TEXT,
+            notas TEXT
+        )
+        """
+    )
+
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS self_order_request_items (
+            id {pk_autoincrement_sql()},
+            request_id INTEGER NOT NULL,
+            producto_id INTEGER NOT NULL,
+            producto_nombre_snapshot TEXT NOT NULL,
+            precio_unitario_snapshot REAL NOT NULL,
+            cantidad INTEGER NOT NULL DEFAULT 1 CHECK (cantidad > 0),
+            indicacion TEXT,
+            configuracion_json TEXT,
+            subtotal_usd REAL NOT NULL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
 def listar_repartidores(cursor, solo_activos=False):
     where = "WHERE COALESCE(activo, 1)=1" if solo_activos else ""
     cursor.execute(
@@ -3389,6 +3449,7 @@ def init_db():
     crear_tablas_cierre_jornada()
     crear_tablas_cuentas_por_cobrar()
     crear_tablas_delivery()
+    crear_tablas_self_ordering()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
     asegurar_columna("producciones", "merma", "REAL DEFAULT 0")
