@@ -51,6 +51,7 @@ from app.domain.sales.item_builder import (
     construir_items_orden,
     es_producto_refresco,
 )
+from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -3207,6 +3208,8 @@ def proteger_sistema():
         "actualizar_delivery",
         "actualizar_indicacion_item",
         "eliminar_item",
+        "self_ordering.crear_o_obtener_link_mesa",
+        "self_ordering.revocar_link_mesa",
     }
 
     # Pantalla operativa de cocina.
@@ -10900,6 +10903,9 @@ with app.app_context():
     cargar_productos()
     asegurar_menu_neko_wok()
     desactivar_menu_china_house()
+
+
+app.register_blueprint(crear_self_ordering_blueprint(get_connection, obtener_ultimo_id))
 
 
 if __name__ == "__main__":

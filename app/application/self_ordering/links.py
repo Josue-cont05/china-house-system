@@ -33,6 +33,14 @@ class OrdenSelfOrderingRequerida(ErrorSelfOrderingLink):
     pass
 
 
+class OrdenSelfOrderingCerrada(ErrorSelfOrderingLink):
+    pass
+
+
+class OrdenSelfOrderingArchivada(ErrorSelfOrderingLink):
+    pass
+
+
 class TokenSelfOrderingDuplicado(ErrorSelfOrderingLink):
     pass
 
@@ -73,13 +81,25 @@ class SelfOrderLinkRepository(Protocol):
     def orden_existe(self, orden_id: int) -> bool:
         ...
 
+    def obtener_estado_orden(self, orden_id: int) -> Optional[tuple]:
+        ...
+
     def insertar_link(self, link: NuevoSelfOrderLink) -> SelfOrderLink:
         ...
 
     def buscar_por_token(self, token: str) -> Optional[SelfOrderLink]:
         ...
 
+    def listar_links_por_orden_canal(self, orden_id: int, canal: str) -> list[SelfOrderLink]:
+        ...
+
+    def buscar_por_id(self, link_id: int) -> Optional[SelfOrderLink]:
+        ...
+
     def revocar_token(self, token: str) -> bool:
+        ...
+
+    def revocar_link_mesa_de_orden(self, orden_id: int, link_id: int) -> bool:
         ...
 
 
@@ -148,6 +168,34 @@ def validar_self_order_link(
     return ResultadoValidacionLink(estado=ESTADO_LINK_ACTIVO, valido=True, link=link)
 
 
+def obtener_o_crear_link_mesa(
+    repository: SelfOrderLinkRepository,
+    orden_id: int,
+    ahora_fn: Optional[Callable[[], datetime.datetime]] = None,
+    token_generator: Callable[[], str] = generar_token_seguro,
+) -> tuple[SelfOrderLink, bool]:
+    _validar_orden_mesa_abierta(repository, orden_id)
+
+    for link in repository.listar_links_por_orden_canal(orden_id, "mesa"):
+        resultado = validar_self_order_link(repository, link.token, ahora_fn=ahora_fn)
+        if resultado.valido and resultado.link is not None:
+            return resultado.link, False
+
+    link = crear_self_order_link(
+        repository,
+        canal="mesa",
+        orden_id=orden_id,
+        ahora_fn=ahora_fn,
+        token_generator=token_generator,
+    )
+    return link, True
+
+
+def revocar_link_mesa_de_orden(repository: SelfOrderLinkRepository, orden_id: int, link_id: int) -> bool:
+    _validar_orden_mesa_abierta(repository, orden_id)
+    return repository.revocar_link_mesa_de_orden(orden_id, link_id)
+
+
 def revocar_self_order_link(repository: SelfOrderLinkRepository, token: str) -> bool:
     return repository.revocar_token(token)
 
@@ -163,6 +211,18 @@ def _normalizar_orden_id(orden_id: Optional[int]) -> Optional[int]:
     if orden_id is None:
         return None
     return int(orden_id)
+
+
+def _validar_orden_mesa_abierta(repository: SelfOrderLinkRepository, orden_id: int) -> None:
+    orden = repository.obtener_estado_orden(orden_id)
+    if orden is None:
+        raise OrdenSelfOrderingNoExiste("La orden indicada no existe.")
+
+    estado, cierre_id = orden
+    if cierre_id is not None:
+        raise OrdenSelfOrderingArchivada("No se puede usar self-ordering en una orden archivada.")
+    if estado == "cerrada":
+        raise OrdenSelfOrderingCerrada("No se puede usar self-ordering en una orden cerrada.")
 
 
 def _ahora(ahora_fn: Optional[Callable[[], datetime.datetime]]) -> datetime.datetime:

@@ -19,6 +19,15 @@ class SqlSelfOrderLinkRepository:
         finally:
             conn.close()
 
+    def obtener_estado_orden(self, orden_id):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=? LIMIT 1", (orden_id,))
+            return cursor.fetchone()
+        finally:
+            conn.close()
+
     def insertar_link(self, link):
         conn = self._connection_factory()
         cursor = conn.cursor()
@@ -78,6 +87,43 @@ class SqlSelfOrderLinkRepository:
         finally:
             conn.close()
 
+    def listar_links_por_orden_canal(self, orden_id, canal):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion
+                FROM self_order_links
+                WHERE orden_id=? AND canal=? AND estado='activo'
+                ORDER BY id DESC
+                """,
+                (orden_id, canal),
+            )
+            return [_row_to_link(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def buscar_por_id(self, link_id):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion
+                FROM self_order_links
+                WHERE id=?
+                LIMIT 1
+                """,
+                (link_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return _row_to_link(row)
+        finally:
+            conn.close()
+
     def revocar_token(self, token):
         conn = self._connection_factory()
         cursor = conn.cursor()
@@ -85,6 +131,27 @@ class SqlSelfOrderLinkRepository:
             cursor.execute(
                 "UPDATE self_order_links SET estado='revocado' WHERE token=?",
                 (token,),
+            )
+            afectados = cursor.rowcount
+            conn.commit()
+            return afectados > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def revocar_link_mesa_de_orden(self, orden_id, link_id):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE self_order_links
+                SET estado='revocado'
+                WHERE id=? AND orden_id=? AND canal='mesa'
+                """,
+                (link_id, orden_id),
             )
             afectados = cursor.rowcount
             conn.commit()
@@ -115,4 +182,3 @@ def _es_error_unicidad_token(exc):
         or "duplicate key" in mensaje
         or "self_order_links_token" in mensaje
     )
-
