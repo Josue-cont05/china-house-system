@@ -52,6 +52,7 @@ from app.domain.sales.item_builder import (
     es_producto_refresco,
 )
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
+from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -190,6 +191,7 @@ def cargar_configuracion():
         "USE_POSTGRES": bool(database_url),
         "SQLITE_PATH": sqlite_path,
         "SECRET_KEY": os.environ.get("SECRET_KEY", "china-house-pos-secret"),
+        "SELF_ORDER_PUBLIC_BASE_URL": os.environ.get("SELF_ORDER_PUBLIC_BASE_URL", "").strip(),
     }
 
 
@@ -3137,6 +3139,7 @@ def proteger_sistema():
         "facturas_pendientes",
         "desactivar_factura",
         "api_tasa",
+        "self_ordering.self_order_publico",
     }
 
     # Administracion total y operaciones destructivas.
@@ -3217,6 +3220,9 @@ def proteger_sistema():
 
     if request.endpoint in {"login", "static"}:
         return
+
+    if request.path.startswith("/self-order/") and request.method != "GET":
+        return "Metodo no permitido", 405
 
     if not session.get("usuario_id"):
         if request.endpoint in rutas_publicas:
@@ -6889,6 +6895,15 @@ def orden(orden_id):
     puede_modificar_orden = (not bloqueada_por_cierre) and (
         estado != "cerrada" or edicion_emergencia_activa
     )
+    self_ordering_panel = render_self_ordering_panel(
+        orden_id,
+        estado,
+        o[10],
+        CONFIG.get("SELF_ORDER_PUBLIC_BASE_URL", ""),
+        request.host_url,
+        get_connection,
+        obtener_ultimo_id,
+    )
 
     boton_reimprimir = ""
     if usuario_puede_reimprimir_cocina() and estado in ("en cocina", "listo", "cerrada"):
@@ -6973,12 +6988,29 @@ def orden(orden_id):
     .delivery-nuevo {{ display:none; margin-top:10px; border-top:1px solid var(--borde); padding-top:10px; }}
     .delivery-nuevo.activo {{ display:block; }}
     .total-cliente {{ color:var(--verde-neko); }}
+    .self-order-panel {{ border:1px solid var(--borde); background:var(--panel-secundario); border-radius:12px; padding:14px; margin:14px 0; }}
+    .self-order-head {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }}
+    .self-order-head h3 {{ margin:0 0 4px; }}
+    .self-order-head p {{ margin:0; color:var(--texto-secundario); font-size:13px; }}
+    .self-order-pill {{ border-radius:999px; padding:6px 10px; font-size:12px; font-weight:900; white-space:nowrap; }}
+    .self-order-pill.activo {{ background:rgba(61,220,132,0.16); color:var(--verde-neko); border:1px solid rgba(61,220,132,0.4); }}
+    .self-order-pill.inactivo {{ background:#272B33; color:var(--texto-secundario); border:1px solid var(--borde); }}
+    .self-order-qr {{ display:grid; grid-template-columns:130px 1fr; gap:12px; margin-top:12px; align-items:start; }}
+    .self-order-qr img {{ width:130px; height:130px; background:white; border-radius:8px; padding:6px; box-sizing:border-box; }}
+    .self-order-info label {{ display:block; color:var(--texto-secundario); font-size:12px; font-weight:900; margin:4px 0; text-transform:uppercase; }}
+    .self-order-info input {{ width:100%; box-sizing:border-box; margin-bottom:8px; }}
+    .self-order-info code {{ display:block; overflow-wrap:anywhere; background:#111827; border:1px solid var(--borde); border-radius:8px; padding:8px; color:var(--verde-neko); font-size:12px; }}
+    .self-order-actions {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px; }}
+    .self-order-action {{ margin-top:12px; }}
+    .self-order-revocar {{ background:#4A1E23; color:#fecaca; }}
     @media (max-width: 768px) {{
         .contenedor {{ flex-direction: column; }}
         .productos, .panel {{ width: 100%; min-height: auto; border-left: none; }}
         .sabores-grid {{ grid-template-columns:1fr 1fr; }}
         .extra-lumpia-opciones {{ grid-template-columns:1fr; }}
         .delivery-grid, .delivery-actions {{ grid-template-columns:1fr 1fr; }}
+        .self-order-qr, .self-order-actions {{ grid-template-columns:1fr; }}
+        .self-order-qr img {{ width:160px; height:160px; }}
         .modal-refresco {{ padding:12px; }}
         .modal-contenido {{ width:calc(100% - 24px); padding:14px; }}
     }}
@@ -7137,6 +7169,7 @@ def orden(orden_id):
         <p>👩 Mesonera: <b>{o[9] if o[9] else '-'}</b></p>
         <p>Estado: {estado}</p>
         <p>Observacion: {o[7] if o[7] else '-'}</p>
+        {self_ordering_panel}
         <h3>🍽️ Productos</h3>
     """
 
@@ -7274,6 +7307,70 @@ def orden(orden_id):
             return null;
         }}
         return clave.trim();
+    }}
+
+    const selfOrderPanel = document.getElementById("selfOrderPanel");
+    const selfOrderMensaje = document.getElementById("selfOrderMensaje");
+    function setSelfOrderMensaje(texto) {{
+        if (selfOrderMensaje) {{
+            selfOrderMensaje.textContent = texto || "";
+        }}
+    }}
+    async function postSelfOrder(url) {{
+        const response = await fetch(url, {{ method: "POST", headers: {{ "Accept": "application/json" }} }});
+        if (!response.ok) {{
+            let mensaje = "No se pudo completar la operacion.";
+            try {{
+                const data = await response.json();
+                if (data.error) mensaje = data.error;
+            }} catch (error) {{}}
+            throw new Error(mensaje);
+        }}
+        return response.json();
+    }}
+    const generarSelfOrder = document.getElementById("generarSelfOrder");
+    if (generarSelfOrder && selfOrderPanel) {{
+        generarSelfOrder.addEventListener("click", async function() {{
+            generarSelfOrder.disabled = true;
+            setSelfOrderMensaje("Generando QR...");
+            try {{
+                await postSelfOrder(`/orden/${{selfOrderPanel.dataset.ordenId}}/self-ordering/link`);
+                window.location.reload();
+            }} catch (error) {{
+                generarSelfOrder.disabled = false;
+                setSelfOrderMensaje(error.message);
+            }}
+        }});
+    }}
+    const revocarSelfOrder = document.getElementById("revocarSelfOrder");
+    if (revocarSelfOrder && selfOrderPanel) {{
+        revocarSelfOrder.addEventListener("click", async function() {{
+            if (!confirm("Revocar el QR de autoservicio de esta mesa?")) return;
+            revocarSelfOrder.disabled = true;
+            setSelfOrderMensaje("Revocando QR...");
+            try {{
+                await postSelfOrder(`/orden/${{selfOrderPanel.dataset.ordenId}}/self-ordering/link/${{selfOrderPanel.dataset.linkId}}/revocar`);
+                window.location.reload();
+            }} catch (error) {{
+                revocarSelfOrder.disabled = false;
+                setSelfOrderMensaje(error.message);
+            }}
+        }});
+    }}
+    const copiarSelfOrder = document.getElementById("copiarSelfOrder");
+    if (copiarSelfOrder) {{
+        copiarSelfOrder.addEventListener("click", async function() {{
+            const input = document.getElementById("selfOrderUrl");
+            if (!input) return;
+            try {{
+                await navigator.clipboard.writeText(input.value);
+                setSelfOrderMensaje("Link copiado.");
+            }} catch (error) {{
+                input.select();
+                document.execCommand("copy");
+                setSelfOrderMensaje("Link copiado.");
+            }}
+        }});
     }}
 
     const saboresRefresco = ["Coca Cola", "Chinotto", "Frescolita", "Naranja", "Uva", "Manzana", "7Up", "Pepsi", "Otro"];
@@ -10905,7 +11002,13 @@ with app.app_context():
     desactivar_menu_china_house()
 
 
-app.register_blueprint(crear_self_ordering_blueprint(get_connection, obtener_ultimo_id))
+app.register_blueprint(
+    crear_self_ordering_blueprint(
+        get_connection,
+        obtener_ultimo_id,
+        lambda: CONFIG.get("SELF_ORDER_PUBLIC_BASE_URL", ""),
+    )
+)
 
 
 if __name__ == "__main__":

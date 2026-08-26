@@ -2,3 +2,4 @@ Flask
 gunicorn
 pytz
 psycopg2-binary
+qrcode

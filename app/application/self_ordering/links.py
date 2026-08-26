@@ -176,10 +176,9 @@ def obtener_o_crear_link_mesa(
 ) -> tuple[SelfOrderLink, bool]:
     _validar_orden_mesa_abierta(repository, orden_id)
 
-    for link in repository.listar_links_por_orden_canal(orden_id, "mesa"):
-        resultado = validar_self_order_link(repository, link.token, ahora_fn=ahora_fn)
-        if resultado.valido and resultado.link is not None:
-            return resultado.link, False
+    link_activo = obtener_link_activo_mesa(repository, orden_id, ahora_fn=ahora_fn)
+    if link_activo is not None:
+        return link_activo, False
 
     link = crear_self_order_link(
         repository,
@@ -189,6 +188,18 @@ def obtener_o_crear_link_mesa(
         token_generator=token_generator,
     )
     return link, True
+
+
+def obtener_link_activo_mesa(
+    repository: SelfOrderLinkRepository,
+    orden_id: int,
+    ahora_fn: Optional[Callable[[], datetime.datetime]] = None,
+) -> Optional[SelfOrderLink]:
+    for link in repository.listar_links_por_orden_canal(orden_id, "mesa"):
+        resultado = validar_self_order_link(repository, link.token, ahora_fn=ahora_fn)
+        if resultado.valido and resultado.link is not None:
+            return resultado.link
+    return None
 
 
 def revocar_link_mesa_de_orden(repository: SelfOrderLinkRepository, orden_id: int, link_id: int) -> bool:

@@ -1,0 +1,2 @@
+"""Utilidades QR locales."""
+
