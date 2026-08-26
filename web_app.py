@@ -616,6 +616,11 @@ def formato_bs(monto):
     return f"Bs {a_float(monto):,.2f}"
 
 
+def formato_bs_resumen(monto):
+    texto = f"{a_float(monto):,.2f}"
+    return texto.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
 def texto_fecha_corta(fecha):
     if not fecha:
         return "-"
@@ -1555,10 +1560,16 @@ def orden_tiene_cxc(cursor, orden_id):
 def orden_tiene_delivery_legacy(cursor, orden_id):
     cursor.execute(
         """
-        SELECT oi.producto, c.nombre
+        SELECT oi.producto,
+               (
+                   SELECT c.nombre
+                   FROM productos p
+                   LEFT JOIN categorias c ON p.categoria_id = c.id
+                   WHERE LOWER(p.nombre)=LOWER(oi.producto)
+                   ORDER BY COALESCE(p.activo, 1) DESC, p.id
+                   LIMIT 1
+               ) AS categoria
         FROM orden_items oi
-        LEFT JOIN productos p ON LOWER(p.nombre)=LOWER(oi.producto)
-        LEFT JOIN categorias c ON p.categoria_id = c.id
         WHERE oi.orden_id=?
         """,
         (orden_id,),
@@ -6864,10 +6875,16 @@ def orden(orden_id):
 
     cursor.execute(
         """
-        SELECT oi.producto, oi.precio, oi.id, COALESCE(oi.indicacion, ''), c.nombre
+        SELECT oi.producto, oi.precio, oi.id, COALESCE(oi.indicacion, ''),
+               (
+                   SELECT c.nombre
+                   FROM productos p
+                   LEFT JOIN categorias c ON p.categoria_id = c.id
+                   WHERE LOWER(p.nombre)=LOWER(oi.producto)
+                   ORDER BY COALESCE(p.activo, 1) DESC, p.id
+                   LIMIT 1
+               ) AS categoria
         FROM orden_items oi
-        LEFT JOIN productos p ON LOWER(p.nombre)=LOWER(oi.producto)
-        LEFT JOIN categorias c ON p.categoria_id = c.id
         WHERE oi.orden_id=?
         """,
         (orden_id,),
@@ -6890,6 +6907,9 @@ def orden(orden_id):
     tiene_delivery_legacy = delivery_legacy_usd > TOLERANCIA_COBRO
     descuento = o[8] if o[8] else 0
     total_bs_final = max(total_bs - descuento, 0)
+    total_delivery_bs = round((delivery_usd + delivery_legacy_usd) * tasa, 2)
+    total_orden_bs = round(total_bs_final + total_delivery_bs, 2)
+    total_orden_usd = round((total_orden_bs / tasa) if tasa else total_cliente_usd, 2)
     bloqueada_por_cierre = o[10] is not None
     edicion_emergencia_activa = emergencia_activa(orden_id)
     puede_modificar_orden = (not bloqueada_por_cierre) and (
@@ -7244,14 +7264,8 @@ def orden(orden_id):
                 <a href="/repartidores" class="delivery-help">Administrar repartidores</a>
             </div>
         </div>
-        <div class="total">Consumo Neko Wok: ${total_usd:.2f}</div>
-        <div class="total">Delivery: ${(delivery_usd + delivery_legacy_usd):.2f}</div>
-        <div class="total total-cliente">Total cliente: ${total_cliente_usd:.2f}</div>
-        <div class="total">USD: ${total_usd:.2f}</div>
-        <div class="total">Bs: {total_bs:.2f}</div>
-        <p>Descuento: Bs {round(descuento, 2)}</p>
-        <div class="total">Total Final Bs: {total_bs_final:.2f}</div>
-        <div class="delivery-help">Total cliente Bs visual: {total_cliente_bs:.2f}</div>
+        <div class="total total-cliente">Total Orden: ${total_orden_usd:.2f}</div>
+        <div class="total">Bs: {formato_bs_resumen(total_orden_bs)}</div>
         {boton_reimprimir}
     """
 
@@ -8471,10 +8485,16 @@ def cobrar(orden_id):
 
     cursor.execute(
         """
-        SELECT oi.producto, oi.precio, c.nombre
+        SELECT oi.producto, oi.precio,
+               (
+                   SELECT c.nombre
+                   FROM productos p
+                   LEFT JOIN categorias c ON p.categoria_id = c.id
+                   WHERE LOWER(p.nombre)=LOWER(oi.producto)
+                   ORDER BY COALESCE(p.activo, 1) DESC, p.id
+                   LIMIT 1
+               ) AS categoria
         FROM orden_items oi
-        LEFT JOIN productos p ON LOWER(p.nombre)=LOWER(oi.producto)
-        LEFT JOIN categorias c ON p.categoria_id = c.id
         WHERE oi.orden_id=?
         """,
         (orden_id,),
