@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from app.domain.sales.item_descriptions import deserializar_indicacion
+
 
 TEST_DB = tempfile.NamedTemporaryFile(prefix="neko_snapshot_", suffix=".db", delete=False)
 TEST_DB.close()
@@ -1103,6 +1105,79 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self._delivery_state(orden_id)[0], (0.0, None))
         self.assertEqual(self._charge(orden_id, "usd", 20).status_code, 302)
         self.assertEqual(self._delivery_movements(orden_id), [])
+
+    def test_agregar_route_preserves_simple_combo_and_promocion_item_creation(self):
+        orden_id = self._create_order(price=20.0)
+
+        simple_id = self._delivery_product_id("Neko Dúo Triple")
+        combo_id = self._delivery_product_id("Neko Combo 2")
+        promo_id = self._delivery_product_id("Familiar")
+
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{simple_id}").status_code, 302)
+        self.assertEqual(
+            self.client.get(
+                f"/agregar/{orden_id}/{combo_id}",
+                query_string=[
+                    ("acompanante", "Pollo BBQ"),
+                    ("acompanante", "Lumpia"),
+                    ("bebida", "Frescolita"),
+                ],
+            ).status_code,
+            302,
+        )
+        self.assertEqual(
+            self.client.get(
+                f"/agregar/{orden_id}/{promo_id}",
+                query_string=[
+                    ("pollo", "Pollo BBQ/Agridulce"),
+                    ("arroz", "Triple"),
+                    ("sabor", "chinotto"),
+                    ("extra_lumpias", "1"),
+                ],
+            ).status_code,
+            302,
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT producto, precio, COALESCE(indicacion, '')
+            FROM orden_items
+            WHERE orden_id=?
+            ORDER BY id
+            """,
+            (orden_id,),
+        )
+        items = cursor.fetchall()
+        conn.close()
+
+        self.assertIn(("Neko Dúo Triple", 9.0, ""), items)
+        combo = next(item for item in items if item[0] == "Neko Combo 2")
+        combo_datos = deserializar_indicacion(combo[2])
+        self.assertEqual(combo[1], 6.0)
+        self.assertEqual(combo_datos["acompanantes"], ["Pollo BBQ", "Lumpia"])
+        self.assertEqual(combo_datos["bebida"], "Frescolita")
+
+        promo = next(item for item in items if item[0] == "Familiar")
+        promo_datos = deserializar_indicacion(promo[2])
+        self.assertEqual(promo[1], 20.0)
+        self.assertEqual(promo_datos["pollo"], "Pollo BBQ/Agridulce")
+        self.assertEqual(promo_datos["arroces"], ["Triple"])
+        self.assertEqual(promo_datos["bebidas"], ["Chinotto"])
+        self.assertIn(("Promo extra: Ración de Lumpias", 3.0, "Agregado con: Familiar"), items)
+
+    def test_agregar_route_preserves_invalid_combo_response(self):
+        orden_id = self._create_order(price=20.0)
+        combo_id = self._delivery_product_id("Neko Combo 1")
+
+        response = self.client.get(
+            f"/agregar/{orden_id}/{combo_id}",
+            query_string={"acompanante": "No existe", "bebida": "Coca Cola"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("validos para este combo".encode(), response.data)
 
     def test_delivery_legacy_products_are_preserved_hidden_and_blocked_for_new_adds(self):
         delivery_id = self._delivery_product_id("Delivery 3")

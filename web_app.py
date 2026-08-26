@@ -21,7 +21,6 @@ from app.shared.constants.system import (
     ETIQUETAS_METODO_PAGO,
     METODOS_PAGO_VALIDOS,
     ROLES_USUARIO_VALIDOS,
-    SABORES_REFRESCO,
 )
 from app.domain.sales.calculations import (
     DELIVERY_MONTO_MAXIMO,
@@ -35,17 +34,10 @@ from app.domain.sales.calculations import (
     normalizar_monto_delivery,
 )
 from app.domain.sales.item_descriptions import (
-    COMBOS_JSON,
-    PROMOCIONES_JSON,
-    datos_combo_desde_indicacion,
-    datos_promocion_desde_indicacion,
-    deserializar_indicacion,
-    es_indicacion_json,
     nombre_producto_cocina,
     normalizar_indicacion_item,
     producto_sin_prefijo_cantidad,
     quitar_prefijo_cantidad_visual,
-    serializar_indicacion,
     texto_descripcion_combo_cocina,
     texto_descripcion_combo_factura,
     texto_descripcion_combo_orden,
@@ -53,6 +45,11 @@ from app.domain.sales.item_descriptions import (
     texto_descripcion_promocion_factura,
     texto_descripcion_promocion_orden,
     texto_item_con_indicacion,
+)
+from app.domain.sales.item_builder import (
+    ErrorConstruccionItem,
+    construir_items_orden,
+    es_producto_refresco,
 )
 
 CLAVE_SUPERVISOR = "0102"
@@ -363,10 +360,6 @@ def a_float(valor, default=0.0):
         return default
 
 
-def es_producto_refresco(nombre):
-    return "refresco" in (nombre or "").lower()
-
-
 def calcular_totales_visuales_delivery(items, delivery_usd):
     venta_restaurante = 0.0
     delivery_legacy = 0.0
@@ -389,22 +382,6 @@ def calcular_totales_visuales_delivery(items, delivery_usd):
 
 def es_combo_con_favorito(nombre):
     return (nombre or "").strip() in COMBOS_CON_FAVORITO
-
-
-def normalizar_sabor_refresco(sabor):
-    sabor_limpio = (sabor or "").strip()
-    if not sabor_limpio or len(sabor_limpio) > 40:
-        return ""
-
-    for opcion in SABORES_REFRESCO:
-        if sabor_limpio.lower() == opcion.lower():
-            return opcion
-
-    sabor_limpio = sabor_limpio.replace("<", "").replace(">", "")
-    return sabor_limpio.strip()
-
-
-
 
 
 def separar_prefijo_cantidad(producto):
@@ -7819,108 +7796,62 @@ def agregar(orden_id, producto_id):
         conn.close()
         return "Producto no encontrado"
 
-    producto_nombre = p[0]
-    if es_producto_delivery_legacy(producto_nombre, p[2]):
-        conn.close()
-        return "El delivery ahora se registra desde el campo Delivery de la orden.", 400
-
     cursor.execute("SELECT COALESCE(delivery_usd, 0) FROM ordenes WHERE id=?", (orden_id,))
     delivery_actual = a_float(cursor.fetchone()[0])
-    if delivery_actual > TOLERANCIA_COBRO and es_producto_delivery_legacy(producto_nombre, p[2]):
-        conn.close()
-        return "Esta orden ya tiene delivery explícito configurado.", 400
-
-    indicacion = ""
-    if es_producto_refresco(producto_nombre):
-        sabor = normalizar_sabor_refresco(request.args.get("sabor"))
-        if not sabor:
-            conn.close()
-            return "Debes seleccionar un sabor valido para el refresco"
-        indicacion = f"Sabor: {sabor}"
-    elif producto_nombre in COMBOS_PERSONALES:
-        cantidad_acompanantes = COMBOS_CANTIDAD_ACOMPANANTES.get(producto_nombre, 1)
-        acompanantes = [(valor or "").strip() for valor in request.args.getlist("acompanante")]
-        bebida = (request.args.get("bebida") or "").strip()
-        if len(acompanantes) != cantidad_acompanantes or any(
-            acompanante not in ACOMPANANTES_COMBO for acompanante in acompanantes
-        ):
-            conn.close()
-            return "Debes seleccionar todos los acompañantes validos para este combo"
-        if bebida not in BEBIDAS_COMBO:
-            conn.close()
-            return "Debes seleccionar una bebida valida para este combo"
-        indicacion = serializar_indicacion(
-            {
-                "version": 1,
-                "tipo": "combo",
-                "producto": COMBOS_JSON[producto_nombre],
-                "acompanantes": acompanantes,
-                "bebida": bebida,
-            }
+    try:
+        items_construidos = construir_items_orden(
+            producto_nombre=p[0],
+            producto_precio=p[1],
+            categoria_nombre=p[2],
+            delivery_actual=delivery_actual,
+            sabor=request.args.get("sabor"),
+            acompanantes=request.args.getlist("acompanante"),
+            bebida=request.args.get("bebida"),
+            pollo=request.args.get("pollo"),
+            arroces=request.args.getlist("arroz"),
+            sabores=request.args.getlist("sabor"),
+            extra_lumpias=request.args.get("extra_lumpias", "0"),
+            combos_personales=COMBOS_PERSONALES,
+            acompanantes_combo=ACOMPANANTES_COMBO,
+            bebidas_combo=BEBIDAS_COMBO,
+            combos_cantidad_acompanantes=COMBOS_CANTIDAD_ACOMPANANTES,
+            promociones_neko=PROMOCIONES_NEKO,
+            promociones_con_pollo=PROMOCIONES_CON_POLLO,
+            pollos_promocion=POLLOS_PROMOCION,
+            arroces_promocion=ARROCES_PROMOCION,
+            promo_extra_lumpias_nombre=PROMO_EXTRA_LUMPIAS_NOMBRE,
+            promo_extra_lumpias_precio=PROMO_EXTRA_LUMPIAS_PRECIO,
         )
-    elif producto_nombre in PROMOCIONES_NEKO:
-        promo = PROMOCIONES_NEKO[producto_nombre]
-        pollo = (request.args.get("pollo") or "").strip()
-        arroces = [(valor or "").strip() for valor in request.args.getlist("arroz")]
-        sabores = request.args.getlist("sabor")
-        extra_lumpias = (request.args.get("extra_lumpias") or "0").strip()
-        requiere_pollo = producto_nombre in PROMOCIONES_CON_POLLO
-        if requiere_pollo and pollo not in POLLOS_PROMOCION:
-            conn.close()
-            return "Debes seleccionar un tipo de pollo valido para esta promocion"
-        if len(arroces) != promo["cantidad_arroces"] or any(
-            arroz not in ARROCES_PROMOCION for arroz in arroces
-        ):
-            conn.close()
-            return "Debes seleccionar todos los arroces validos para esta promocion"
-        sabores_normalizados = [normalizar_sabor_refresco(sabor) for sabor in sabores]
-        if len(sabores_normalizados) != promo["cantidad_refrescos"] or any(
-            not sabor for sabor in sabores_normalizados
-        ):
-            conn.close()
-            return "Debes seleccionar todos los sabores de refresco"
-        if extra_lumpias not in {"0", "1"}:
-            conn.close()
-            return "La selección del extra de lumpias no es valida"
-        datos_promocion = {
-            "version": 1,
-            "tipo": "promocion",
-            "producto": PROMOCIONES_JSON[producto_nombre],
-            "arroces": arroces,
-            "bebidas": sabores_normalizados,
-        }
-        if requiere_pollo:
-            datos_promocion["pollo"] = pollo
-        indicacion = serializar_indicacion(datos_promocion)
-
-    indicacion = normalizar_indicacion_item(indicacion)
+    except ErrorConstruccionItem as exc:
+        conn.close()
+        return exc.mensaje, exc.status_code
 
     cursor.execute(
         """
         INSERT INTO orden_items (orden_id, producto, precio, indicacion)
         VALUES (?, ?, ?, ?)
         """,
-        (orden_id, producto_nombre, p[1], indicacion),
+        (
+            orden_id,
+            items_construidos.item_principal.producto,
+            items_construidos.item_principal.precio,
+            items_construidos.item_principal.indicacion,
+        ),
     )
-    if producto_nombre in PROMOCIONES_NEKO and extra_lumpias == "1":
+    for item_extra in items_construidos.items_extra:
         cursor.execute(
             """
             INSERT INTO orden_items (orden_id, producto, precio, indicacion)
             VALUES (?, ?, ?, ?)
             """,
-            (
-                orden_id,
-                PROMO_EXTRA_LUMPIAS_NOMBRE,
-                PROMO_EXTRA_LUMPIAS_PRECIO,
-                normalizar_indicacion_item(f"Agregado con: {producto_nombre}"),
-            ),
+            (orden_id, item_extra.producto, item_extra.precio, item_extra.indicacion),
         )
     if row[0] == "cerrada" and emergencia_activa(orden_id):
         registrar_auditoria_emergencia(
             cursor,
             orden_id,
             "agregar_producto_emergencia",
-            f"Producto agregado: {producto_nombre} - ${p[1]}",
+            f"Producto agregado: {items_construidos.item_principal.producto} - ${items_construidos.item_principal.precio}",
         )
     conn.commit()
     conn.close()
