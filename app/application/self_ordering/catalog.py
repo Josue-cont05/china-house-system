@@ -13,6 +13,7 @@ class OpcionCatalogo:
     maximas: int
     opcional: bool = False
     ayuda: str = ""
+    precios_adicionales_centavos: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class ReglasCatalogoSelfOrdering:
     arroces_promocion: tuple[str, ...]
     sabores_refresco: tuple[str, ...]
     promo_extra_lumpias_nombre: str
+    promo_extra_lumpias_precio: float
 
 
 class CatalogoRepository(Protocol):
@@ -229,8 +231,17 @@ def _opciones_producto(nombre, reglas):
                     requeridas=0,
                     maximas=1,
                     opcional=True,
+                    precios_adicionales_centavos={
+                        reglas.promo_extra_lumpias_nombre: _centavos(
+                            reglas.promo_extra_lumpias_precio
+                        )
+                    },
                 )
             )
         return tuple(opciones)
 
     return ()
+
+
+def _centavos(monto):
+    return int(round(float(monto or 0) * 100))

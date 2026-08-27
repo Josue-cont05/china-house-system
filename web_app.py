@@ -372,6 +372,7 @@ def reglas_catalogo_self_ordering():
         arroces_promocion=tuple(ARROCES_PROMOCION),
         sabores_refresco=tuple(SABORES_REFRESCO),
         promo_extra_lumpias_nombre=PROMO_EXTRA_LUMPIAS_NOMBRE,
+        promo_extra_lumpias_precio=PROMO_EXTRA_LUMPIAS_PRECIO,
     )
 
 

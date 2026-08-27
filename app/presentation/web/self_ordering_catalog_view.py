@@ -124,10 +124,30 @@ def render_catalogo_publico(catalogo):
             }}
             .option-pill.selected {{ border-color:var(--green); background:#123528; color:var(--green); }}
             .sheet-actions {{ margin-top:18px; display:flex; gap:10px; }}
-            .disabled-action {{
+            .add-to-cart, .disabled-action {{
                 flex:1; min-height:46px; border-radius:999px; border:0; background:#2A2F38;
                 color:var(--muted); font-weight:900;
             }}
+            .add-to-cart {{ background:var(--green); color:#07130C; cursor:pointer; }}
+            .add-to-cart:disabled {{ background:#2A2F38; color:var(--muted); cursor:not-allowed; }}
+            .cart-bar {{
+                position:fixed; left:12px; right:12px; bottom:12px; z-index:15; min-height:58px;
+                border:0; border-radius:999px; background:var(--green); color:#07130C;
+                font-weight:900; font-size:16px; box-shadow:0 12px 28px rgba(0,0,0,.35); cursor:pointer;
+            }}
+            .cart-bar[hidden], .cart-sheet[hidden] {{ display:none; }}
+            .cart-sheet {{ position:fixed; inset:0; z-index:30; background:rgba(0,0,0,.62); display:flex; align-items:flex-end; padding:0 10px 10px; }}
+            .cart-panel {{ width:min(720px, 100%); margin:0 auto; max-height:88vh; overflow:auto; background:#15181D; border:1px solid var(--line); border-radius:22px 22px 16px 16px; padding:14px; box-shadow:0 -20px 50px rgba(0,0,0,.35); }}
+            .cart-head {{ display:flex; justify-content:space-between; gap:12px; align-items:center; margin-bottom:12px; }}
+            .cart-head h2 {{ margin:0; }}
+            .cart-line {{ display:grid; grid-template-columns:1fr auto; gap:10px; border-top:1px solid var(--line); padding:12px 0; }}
+            .cart-line h3 {{ margin:0 0 5px; font-size:17px; }}
+            .cart-config {{ margin:0; color:var(--muted); font-size:13px; line-height:1.35; }}
+            .cart-controls {{ display:flex; gap:6px; align-items:center; justify-content:flex-end; }}
+            .cart-controls button, .remove-line {{ min-width:40px; min-height:40px; border-radius:999px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); font-weight:900; cursor:pointer; }}
+            .remove-line {{ color:#FCA5A5; }}
+            .cart-total {{ display:flex; justify-content:space-between; gap:10px; font-size:20px; font-weight:900; border-top:1px solid var(--line); padding-top:14px; margin-top:6px; }}
+            .send-request {{ width:100%; min-height:50px; margin-top:14px; border:0; border-radius:999px; background:#2A2F38; color:var(--muted); font-weight:900; }}
             @media (min-width:720px) {{
                 .product-grid {{ grid-template-columns:repeat(2, minmax(0,1fr)); }}
                 .product-card {{ grid-template-columns:128px 1fr; }}
@@ -147,10 +167,206 @@ def render_catalogo_publico(catalogo):
             {contenido}
         </main>
         {''.join(modales_html)}
+        <button class="cart-bar" id="cartBar" type="button" hidden>
+            Ver pedido · <span id="cartBarCount">0 productos</span> · <span id="cartBarTotal">$0.00</span>
+        </button>
+        <div class="cart-sheet" id="cartSheet" hidden>
+            <div class="cart-panel" role="dialog" aria-modal="true" aria-label="Pedido">
+                <div class="cart-head">
+                    <h2>Tu pedido</h2>
+                    <button class="sheet-close" type="button" id="closeCart" aria-label="Cerrar carrito">x</button>
+                </div>
+                <div id="cartLines"></div>
+                <div class="cart-total">
+                    <span>Total</span>
+                    <span id="cartTotal">$0.00</span>
+                </div>
+                <button class="send-request" type="button" disabled>Envio disponible proximamente</button>
+            </div>
+        </div>
         <script>
         (function() {{
+            const cart = [];
             const tabs = Array.from(document.querySelectorAll(".category-tab"));
             const sections = Array.from(document.querySelectorAll(".catalog-section"));
+            const cartBar = document.getElementById("cartBar");
+            const cartBarCount = document.getElementById("cartBarCount");
+            const cartBarTotal = document.getElementById("cartBarTotal");
+            const cartSheet = document.getElementById("cartSheet");
+            const cartLines = document.getElementById("cartLines");
+            const cartTotal = document.getElementById("cartTotal");
+            const closeCart = document.getElementById("closeCart");
+
+            function money(cents) {{
+                return "$" + (cents / 100).toFixed(2);
+            }}
+
+            function selectedValues(group) {{
+                return Array.from(group.querySelectorAll(".option-pill.selected"))
+                    .map(function(button) {{
+                        return {{
+                            valor: button.dataset.optionValue || button.textContent.trim(),
+                            recargoCentavos: Number(button.dataset.optionExtraCents || 0)
+                        }};
+                    }});
+            }}
+
+            function collectConfig(sheet) {{
+                return Array.from(sheet.querySelectorAll(".option-group")).map(function(group) {{
+                    const opciones = selectedValues(group);
+                    return {{
+                        titulo: group.dataset.title || "",
+                        valores: opciones.map(function(opcion) {{ return opcion.valor; }}),
+                        recargoCentavos: opciones.reduce(function(total, opcion) {{
+                            return total + opcion.recargoCentavos;
+                        }}, 0),
+                        requeridas: Number(group.dataset.required || 0),
+                        maximas: Number(group.dataset.max || 1),
+                        opcional: group.dataset.optional === "true"
+                    }};
+                }});
+            }}
+
+            function configIsValid(config) {{
+                return config.every(function(group) {{
+                    const total = group.valores.length;
+                    if (total > group.maximas) return false;
+                    if (group.opcional) return true;
+                    return total === group.requeridas;
+                }});
+            }}
+
+            function configKey(config) {{
+                return JSON.stringify(config.map(function(group) {{
+                    return {{
+                        titulo: group.titulo,
+                        valores: group.valores.slice().sort()
+                    }};
+                }}).sort(function(a, b) {{
+                    return a.titulo.localeCompare(b.titulo);
+                }}));
+            }}
+
+            function configSummary(config) {{
+                const lines = [];
+                config.forEach(function(group) {{
+                    if (group.valores.length) {{
+                        lines.push(group.titulo + ": " + group.valores.join(", "));
+                    }}
+                }});
+                return lines.join(" · ");
+            }}
+
+            function configExtraCents(config) {{
+                return config.reduce(function(total, group) {{
+                    return total + group.recargoCentavos;
+                }}, 0);
+            }}
+
+            function updateAddButton(sheet) {{
+                const button = sheet.querySelector("[data-add-to-cart]");
+                if (!button) return;
+                const config = collectConfig(sheet);
+                button.disabled = !configIsValid(config);
+            }}
+
+            function totalItems() {{
+                return cart.reduce(function(total, item) {{ return total + item.quantity; }}, 0);
+            }}
+
+            function totalCents() {{
+                return cart.reduce(function(total, item) {{
+                    return total + item.unitPriceCents * item.quantity;
+                }}, 0);
+            }}
+
+            function renderCart() {{
+                const count = totalItems();
+                const total = totalCents();
+                cartBar.hidden = count === 0;
+                cartBarCount.textContent = count + (count === 1 ? " producto" : " productos");
+                cartBarTotal.textContent = money(total);
+                cartTotal.textContent = money(total);
+                cartLines.innerHTML = "";
+                if (!cart.length) {{
+                    const empty = document.createElement("p");
+                    empty.className = "empty-state";
+                    empty.textContent = "Tu pedido esta vacio.";
+                    cartLines.appendChild(empty);
+                    return;
+                }}
+                cart.forEach(function(item, index) {{
+                    const line = document.createElement("div");
+                    line.className = "cart-line";
+
+                    const info = document.createElement("div");
+                    const title = document.createElement("h3");
+                    title.textContent = item.name;
+                    const config = document.createElement("p");
+                    config.className = "cart-config";
+                    config.textContent = item.summary || "Sin opciones";
+                    const subtotal = document.createElement("p");
+                    subtotal.className = "cart-config";
+                    subtotal.textContent = item.quantity + " x " + money(item.unitPriceCents) + " = " + money(item.unitPriceCents * item.quantity);
+                    info.appendChild(title);
+                    info.appendChild(config);
+                    info.appendChild(subtotal);
+
+                    const controls = document.createElement("div");
+                    controls.className = "cart-controls";
+                    const minus = document.createElement("button");
+                    minus.type = "button";
+                    minus.textContent = "-";
+                    minus.dataset.cartMinus = String(index);
+                    const qty = document.createElement("strong");
+                    qty.textContent = String(item.quantity);
+                    const plus = document.createElement("button");
+                    plus.type = "button";
+                    plus.textContent = "+";
+                    plus.dataset.cartPlus = String(index);
+                    const remove = document.createElement("button");
+                    remove.type = "button";
+                    remove.className = "remove-line";
+                    remove.textContent = "Eliminar";
+                    remove.dataset.cartRemove = String(index);
+                    controls.appendChild(minus);
+                    controls.appendChild(qty);
+                    controls.appendChild(plus);
+                    controls.appendChild(remove);
+
+                    line.appendChild(info);
+                    line.appendChild(controls);
+                    cartLines.appendChild(line);
+                }});
+            }}
+
+            function addItemFromSheet(sheet) {{
+                const config = collectConfig(sheet);
+                if (!configIsValid(config)) return;
+                const productId = Number(sheet.dataset.productId);
+                const basePriceCents = Number(sheet.dataset.priceCents || 0);
+                const unitPriceCents = basePriceCents + configExtraCents(config);
+                const key = productId + "|" + configKey(config);
+                const existing = cart.find(function(item) {{ return item.key === key; }});
+                if (existing) {{
+                    existing.quantity += 1;
+                }} else {{
+                    cart.push({{
+                        key: key,
+                        productId: productId,
+                        name: sheet.dataset.productName || "",
+                        basePriceCents: basePriceCents,
+                        unitPriceCents: unitPriceCents,
+                        config: config,
+                        summary: configSummary(config),
+                        indication: "",
+                        quantity: 1
+                    }});
+                }}
+                renderCart();
+                closeSheet(sheet);
+            }}
+
             tabs.forEach(function(tab) {{
                 tab.addEventListener("click", function() {{
                     const target = tab.dataset.categoryTarget;
@@ -170,7 +386,10 @@ def render_catalogo_publico(catalogo):
             document.querySelectorAll("[data-product-modal]").forEach(function(card) {{
                 card.addEventListener("click", function() {{
                     const sheet = document.getElementById(card.dataset.productModal);
-                    if (sheet) sheet.removeAttribute("hidden");
+                    if (sheet) {{
+                        updateAddButton(sheet);
+                        sheet.removeAttribute("hidden");
+                    }}
                 }});
             }});
             document.querySelectorAll("[data-close-sheet]").forEach(function(button) {{
@@ -208,8 +427,42 @@ def render_catalogo_publico(catalogo):
                     if (count) {{
                         count.textContent = group.querySelectorAll(".option-pill.selected").length + " de " + max;
                     }}
+                    updateAddButton(group.closest(".sheet"));
                 }});
             }});
+            document.querySelectorAll("[data-add-to-cart]").forEach(function(button) {{
+                button.addEventListener("click", function() {{
+                    addItemFromSheet(button.closest(".sheet"));
+                }});
+            }});
+            cartBar.addEventListener("click", function() {{
+                cartSheet.hidden = false;
+            }});
+            closeCart.addEventListener("click", function() {{
+                cartSheet.hidden = true;
+            }});
+            cartSheet.addEventListener("click", function(event) {{
+                if (event.target === cartSheet) cartSheet.hidden = true;
+            }});
+            cartLines.addEventListener("click", function(event) {{
+                const minus = event.target.closest("[data-cart-minus]");
+                const plus = event.target.closest("[data-cart-plus]");
+                const remove = event.target.closest("[data-cart-remove]");
+                if (minus) {{
+                    const index = Number(minus.dataset.cartMinus);
+                    cart[index].quantity -= 1;
+                    if (cart[index].quantity <= 0) cart.splice(index, 1);
+                    renderCart();
+                }} else if (plus) {{
+                    const index = Number(plus.dataset.cartPlus);
+                    cart[index].quantity += 1;
+                    renderCart();
+                }} else if (remove) {{
+                    cart.splice(Number(remove.dataset.cartRemove), 1);
+                    renderCart();
+                }}
+            }});
+            renderCart();
         }})();
         </script>
     </body>
@@ -248,7 +501,7 @@ def _render_producto_modal(producto, categoria_nombre):
     if not opciones:
         opciones = "<p class='empty-state'>Este producto no requiere opciones.</p>"
     return f"""
-    <div class="sheet" id="{modal_id}" hidden>
+    <div class="sheet" id="{modal_id}" hidden data-product-id="{producto.id}" data-product-name="{html.escape(producto.nombre, quote=True)}" data-price-cents="{int(round(producto.precio * 100))}">
         <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="{html.escape(producto.nombre, quote=True)}">
             <div class="sheet-head">
                 {_render_visual(categoria_nombre)}
@@ -261,7 +514,7 @@ def _render_producto_modal(producto, categoria_nombre):
             </div>
             {opciones}
             <div class="sheet-actions">
-                <button class="disabled-action" type="button" disabled>Disponible proximamente</button>
+                <button class="add-to-cart" type="button" data-add-to-cart>Agregar al pedido</button>
                 <button class="category-tab" type="button" data-close-sheet>Listo</button>
             </div>
         </div>
@@ -286,14 +539,15 @@ def _render_visual(categoria_nombre):
 
 
 def _render_opcion(opcion):
+    precios_adicionales = opcion.precios_adicionales_centavos or {}
     valores = "".join(
-        f"<button class='option-pill' type='button'>{html.escape(valor)}</button>"
+        _render_valor_opcion(valor, precios_adicionales.get(valor, 0))
         for valor in opcion.valores
         if valor
     )
     ayuda = f"<p class='option-help'>{html.escape(opcion.ayuda)}</p>" if opcion.ayuda else ""
     return f"""
-    <div class="option-group" data-max="{opcion.maximas}" data-required="{opcion.requeridas}" data-optional="{'true' if opcion.opcional else 'false'}">
+    <div class="option-group" data-title="{html.escape(opcion.titulo, quote=True)}" data-max="{opcion.maximas}" data-required="{opcion.requeridas}" data-optional="{'true' if opcion.opcional else 'false'}">
         <div class="option-title">
             <span>{html.escape(_texto_cardinalidad(opcion))}</span>
             <span data-option-count>0 de {opcion.maximas}</span>
@@ -302,6 +556,17 @@ def _render_opcion(opcion):
         <div class="option-grid">{valores}</div>
     </div>
     """
+
+
+def _render_valor_opcion(valor, recargo_centavos):
+    recargo = int(recargo_centavos or 0)
+    texto_recargo = f" +${recargo / 100:.2f}" if recargo else ""
+    return (
+        "<button class='option-pill' type='button' "
+        f"data-option-value='{html.escape(valor, quote=True)}' "
+        f"data-option-extra-cents='{recargo}'>"
+        f"{html.escape(valor)}{texto_recargo}</button>"
+    )
 
 
 def _texto_cardinalidad(opcion):

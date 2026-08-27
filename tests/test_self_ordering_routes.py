@@ -1,5 +1,7 @@
 import unittest
 
+from app.application.self_ordering.catalog import construir_catalogo_self_ordering
+from app.infrastructure.database.self_ordering_catalog import SqlSelfOrderingCatalogRepository
 
 from tests.support_env import TEST_DB, cleanup_test_db, import_web_app
 
@@ -169,6 +171,17 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         response = web_app.app.test_client().get(f"/self-order/{link['token']}")
         self.assertEqual(response.status_code, 200)
         return response.data.decode("utf-8")
+
+    def _catalog_product(self, nombre):
+        catalogo = construir_catalogo_self_ordering(
+            SqlSelfOrderingCatalogRepository(web_app.get_connection),
+            web_app.reglas_catalogo_self_ordering(),
+        )
+        for categoria in catalogo.categorias:
+            for producto in categoria.productos:
+                if producto.nombre == nombre:
+                    return producto
+        self.fail(f"Producto no encontrado: {nombre}")
 
     def _category_section(self, html_text, section_index):
         marker = f'id="categoria-{section_index}"'
@@ -807,6 +820,20 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertIn(b"Extra", response.data)
         self.assertIn(b"Opcional", response.data)
 
+    def test_catalog_contract_exposes_extra_lumpias_price_from_server_source(self):
+        reglas = web_app.reglas_catalogo_self_ordering()
+
+        self.assertEqual(reglas.promo_extra_lumpias_precio, web_app.PROMO_EXTRA_LUMPIAS_PRECIO)
+
+        familiar = self._catalog_product("Familiar")
+        extra = next(opcion for opcion in familiar.opciones if opcion.titulo == "Extra")
+
+        self.assertEqual(extra.valores, (web_app.PROMO_EXTRA_LUMPIAS_NOMBRE,))
+        self.assertEqual(
+            extra.precios_adicionales_centavos[web_app.PROMO_EXTRA_LUMPIAS_NOMBRE],
+            int(round(web_app.PROMO_EXTRA_LUMPIAS_PRECIO * 100)),
+        )
+
     def test_public_catalog_product_cards_do_not_expand_option_chips(self):
         orden_id = self._create_order()
         link = self.client.post(f"/orden/{orden_id}/self-ordering/link").get_json()["link"]
@@ -830,6 +857,131 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertIn('const optional = group.dataset.optional === "true";', html_text)
         self.assertIn('if (optional) button.classList.remove("selected");', html_text)
         self.assertIn('if (previous) previous.classList.remove("selected");', html_text)
+
+    def test_public_catalog_has_frontend_cart_without_submission_mutation(self):
+        html_text = self._public_catalog_html()
+
+        self.assertIn('id="cartBar"', html_text)
+        self.assertIn('id="cartSheet"', html_text)
+        self.assertIn('id="cartLines"', html_text)
+        self.assertIn("Agregar al pedido", html_text)
+        self.assertIn("Envio disponible proximamente", html_text)
+        self.assertIn("data-add-to-cart", html_text)
+        self.assertNotIn("Disponible proximamente</button>\n                <button", html_text)
+        self.assertNotIn("fetch(", html_text)
+        self.assertNotIn('method="post"', html_text.lower())
+        self.assertNotIn("escapeText(", html_text)
+
+    def test_public_catalog_exposes_extra_lumpias_surcharge_to_frontend(self):
+        html_text = self._public_catalog_html()
+        expected_cents = int(round(web_app.PROMO_EXTRA_LUMPIAS_PRECIO * 100))
+
+        self.assertIn(f"data-option-extra-cents='{expected_cents}'", html_text)
+        self.assertIn(f"+${web_app.PROMO_EXTRA_LUMPIAS_PRECIO:.2f}", html_text)
+        self.assertIn("configExtraCents(config)", html_text)
+
+    def test_public_catalog_cart_uses_product_id_without_exposing_order_id(self):
+        html_text = self._public_catalog_html()
+
+        self.assertIn('data-product-id="', html_text)
+        self.assertIn("productId: productId", html_text)
+        self.assertIn("basePriceCents", html_text)
+        self.assertIn("unitPriceCents", html_text)
+        self.assertNotIn("orden_id", html_text)
+        self.assertNotIn("data-orden-id", html_text)
+
+    def test_public_catalog_cart_validates_cardinality_before_add(self):
+        html_text = self._public_catalog_html()
+
+        self.assertIn("function configIsValid(config)", html_text)
+        self.assertIn("return total === group.requeridas;", html_text)
+        self.assertIn("if (total > group.maximas) return false;", html_text)
+        self.assertIn("button.disabled = !configIsValid(config);", html_text)
+
+    def test_public_catalog_cart_merges_only_same_product_and_configuration(self):
+        html_text = self._public_catalog_html()
+
+        self.assertIn("function configKey(config)", html_text)
+        self.assertIn("valores: group.valores.slice().sort()", html_text)
+        self.assertIn('const key = productId + "|" + configKey(config);', html_text)
+        self.assertIn("existing.quantity += 1;", html_text)
+        self.assertIn("cart.push({", html_text)
+        self.assertIn("titulo: group.titulo", html_text)
+
+    def test_public_catalog_cart_key_separates_extra_and_merges_equal_configs(self):
+        html_text = self._public_catalog_html()
+        familiar = self._catalog_product("Familiar")
+        product_id = familiar.id
+
+        def config_key(config):
+            normalized = [
+                {
+                    "titulo": group["titulo"],
+                    "valores": sorted(group["valores"]),
+                }
+                for group in config
+            ]
+            normalized.sort(key=lambda group: group["titulo"])
+            return str(normalized)
+
+        def line_key(config):
+            return f"{product_id}|{config_key(config)}"
+
+        def add(cart, config):
+            key = line_key(config)
+            existing = next((item for item in cart if item["key"] == key), None)
+            if existing:
+                existing["quantity"] += 1
+            else:
+                cart.append({"key": key, "quantity": 1})
+
+        without_extra = [
+            {"titulo": "Pollos", "valores": ["Pollo BBQ"]},
+            {"titulo": "Arroces", "valores": ["Triple"]},
+            {"titulo": "Sabores", "valores": ["Coca Cola"]},
+            {"titulo": "Extra", "valores": []},
+        ]
+        with_extra = [
+            {"titulo": "Pollos", "valores": ["Pollo BBQ"]},
+            {"titulo": "Arroces", "valores": ["Triple"]},
+            {"titulo": "Sabores", "valores": ["Coca Cola"]},
+            {"titulo": "Extra", "valores": [web_app.PROMO_EXTRA_LUMPIAS_NOMBRE]},
+        ]
+
+        self.assertNotEqual(line_key(without_extra), line_key(with_extra))
+
+        cart = []
+        add(cart, with_extra)
+        add(cart, with_extra)
+        self.assertEqual(len(cart), 1)
+        self.assertEqual(cart[0]["quantity"], 2)
+
+        cart = []
+        add(cart, without_extra)
+        add(cart, without_extra)
+        self.assertEqual(len(cart), 1)
+        self.assertEqual(cart[0]["quantity"], 2)
+
+        cart = []
+        add(cart, without_extra)
+        add(cart, with_extra)
+        self.assertEqual(len(cart), 2)
+        self.assertIn("function configKey(config)", html_text)
+        self.assertIn('const key = productId + "|" + configKey(config);', html_text)
+
+    def test_public_catalog_cart_quantity_controls_and_total_are_present(self):
+        html_text = self._public_catalog_html()
+
+        self.assertIn("data-cart-minus", html_text)
+        self.assertIn("data-cart-plus", html_text)
+        self.assertIn("data-cart-remove", html_text)
+        self.assertIn("cart[index].quantity -= 1;", html_text)
+        self.assertIn("cart[index].quantity += 1;", html_text)
+        self.assertIn("cart.splice(Number(remove.dataset.cartRemove), 1);", html_text)
+        self.assertIn("function totalCents()", html_text)
+        self.assertIn("unitPriceCents = basePriceCents + configExtraCents(config)", html_text)
+        self.assertIn("item.unitPriceCents * item.quantity", html_text)
+        self.assertIn('return "$" + (cents / 100).toFixed(2);', html_text)
 
     def test_public_catalog_promotion_quantities_match_builder_rules(self):
         orden_id = self._create_order()
