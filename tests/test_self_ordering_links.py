@@ -1,7 +1,4 @@
 import datetime
-import importlib
-import os
-import tempfile
 import unittest
 from unittest import mock
 
@@ -12,32 +9,26 @@ from app.application.self_ordering.links import (
     ESTADO_LINK_EXPIRADO,
     ESTADO_LINK_INEXISTENTE,
     ESTADO_LINK_REVOCADO,
+    MesaSelfOrderingOcupada,
     OrdenSelfOrderingNoExiste,
     OrdenSelfOrderingRequerida,
     crear_self_order_link,
+    obtener_o_crear_link_mesa,
     revocar_self_order_link,
     validar_self_order_link,
 )
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
+from tests.support_env import TEST_DB, cleanup_test_db, import_web_app
 
 
-TEST_DB = tempfile.NamedTemporaryFile(prefix="neko_self_ordering_links_", suffix=".db", delete=False)
-TEST_DB.close()
-
-os.environ["APP_ENV"] = "test"
-os.environ["TEST_SQLITE_PATH"] = TEST_DB.name
-
-web_app = importlib.import_module("web_app")
+web_app = import_web_app()
 REAL_DATETIME = datetime.datetime
 
 
 class SelfOrderingLinksTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
-        try:
-            os.unlink(TEST_DB.name)
-        except OSError:
-            pass
+        cleanup_test_db()
 
     def setUp(self):
         web_app.init_db()
@@ -72,22 +63,49 @@ class SelfOrderingLinksTest(unittest.TestCase):
 
         return mock.patch.object(links_module.datetime, "datetime", FakeDateTime), FakeDateTime
 
-    def _create_order(self):
+    def _create_order(self, referencia="mesa:1", estado="abierta", cierre_id=None):
         conn = web_app.get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
             INSERT INTO ordenes (
-                numero_orden, fecha_hora, fecha, tipo, referencia, cliente, estado, usuario_id
+                numero_orden, fecha_hora, fecha, tipo, referencia, cliente, estado, usuario_id, cierre_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (None, "2026-08-25 10:00:00", "2026-08-25", "Mesa", "Mesa 1", "Cliente", "abierta", None),
+            (
+                None,
+                "2026-08-25 10:00:00",
+                "2026-08-25",
+                "Mesa",
+                referencia,
+                "Cliente",
+                estado,
+                None,
+                cierre_id,
+            ),
         )
         orden_id = web_app.obtener_ultimo_id(cursor, "ordenes")
         conn.commit()
         conn.close()
         return orden_id
+
+    def _insert_link(self, orden_id, token, mesa_clave=None, canal="mesa", estado="activo"):
+        conn = web_app.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO self_order_links (
+                orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (orden_id, token, canal, estado, "2026-08-25 10:00:00", None, mesa_clave),
+        )
+        link_id = web_app.obtener_ultimo_id(cursor, "self_order_links")
+        conn.commit()
+        conn.close()
+        return link_id
 
     def test_creates_table_link_for_real_order(self):
         orden_id = self._create_order()
@@ -274,6 +292,48 @@ class SelfOrderingLinksTest(unittest.TestCase):
         )
 
         self.assertEqual(link.token, "token-nuevo-seguro-con-suficiente-entropia")
+
+    def test_permanent_table_link_cannot_move_from_another_open_order(self):
+        first_order = self._create_order(referencia="mesa:3")
+        second_order = self._create_order(referencia="mesa:3")
+        link = crear_self_order_link(
+            self.repository,
+            canal="mesa",
+            orden_id=first_order,
+            ahora_fn=self._fixed_now,
+        )
+
+        with self.assertRaises(MesaSelfOrderingOcupada):
+            obtener_o_crear_link_mesa(self.repository, second_order, ahora_fn=self._fixed_now)
+
+        persisted = self.repository.buscar_por_token(link.token)
+        self.assertEqual(persisted.orden_id, first_order)
+
+    def test_table_key_unique_collision_reuses_existing_permanent_link(self):
+        orden_id = self._create_order(referencia="mesa:7")
+        self._insert_link(orden_id, "token-mesa-siete", mesa_clave="mesa:7")
+
+        link = crear_self_order_link(
+            self.repository,
+            canal="mesa",
+            orden_id=orden_id,
+            ahora_fn=self._fixed_now,
+            token_generator=lambda: "token-nuevo-no-usado",
+        )
+
+        self.assertEqual(link.token, "token-mesa-siete")
+        self.assertEqual(link.mesa_clave, "mesa:7")
+
+    def test_adopts_historical_table_link_without_changing_token(self):
+        orden_id = self._create_order(referencia="mesa:8")
+        self._insert_link(orden_id, "token-historico", mesa_clave=None)
+
+        link, creado = obtener_o_crear_link_mesa(self.repository, orden_id, ahora_fn=self._fixed_now)
+
+        self.assertFalse(creado)
+        self.assertEqual(link.token, "token-historico")
+        self.assertEqual(link.mesa_clave, "mesa:8")
+        self.assertEqual(self.repository.buscar_por_token("token-historico").mesa_clave, "mesa:8")
 
 
 if __name__ == "__main__":

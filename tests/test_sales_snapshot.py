@@ -1,28 +1,17 @@
-import importlib
-import os
-import tempfile
 import unittest
 from unittest import mock
 
 from app.domain.sales.item_descriptions import deserializar_indicacion
+from tests.support_env import TEST_DB, cleanup_test_db, import_web_app
 
 
-TEST_DB = tempfile.NamedTemporaryFile(prefix="neko_snapshot_", suffix=".db", delete=False)
-TEST_DB.close()
-
-os.environ["APP_ENV"] = "test"
-os.environ["TEST_SQLITE_PATH"] = TEST_DB.name
-
-web_app = importlib.import_module("web_app")
+web_app = import_web_app()
 
 
 class SalesSnapshotTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
-        try:
-            os.unlink(TEST_DB.name)
-        except OSError:
-            pass
+        cleanup_test_db()
 
     def setUp(self):
         self.app = web_app.app

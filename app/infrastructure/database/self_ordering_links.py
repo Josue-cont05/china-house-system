@@ -1,4 +1,5 @@
 from app.application.self_ordering.links import (
+    MesaSelfOrderingDuplicada,
     NuevoSelfOrderLink,
     SelfOrderLink,
     TokenSelfOrderingDuplicado,
@@ -28,6 +29,15 @@ class SqlSelfOrderLinkRepository:
         finally:
             conn.close()
 
+    def obtener_datos_orden(self, orden_id):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT tipo, referencia FROM ordenes WHERE id=? LIMIT 1", (orden_id,))
+            return cursor.fetchone()
+        finally:
+            conn.close()
+
     def insertar_link(self, link):
         conn = self._connection_factory()
         cursor = conn.cursor()
@@ -35,9 +45,9 @@ class SqlSelfOrderLinkRepository:
             cursor.execute(
                 """
                 INSERT INTO self_order_links (
-                    orden_id, token, canal, estado, fecha_creacion, fecha_expiracion
+                    orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     link.orden_id,
@@ -46,6 +56,7 @@ class SqlSelfOrderLinkRepository:
                     link.estado,
                     link.fecha_creacion,
                     link.fecha_expiracion,
+                    link.mesa_clave,
                 ),
             )
             link_id = self._last_id_getter(cursor, "self_order_links")
@@ -58,9 +69,12 @@ class SqlSelfOrderLinkRepository:
                 estado=link.estado,
                 fecha_creacion=link.fecha_creacion,
                 fecha_expiracion=link.fecha_expiracion,
+                mesa_clave=link.mesa_clave,
             )
         except Exception as exc:
             conn.rollback()
+            if _es_error_unicidad_mesa(exc):
+                raise MesaSelfOrderingDuplicada("Mesa duplicada.") from exc
             if _es_error_unicidad_token(exc):
                 raise TokenSelfOrderingDuplicado("Token duplicado.") from exc
             raise
@@ -73,7 +87,7 @@ class SqlSelfOrderLinkRepository:
         try:
             cursor.execute(
                 """
-                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
                 FROM self_order_links
                 WHERE token=?
                 LIMIT 1
@@ -93,7 +107,7 @@ class SqlSelfOrderLinkRepository:
         try:
             cursor.execute(
                 """
-                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
                 FROM self_order_links
                 WHERE orden_id=? AND canal=? AND estado='activo'
                 ORDER BY id DESC
@@ -104,13 +118,110 @@ class SqlSelfOrderLinkRepository:
         finally:
             conn.close()
 
+    def buscar_link_mesa_permanente(self, mesa_clave):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
+                FROM self_order_links
+                WHERE canal='mesa' AND mesa_clave=? AND estado='activo'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (mesa_clave,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return _row_to_link(row)
+        finally:
+            conn.close()
+
+    def adoptar_link_mesa_historico(self, orden_id, mesa_clave):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
+                FROM self_order_links
+                WHERE orden_id=? AND canal='mesa' AND estado='activo'
+                  AND mesa_clave IS NULL
+                  AND fecha_expiracion IS NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (orden_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            cursor.execute(
+                """
+                UPDATE self_order_links
+                SET mesa_clave=?
+                WHERE id=? AND mesa_clave IS NULL
+                """,
+                (mesa_clave, row[0]),
+            )
+            conn.commit()
+            cursor.execute(
+                """
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
+                FROM self_order_links
+                WHERE id=?
+                LIMIT 1
+                """,
+                (row[0],),
+            )
+            return _row_to_link(cursor.fetchone())
+        except Exception as exc:
+            conn.rollback()
+            if _es_error_unicidad_mesa(exc):
+                return None
+            raise
+        finally:
+            conn.close()
+
+    def asociar_link_mesa_a_orden(self, link_id, orden_id):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE self_order_links
+                SET orden_id=?
+                WHERE id=? AND canal='mesa' AND estado='activo'
+                """,
+                (orden_id, link_id),
+            )
+            conn.commit()
+            cursor.execute(
+                """
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
+                FROM self_order_links
+                WHERE id=?
+                LIMIT 1
+                """,
+                (link_id,),
+            )
+            return _row_to_link(cursor.fetchone())
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def buscar_por_id(self, link_id):
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
             cursor.execute(
                 """
-                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion
+                SELECT id, orden_id, token, canal, estado, fecha_creacion, fecha_expiracion, mesa_clave
                 FROM self_order_links
                 WHERE id=?
                 LIMIT 1
@@ -172,13 +283,23 @@ def _row_to_link(row):
         estado=row[4],
         fecha_creacion=row[5],
         fecha_expiracion=row[6],
+        mesa_clave=row[7] if len(row) > 7 else None,
     )
 
 
 def _es_error_unicidad_token(exc):
     mensaje = str(exc).lower()
     return (
-        "unique" in mensaje
-        or "duplicate key" in mensaje
+        "self_order_links.token" in mensaje
         or "self_order_links_token" in mensaje
+        or ("duplicate key" in mensaje and "token" in mensaje)
+    )
+
+
+def _es_error_unicidad_mesa(exc):
+    mensaje = str(exc).lower()
+    return (
+        "self_order_links.mesa_clave" in mensaje
+        or "idx_self_order_links_mesa_activa" in mensaje
+        or ("duplicate key" in mensaje and "mesa_clave" in mensaje)
     )

@@ -1,26 +1,16 @@
-import importlib
-import os
 import sqlite3
-import tempfile
 import unittest
 
+from tests.support_env import TEST_DB, cleanup_test_db, import_web_app
 
-TEST_DB = tempfile.NamedTemporaryFile(prefix="neko_self_ordering_", suffix=".db", delete=False)
-TEST_DB.close()
 
-os.environ["APP_ENV"] = "test"
-os.environ["TEST_SQLITE_PATH"] = TEST_DB.name
-
-web_app = importlib.import_module("web_app")
+web_app = import_web_app()
 
 
 class SelfOrderingSchemaTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
-        try:
-            os.unlink(TEST_DB.name)
-        except OSError:
-            pass
+        cleanup_test_db()
 
     def setUp(self):
         web_app.init_db()
@@ -90,7 +80,7 @@ class SelfOrderingSchemaTest(unittest.TestCase):
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (None, "2026-08-25 10:00:00", "2026-08-25", "Mesa", "Mesa 1", "Cliente", "abierta", None),
+            (None, "2026-08-25 10:00:00", "2026-08-25", "Mesa", "mesa:1", "Cliente", "abierta", None),
         )
         orden_id = web_app.obtener_ultimo_id(cursor, "ordenes")
         conn.commit()
@@ -189,6 +179,7 @@ class SelfOrderingSchemaTest(unittest.TestCase):
                 "estado",
                 "fecha_creacion",
                 "fecha_expiracion",
+                "mesa_clave",
             },
         )
         self.assertEqual(

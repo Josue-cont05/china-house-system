@@ -5,7 +5,10 @@ from app.domain.sales.item_builder import (
     construir_items_orden,
 )
 from app.domain.sales.item_descriptions import deserializar_indicacion
-import web_app
+from tests.support_env import import_web_app
+
+
+web_app = import_web_app()
 
 
 def config_neko():

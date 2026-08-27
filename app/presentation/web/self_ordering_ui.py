@@ -2,6 +2,7 @@ import html
 from urllib.parse import urljoin, urlparse
 
 from app.application.self_ordering.links import obtener_link_activo_mesa
+from app.application.self_ordering.mesas import MesaSelfOrderingInvalida, etiqueta_mesa
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.shared.qr.svg import qr_svg_data_uri
 
@@ -12,6 +13,8 @@ class ErrorConfiguracionSelfOrdering(ValueError):
 
 def render_self_ordering_panel(
     orden_id,
+    tipo,
+    referencia,
     estado,
     cierre_id,
     public_base_url,
@@ -20,6 +23,12 @@ def render_self_ordering_panel(
     last_id_getter,
 ):
     if estado != "abierta" or cierre_id is not None:
+        return ""
+    if (tipo or "").strip().lower() != "mesa":
+        return ""
+    try:
+        mesa_etiqueta = etiqueta_mesa(referencia)
+    except MesaSelfOrderingInvalida:
         return ""
 
     repository = SqlSelfOrderLinkRepository(connection_factory, last_id_getter)
@@ -31,12 +40,12 @@ def render_self_ordering_panel(
             <div class="self-order-head">
                 <div>
                     <h3>Autoservicio / QR</h3>
-                    <p>Genera un enlace seguro para esta mesa.</p>
+                    <p>{html.escape(mesa_etiqueta)} · QR permanente de mesa.</p>
                 </div>
                 <span class="self-order-pill inactivo">Inactivo</span>
             </div>
             <button class="btn self-order-action" type="button" id="generarSelfOrder">
-                Generar QR de mesa
+                Inicializar QR permanente
             </button>
             <div class="delivery-help" id="selfOrderMensaje"></div>
         </section>
@@ -57,9 +66,9 @@ def render_self_ordering_panel(
         <div class="self-order-head">
             <div>
                 <h3>Autoservicio / QR</h3>
-                <p>Autoservicio activo para esta mesa.</p>
+                <p>{html.escape(mesa_etiqueta)} · QR permanente reutilizable.</p>
             </div>
-            <span class="self-order-pill activo">Autoservicio activo</span>
+            <span class="self-order-pill activo">QR permanente: Activo</span>
         </div>
         <div class="self-order-qr">
             {qr_html}
@@ -71,7 +80,6 @@ def render_self_ordering_panel(
                 <code>{html.escape(link.token)}</code>
                 <div class="self-order-actions">
                     <button class="btn" type="button" id="copiarSelfOrder">Copiar link</button>
-                    <button class="btn self-order-revocar" type="button" id="revocarSelfOrder">Revocar QR</button>
                 </div>
                 <div class="delivery-help" id="selfOrderMensaje"></div>
             </div>

@@ -21,6 +21,7 @@ from app.shared.constants.system import (
     ETIQUETAS_METODO_PAGO,
     METODOS_PAGO_VALIDOS,
     ROLES_USUARIO_VALIDOS,
+    SABORES_REFRESCO,
 )
 from app.domain.sales.calculations import (
     DELIVERY_MONTO_MAXIMO,
@@ -50,6 +51,13 @@ from app.domain.sales.item_builder import (
     ErrorConstruccionItem,
     construir_items_orden,
     es_producto_refresco,
+)
+from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
+from app.application.self_ordering.mesas import (
+    MesaSelfOrderingInvalida,
+    etiqueta_mesa,
+    normalizar_mesa_clave,
+    opciones_mesa_html,
 )
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
@@ -349,6 +357,22 @@ def ahora_venezuela():
 def parsear_fecha_hora_venezuela(fecha_texto):
     dt = datetime.datetime.strptime(fecha_texto, "%Y-%m-%d %H:%M:%S")
     return VENEZUELA_TZ.localize(dt)
+
+
+def reglas_catalogo_self_ordering():
+    return ReglasCatalogoSelfOrdering(
+        orden_categorias=tuple(ORDEN_CATEGORIAS_POS),
+        combos_personales=COMBOS_PERSONALES,
+        acompanantes_combo=tuple(ACOMPANANTES_COMBO),
+        bebidas_combo=tuple(BEBIDAS_COMBO),
+        combos_cantidad_acompanantes=COMBOS_CANTIDAD_ACOMPANANTES,
+        promociones_neko=PROMOCIONES_NEKO,
+        promociones_con_pollo=frozenset(PROMOCIONES_CON_POLLO),
+        pollos_promocion=tuple(POLLOS_PROMOCION),
+        arroces_promocion=tuple(ARROCES_PROMOCION),
+        sabores_refresco=tuple(SABORES_REFRESCO),
+        promo_extra_lumpias_nombre=PROMO_EXTRA_LUMPIAS_NOMBRE,
+    )
 
 
 def a_float(valor, default=0.0):
@@ -1457,6 +1481,15 @@ def crear_tablas_self_ordering():
             fecha_creacion TEXT,
             fecha_expiracion TEXT
         )
+        """
+    )
+    conn.commit()
+    asegurar_columna("self_order_links", "mesa_clave", "TEXT")
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_self_order_links_mesa_activa
+        ON self_order_links (mesa_clave)
+        WHERE canal='mesa' AND estado='activo' AND mesa_clave IS NOT NULL
         """
     )
 
@@ -4925,17 +4958,43 @@ def index():
             <h3>🧾 Nueva orden</h3>
             <form action="/crear_orden" method="post">
                 <label style="font-size:13px;font-weight:700;color:#6b7280;">Tipo</label>
-                <select name="tipo">
+                <select name="tipo" id="tipoOrden">
                     <option value="Mesa">🪑 Mesa</option>
                     <option value="Delivery">🛵 Delivery</option>
                     <option value="Para llevar">🥡 Pick Up</option>
                 </select>
-                <label style="font-size:13px;font-weight:700;color:#6b7280;">Referencia</label>
-                <input name="referencia" placeholder="Ej: Mesa 3, Juan...">
+                <div id="grupoMesaOrden">
+                    <label style="font-size:13px;font-weight:700;color:#6b7280;">Mesa</label>
+                    <select name="referencia_mesa" id="referenciaMesaOrden" required>
+                        {opciones_mesa_html()}
+                    </select>
+                </div>
+                <div id="grupoReferenciaOrden" style="display:none;">
+                    <label style="font-size:13px;font-weight:700;color:#6b7280;">Referencia</label>
+                    <input name="referencia" id="referenciaLibreOrden" placeholder="Nombre, telefono o referencia">
+                </div>
                 <label style="font-size:13px;font-weight:700;color:#6b7280;">👤 Cliente</label>
                 <input name="cliente" placeholder="Nombre del cliente">
                 <button class="btn-nueva-orden" type="submit">➕ Crear orden</button>
             </form>
+            <script>
+            (function() {{
+                const tipo = document.getElementById("tipoOrden");
+                const mesa = document.getElementById("grupoMesaOrden");
+                const referencia = document.getElementById("grupoReferenciaOrden");
+                const mesaSelect = document.getElementById("referenciaMesaOrden");
+                const referenciaInput = document.getElementById("referenciaLibreOrden");
+                function actualizarReferenciaOrden() {{
+                    const esMesa = tipo.value === "Mesa";
+                    mesa.style.display = esMesa ? "" : "none";
+                    referencia.style.display = esMesa ? "none" : "";
+                    mesaSelect.required = esMesa;
+                    referenciaInput.required = !esMesa;
+                }}
+                tipo.addEventListener("change", actualizarReferenciaOrden);
+                actualizarReferenciaOrden();
+            }})();
+            </script>
             {boton_cerrar_jornada}
             {boton_ordenes_listas}
             {panel_izq_extra}
@@ -6822,6 +6881,31 @@ def crear_orden():
     fecha = ahora_venezuela().strftime("%Y-%m-%d")
     usuario_id = session.get("usuario_id")
 
+    if (tipo or "").strip().lower() == "mesa":
+        tipo = "Mesa"
+        try:
+            referencia = normalizar_mesa_clave(request.form.get("referencia_mesa"))
+        except MesaSelfOrderingInvalida as exc:
+            return str(exc), 400
+        conn_validacion = get_connection()
+        cursor_validacion = conn_validacion.cursor()
+        cursor_validacion.execute(
+            """
+            SELECT id
+            FROM ordenes
+            WHERE LOWER(tipo)='mesa'
+              AND referencia=?
+              AND estado='abierta'
+              AND cierre_id IS NULL
+            LIMIT 1
+            """,
+            (referencia,),
+        )
+        orden_abierta = cursor_validacion.fetchone()
+        conn_validacion.close()
+        if orden_abierta is not None:
+            return f"{etiqueta_mesa(referencia)} ya tiene una orden abierta.", 409
+
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -6917,6 +7001,8 @@ def orden(orden_id):
     )
     self_ordering_panel = render_self_ordering_panel(
         orden_id,
+        o[3],
+        o[4],
         estado,
         o[10],
         CONFIG.get("SELF_ORDER_PUBLIC_BASE_URL", ""),
@@ -7076,15 +7162,18 @@ def orden(orden_id):
     if puede_modificar_orden:
         for categoria, lista in cats_ordenadas:
             color_cat = COLORES_CATEGORIAS_POS.get(categoria, "#374151")
-            html += f"<div class='categoria' style='background:{color_cat};'>{categoria}</div>"
+            categoria_html = html_lib.escape(categoria)
+            html += f"<div class='categoria' style='background:{color_cat};'>{categoria_html}</div>"
             html += "<div class='grid-productos'>"
 
             for p in lista:
                 precio_fmt = f"${p[2]:.2f}".rstrip("0").rstrip(".")
+                producto_nombre_html = html_lib.escape(p[1])
+                producto_nombre_attr = html_lib.escape(p[1], quote=True)
                 if es_producto_refresco(p[1]):
                     html += f"""
-                    <button class="btn btn-refresco" type="button" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}">
-                        {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
+                    <button class="btn btn-refresco" type="button" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{producto_nombre_attr}">
+                        {producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
                 elif p[1] in COMBOS_PERSONALES:
@@ -7092,8 +7181,8 @@ def orden(orden_id):
                     bebidas_data = html_lib.escape("|".join(BEBIDAS_COMBO), quote=True)
                     cantidad_acompanantes = COMBOS_CANTIDAD_ACOMPANANTES.get(p[1], 1)
                     html += f"""
-                    <button class="btn btn-configurable" type="button" data-tipo="combo" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-acompanantes="{acompanantes_data}" data-cantidad-acompanantes="{cantidad_acompanantes}" data-bebidas="{bebidas_data}">
-                        {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
+                    <button class="btn btn-configurable" type="button" data-tipo="combo" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{producto_nombre_attr}" data-acompanantes="{acompanantes_data}" data-cantidad-acompanantes="{cantidad_acompanantes}" data-bebidas="{bebidas_data}">
+                        {producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
                 elif p[1] in PROMOCIONES_NEKO:
@@ -7101,14 +7190,14 @@ def orden(orden_id):
                     pollos_data = html_lib.escape("|".join(POLLOS_PROMOCION if p[1] in PROMOCIONES_CON_POLLO else []), quote=True)
                     arroces_data = html_lib.escape("|".join(ARROCES_PROMOCION), quote=True)
                     html += f"""
-                    <button class="btn btn-configurable" type="button" data-tipo="promocion" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{html_lib.escape(p[1], quote=True)}" data-pollos="{pollos_data}" data-arroces="{arroces_data}" data-cantidad-arroces="{promo['cantidad_arroces']}" data-cantidad-refrescos="{promo['cantidad_refrescos']}" data-refresco="{promo['refresco']}">
-                        {p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
+                    <button class="btn btn-configurable" type="button" data-tipo="promocion" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{producto_nombre_attr}" data-pollos="{pollos_data}" data-arroces="{arroces_data}" data-cantidad-arroces="{promo['cantidad_arroces']}" data-cantidad-refrescos="{promo['cantidad_refrescos']}" data-refresco="{promo['refresco']}">
+                        {producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
                     """
                 else:
                     html += f"""
                     <a href="/agregar/{orden_id}/{p[0]}">
-                        <button class="btn" type="button">{p[1]} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span></button>
+                        <button class="btn" type="button">{producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span></button>
                     </a>
                     """
 
@@ -7175,6 +7264,13 @@ def orden(orden_id):
     elif not puede_modificar_orden:
         delivery_aviso = "<div class='delivery-alerta'>Delivery bloqueado para esta orden.</div>"
 
+    tipo_html = html_lib.escape(o[3] or "-")
+    referencia_html = html_lib.escape(o[4] or "-")
+    cliente_html = html_lib.escape(o[5] or "-")
+    mesonera_html = html_lib.escape(o[9] or "-")
+    estado_html = html_lib.escape(estado)
+    observacion_html = html_lib.escape(o[7] or "-")
+
     html += f"""
     <div class="panel">
         <h2>🧾 Orden {texto_numero_orden(o[1])}</h2>
@@ -7183,12 +7279,12 @@ def orden(orden_id):
             {boton_eliminar_orden}
             {boton_emergencia}
         </div>
-        <p>Tipo: {o[3]}</p>
-        <p>Referencia: {o[4]}</p>
-        <p>👤 Cliente: {o[5] if o[5] else '-'}</p>
-        <p>👩 Mesonera: <b>{o[9] if o[9] else '-'}</b></p>
-        <p>Estado: {estado}</p>
-        <p>Observacion: {o[7] if o[7] else '-'}</p>
+        <p>Tipo: {tipo_html}</p>
+        <p>Referencia: {referencia_html}</p>
+        <p>👤 Cliente: {cliente_html}</p>
+        <p>👩 Mesonera: <b>{mesonera_html}</b></p>
+        <p>Estado: {estado_html}</p>
+        <p>Observacion: {observacion_html}</p>
         {self_ordering_panel}
         <h3>🍽️ Productos</h3>
     """
@@ -11027,6 +11123,7 @@ app.register_blueprint(
         get_connection,
         obtener_ultimo_id,
         lambda: CONFIG.get("SELF_ORDER_PUBLIC_BASE_URL", ""),
+        reglas_catalogo_self_ordering,
     )
 )
 
