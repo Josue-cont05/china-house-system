@@ -53,12 +53,17 @@ from app.domain.sales.item_builder import (
     es_producto_refresco,
 )
 from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
+from app.application.self_ordering.links import (
+    MesaSelfOrderingOcupada,
+    activar_link_permanente_para_nueva_orden_mesa,
+)
 from app.application.self_ordering.mesas import (
     MesaSelfOrderingInvalida,
     etiqueta_mesa,
     normalizar_mesa_clave,
     opciones_mesa_html,
 )
+from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 
@@ -1509,8 +1514,18 @@ def crear_tablas_self_ordering():
             usuario_resolucion_id INTEGER,
             nombre_cliente TEXT,
             telefono_cliente TEXT,
-            notas TEXT
+            notas TEXT,
+            client_submission_id TEXT
         )
+        """
+    )
+    conn.commit()
+    asegurar_columna("self_order_requests", "client_submission_id", "TEXT")
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_self_order_requests_submission
+        ON self_order_requests (self_order_link_id, client_submission_id)
+        WHERE client_submission_id IS NOT NULL
         """
     )
 
@@ -3185,6 +3200,7 @@ def proteger_sistema():
         "desactivar_factura",
         "api_tasa",
         "self_ordering.self_order_publico",
+        "self_ordering.submit_self_order",
     }
 
     # Administracion total y operaciones destructivas.
@@ -3266,7 +3282,11 @@ def proteger_sistema():
     if request.endpoint in {"login", "static"}:
         return
 
-    if request.path.startswith("/self-order/") and request.method != "GET":
+    if (
+        request.path.startswith("/self-order/")
+        and request.method != "GET"
+        and request.endpoint != "self_ordering.submit_self_order"
+    ):
         return "Metodo no permitido", 405
 
     if not session.get("usuario_id"):
@@ -6921,6 +6941,14 @@ def crear_orden():
     orden_id = obtener_ultimo_id(cursor, "ordenes")
     conn.commit()
     conn.close()
+    if (tipo or "").strip().lower() == "mesa":
+        try:
+            activar_link_permanente_para_nueva_orden_mesa(
+                SqlSelfOrderLinkRepository(get_connection, obtener_ultimo_id),
+                orden_id,
+            )
+        except MesaSelfOrderingOcupada as exc:
+            return str(exc), 409
     return redirect(f"/orden/{orden_id}")
 
 

@@ -1,7 +1,7 @@
 import html
 
 
-def render_catalogo_publico(catalogo):
+def render_catalogo_publico(catalogo, submit_url=None):
     tabs_html = []
     secciones_html = []
     modales_html = []
@@ -124,6 +124,11 @@ def render_catalogo_publico(catalogo):
             }}
             .option-pill.selected {{ border-color:var(--green); background:#123528; color:var(--green); }}
             .sheet-actions {{ margin-top:18px; display:flex; gap:10px; }}
+            .customer-note {{
+                width:100%; min-height:76px; resize:vertical; border:1px solid var(--line);
+                border-radius:14px; background:var(--panel); color:var(--text);
+                padding:10px 12px; font:inherit; margin-top:8px;
+            }}
             .add-to-cart, .disabled-action {{
                 flex:1; min-height:46px; border-radius:999px; border:0; background:#2A2F38;
                 color:var(--muted); font-weight:900;
@@ -159,7 +164,7 @@ def render_catalogo_publico(catalogo):
         <main>
             <header>
                 <h1>Neko Wok</h1>
-                <p class="sub">Autoservicio de mesa. Explora el menu; el envio del pedido estara disponible proximamente.</p>
+                <p class="sub">Autoservicio de mesa. Arma tu pedido y envialo cuando este listo.</p>
             </header>
             <nav class="category-tabs" aria-label="Categorias publicas">
                 {''.join(tabs_html)}
@@ -181,7 +186,8 @@ def render_catalogo_publico(catalogo):
                     <span>Total</span>
                     <span id="cartTotal">$0.00</span>
                 </div>
-                <button class="send-request" type="button" disabled>Envio disponible proximamente</button>
+                <p class="cart-config" id="cartSubmitStatus" aria-live="polite"></p>
+                <button class="send-request" id="sendRequest" type="button" disabled>Enviar solicitud</button>
             </div>
         </div>
         <script>
@@ -196,6 +202,10 @@ def render_catalogo_publico(catalogo):
             const cartLines = document.getElementById("cartLines");
             const cartTotal = document.getElementById("cartTotal");
             const closeCart = document.getElementById("closeCart");
+            const sendRequest = document.getElementById("sendRequest");
+            const cartSubmitStatus = document.getElementById("cartSubmitStatus");
+            const submitUrl = "{html.escape(submit_url or '', quote=True)}";
+            let currentSubmissionId = "";
 
             function money(cents) {{
                 return "$" + (cents / 100).toFixed(2);
@@ -212,7 +222,7 @@ def render_catalogo_publico(catalogo):
             }}
 
             function collectConfig(sheet) {{
-                return Array.from(sheet.querySelectorAll(".option-group")).map(function(group) {{
+                return Array.from(sheet.querySelectorAll("[data-option-group]")).map(function(group) {{
                     const opciones = selectedValues(group);
                     return {{
                         titulo: group.dataset.title || "",
@@ -245,6 +255,14 @@ def render_catalogo_publico(catalogo):
                 }}).sort(function(a, b) {{
                     return a.titulo.localeCompare(b.titulo);
                 }}));
+            }}
+
+            function normalizeNote(note) {{
+                return (note || "").trim();
+            }}
+
+            function lineKey(productId, config, note) {{
+                return productId + "|" + configKey(config) + "|" + normalizeNote(note);
             }}
 
             function configSummary(config) {{
@@ -284,6 +302,7 @@ def render_catalogo_publico(catalogo):
                 const count = totalItems();
                 const total = totalCents();
                 cartBar.hidden = count === 0;
+                if (sendRequest) sendRequest.disabled = count === 0 || !submitUrl;
                 cartBarCount.textContent = count + (count === 1 ? " producto" : " productos");
                 cartBarTotal.textContent = money(total);
                 cartTotal.textContent = money(total);
@@ -310,6 +329,12 @@ def render_catalogo_publico(catalogo):
                     subtotal.textContent = item.quantity + " x " + money(item.unitPriceCents) + " = " + money(item.unitPriceCents * item.quantity);
                     info.appendChild(title);
                     info.appendChild(config);
+                    if (item.indication) {{
+                        const note = document.createElement("p");
+                        note.className = "cart-config";
+                        note.textContent = "Nota: " + item.indication;
+                        info.appendChild(note);
+                    }}
                     info.appendChild(subtotal);
 
                     const controls = document.createElement("div");
@@ -346,7 +371,9 @@ def render_catalogo_publico(catalogo):
                 const productId = Number(sheet.dataset.productId);
                 const basePriceCents = Number(sheet.dataset.priceCents || 0);
                 const unitPriceCents = basePriceCents + configExtraCents(config);
-                const key = productId + "|" + configKey(config);
+                const noteInput = sheet.querySelector("[data-customer-note]");
+                const indication = normalizeNote(noteInput ? noteInput.value : "");
+                const key = lineKey(productId, config, indication);
                 const existing = cart.find(function(item) {{ return item.key === key; }});
                 if (existing) {{
                     existing.quantity += 1;
@@ -359,12 +386,71 @@ def render_catalogo_publico(catalogo):
                         unitPriceCents: unitPriceCents,
                         config: config,
                         summary: configSummary(config),
-                        indication: "",
+                        indication: indication,
                         quantity: 1
                     }});
                 }}
                 renderCart();
                 closeSheet(sheet);
+                if (noteInput) noteInput.value = "";
+            }}
+
+            function submissionId() {{
+                if (!currentSubmissionId) {{
+                    if (window.crypto && window.crypto.randomUUID) {{
+                        currentSubmissionId = window.crypto.randomUUID();
+                    }} else {{
+                        currentSubmissionId = "client-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+                    }}
+                }}
+                return currentSubmissionId;
+            }}
+
+            function payloadItems() {{
+                return cart.map(function(item) {{
+                    return {{
+                        producto_id: item.productId,
+                        cantidad: item.quantity,
+                        configuracion: item.config.map(function(group) {{
+                            return {{
+                                titulo: group.titulo,
+                                valores: group.valores
+                            }};
+                        }}),
+                        indicacion: item.indication || ""
+                    }};
+                }});
+            }}
+
+            async function sendCart() {{
+                if (!cart.length || !submitUrl || sendRequest.disabled) return;
+                sendRequest.disabled = true;
+                sendRequest.textContent = "Enviando...";
+                cartSubmitStatus.textContent = "";
+                try {{
+                    const response = await fetch(submitUrl, {{
+                        method: "POST",
+                        headers: {{"Content-Type": "application/json"}},
+                        body: JSON.stringify({{
+                            submission_id: submissionId(),
+                            items: payloadItems()
+                        }})
+                    }});
+                    const payload = await response.json().catch(function() {{ return {{}}; }});
+                    if (!response.ok) {{
+                        throw new Error(payload.error || "No se pudo enviar el pedido.");
+                    }}
+                    cart.splice(0, cart.length);
+                    currentSubmissionId = "";
+                    renderCart();
+                    cartSubmitStatus.textContent = "Pedido enviado correctamente · Total " + money(Math.round(Number(payload.total_usd || 0) * 100));
+                    sendRequest.textContent = "Enviar solicitud";
+                    sendRequest.disabled = true;
+                }} catch (error) {{
+                    cartSubmitStatus.textContent = error.message || "No se pudo enviar el pedido.";
+                    sendRequest.textContent = "Reintentar envio";
+                    sendRequest.disabled = cart.length === 0;
+                }}
             }}
 
             tabs.forEach(function(tab) {{
@@ -441,6 +527,9 @@ def render_catalogo_publico(catalogo):
             closeCart.addEventListener("click", function() {{
                 cartSheet.hidden = true;
             }});
+            if (sendRequest) {{
+                sendRequest.addEventListener("click", sendCart);
+            }}
             cartSheet.addEventListener("click", function(event) {{
                 if (event.target === cartSheet) cartSheet.hidden = true;
             }});
@@ -513,6 +602,13 @@ def _render_producto_modal(producto, categoria_nombre):
                 <button class="sheet-close" type="button" data-close-sheet aria-label="Cerrar">x</button>
             </div>
             {opciones}
+            <div class="customer-note-group">
+                <div class="option-title">
+                    <span>Nota para cocina (opcional)</span>
+                </div>
+                <p class="option-help">Ejemplo: Sin cebolla, por favor</p>
+                <textarea class="customer-note" data-customer-note maxlength="180" placeholder="Sin cebolla, por favor"></textarea>
+            </div>
             <div class="sheet-actions">
                 <button class="add-to-cart" type="button" data-add-to-cart>Agregar al pedido</button>
                 <button class="category-tab" type="button" data-close-sheet>Listo</button>
@@ -547,7 +643,7 @@ def _render_opcion(opcion):
     )
     ayuda = f"<p class='option-help'>{html.escape(opcion.ayuda)}</p>" if opcion.ayuda else ""
     return f"""
-    <div class="option-group" data-title="{html.escape(opcion.titulo, quote=True)}" data-max="{opcion.maximas}" data-required="{opcion.requeridas}" data-optional="{'true' if opcion.opcional else 'false'}">
+    <div class="option-group" data-option-group data-title="{html.escape(opcion.titulo, quote=True)}" data-max="{opcion.maximas}" data-required="{opcion.requeridas}" data-optional="{'true' if opcion.opcional else 'false'}">
         <div class="option-title">
             <span>{html.escape(_texto_cardinalidad(opcion))}</span>
             <span data-option-count>0 de {opcion.maximas}</span>

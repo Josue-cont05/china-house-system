@@ -98,6 +98,9 @@ def datos_combo_desde_indicacion(producto, indicacion):
     bebida = bebida.strip()
     if bebida:
         lineas.append(bebida)
+    nota = (datos.get("nota") or "").strip()
+    if nota:
+        lineas.append(f"Nota: {nota}")
     if not lineas:
         return None
     return {"datos": datos, "lineas": lineas}
@@ -123,6 +126,9 @@ def datos_promocion_desde_indicacion(producto, indicacion):
         lineas.append(pollo)
     lineas.extend(f"Arroz {str(arroz).strip()}" for arroz in arroces if str(arroz).strip())
     lineas.extend(str(bebida).strip() for bebida in bebidas if str(bebida).strip())
+    nota = (datos.get("nota") or "").strip()
+    if nota:
+        lineas.append(f"Nota: {nota}")
     if not lineas:
         return None
     return {"datos": datos, "lineas": lineas}
@@ -148,6 +154,9 @@ def texto_descripcion_combo_cocina(producto, indicacion):
     bebida = (datos.get("bebida") or "").strip()
     if bebida:
         lineas.append(f"    [{bebida}]")
+    nota = (datos.get("nota") or "").strip()
+    if nota:
+        lineas.append(f"    Nota: {nota}")
     return "\n".join(lineas)
 
 
@@ -184,6 +193,9 @@ def texto_descripcion_promocion_cocina(producto, indicacion):
         for bebida in datos.get("bebidas", [])
         if str(bebida).strip()
     )
+    nota = (datos.get("nota") or "").strip()
+    if nota:
+        lineas.append(f"    Nota: {nota}")
     return "\n".join(lineas)
 
 

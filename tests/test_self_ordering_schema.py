@@ -196,6 +196,7 @@ class SelfOrderingSchemaTest(unittest.TestCase):
                 "nombre_cliente",
                 "telefono_cliente",
                 "notas",
+                "client_submission_id",
             },
         )
         self.assertEqual(

@@ -4,7 +4,12 @@ from app.domain.sales.item_builder import (
     ErrorConstruccionItem,
     construir_items_orden,
 )
-from app.domain.sales.item_descriptions import deserializar_indicacion
+from app.domain.sales.item_descriptions import (
+    deserializar_indicacion,
+    serializar_indicacion,
+    texto_descripcion_combo_cocina,
+    texto_descripcion_promocion_cocina,
+)
 from tests.support_env import import_web_app
 
 
@@ -194,6 +199,91 @@ class ItemBuilderTest(unittest.TestCase):
             "El delivery ahora se registra desde el campo Delivery de la orden.",
         )
         self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_promotion_kitchen_description_preserves_configuration_and_note(self):
+        indicacion = serializar_indicacion(
+            {
+                "tipo": "promocion",
+                "producto": "familiar",
+                "pollo": "Pollo BBQ",
+                "arroces": ["Triple"],
+                "bebidas": ["Coca Cola"],
+                "nota": "sin cebolla por favor",
+            }
+        )
+
+        texto = texto_descripcion_promocion_cocina("Familiar", indicacion)
+
+        self.assertIn("    - Pollo BBQ", texto)
+        self.assertIn("    - Arroz Triple", texto)
+        self.assertIn("    [Coca Cola]", texto)
+        self.assertIn("    Nota: sin cebolla por favor", texto)
+
+    def test_combo_kitchen_description_preserves_configuration_and_note(self):
+        indicacion = serializar_indicacion(
+            {
+                "tipo": "combo",
+                "producto": "combo1",
+                "acompanantes": ["Pollo BBQ"],
+                "bebida": "Frescolita",
+                "nota": "sin cebolla por favor",
+            }
+        )
+
+        texto = texto_descripcion_combo_cocina("Neko Combo 1", indicacion)
+
+        self.assertIn("    - Pollo BBQ", texto)
+        self.assertIn("    [Frescolita]", texto)
+        self.assertIn("    Nota: sin cebolla por favor", texto)
+
+    def test_kitchen_description_without_note_stays_unchanged(self):
+        promo = serializar_indicacion(
+            {
+                "tipo": "promocion",
+                "producto": "familiar",
+                "pollo": "Pollo BBQ",
+                "arroces": ["Triple"],
+                "bebidas": ["Coca Cola"],
+            }
+        )
+        combo = serializar_indicacion(
+            {
+                "tipo": "combo",
+                "producto": "combo1",
+                "acompanantes": ["Pollo BBQ"],
+                "bebida": "Frescolita",
+            }
+        )
+
+        self.assertEqual(
+            texto_descripcion_promocion_cocina("Familiar", promo),
+            "    - Pollo BBQ\n    - Arroz Triple\n    [Coca Cola]",
+        )
+        self.assertEqual(
+            texto_descripcion_combo_cocina("Neko Combo 1", combo),
+            "    - Pollo BBQ\n    [Frescolita]",
+        )
+        self.assertNotIn("Nota:", texto_descripcion_promocion_cocina("Familiar", promo))
+        self.assertNotIn("Nota:", texto_descripcion_combo_cocina("Neko Combo 1", combo))
+
+    def test_operational_kitchen_indication_includes_promotion_note_once(self):
+        indicacion = serializar_indicacion(
+            {
+                "tipo": "promocion",
+                "producto": "familiar",
+                "pollo": "Pollo BBQ",
+                "arroces": ["Triple"],
+                "bebidas": ["Coca Cola"],
+                "nota": "sin cebolla por favor",
+            }
+        )
+
+        texto = web_app.indicacion_operativa_cocina("Familiar", indicacion)
+        lineas = web_app.agrupar_items_comanda([("Familiar", indicacion)])
+
+        self.assertIn("Nota: sin cebolla por favor", texto)
+        self.assertEqual(texto.count("Nota: sin cebolla por favor"), 1)
+        self.assertEqual("\n".join(lineas).count("Nota: sin cebolla por favor"), 1)
 
 
 if __name__ == "__main__":

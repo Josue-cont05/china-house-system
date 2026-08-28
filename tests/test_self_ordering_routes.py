@@ -1,5 +1,7 @@
+import re
 import unittest
 
+from app.domain.sales.item_descriptions import deserializar_indicacion
 from app.application.self_ordering.catalog import construir_catalogo_self_ordering
 from app.infrastructure.database.self_ordering_catalog import SqlSelfOrderingCatalogRepository
 
@@ -190,6 +192,15 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         section_end = html_text.index("</section>", start)
         return html_text[section_start:section_end]
 
+    def _product_modal_html(self, html_text, product_name):
+        producto = self._catalog_product(product_name)
+        marker = f'id="producto-modal-{producto.id}"'
+        start = html_text.index(marker)
+        modal_start = html_text.rfind('<div class="sheet"', 0, start)
+        next_modal = html_text.find('<div class="sheet"', start + 1)
+        end = next_modal if next_modal != -1 else html_text.index("<script>", start)
+        return html_text[modal_start:end]
+
     def test_open_order_creates_table_link(self):
         orden_id = self._create_order()
 
@@ -335,6 +346,44 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         active_response = web_app.app.test_client().get(f"/self-order/{second['token']}")
         self.assertEqual(active_response.status_code, 200)
         self.assertIn(b"Neko Wok", active_response.data)
+
+    def test_create_order_reassociates_permanent_qr_before_any_internal_get(self):
+        first_order = self._create_order(referencia="mesa:5")
+        first = self.client.post(f"/orden/{first_order}/self-ordering/link").get_json()["link"]
+        token = first["token"]
+        self._update_order(first_order, estado="cerrada")
+
+        closed_response = web_app.app.test_client().get(f"/self-order/{token}")
+        self.assertEqual(closed_response.status_code, 200)
+        self.assertIn(b"Mesa no habilitada", closed_response.data)
+
+        second = self.client.post(
+            "/crear_orden",
+            data={"tipo": "Mesa", "referencia_mesa": "mesa:5", "cliente": "Segundo"},
+        )
+        second_order = int(second.headers["Location"].rsplit("/", 1)[1])
+
+        row = self._link_row(first["id"])
+        self.assertEqual(row[0], second_order)
+        self.assertEqual(row[1], token)
+        self.assertEqual(row[3], "activo")
+        self.assertEqual(row[4], "mesa:5")
+        active_response = web_app.app.test_client().get(f"/self-order/{token}")
+        self.assertEqual(active_response.status_code, 200)
+        self.assertIn(b"Neko Wok", active_response.data)
+        self.assertNotIn(b"Mesa no habilitada", active_response.data)
+
+    def test_order_screen_does_not_reassign_or_500_with_anomalous_duplicate_open_tables(self):
+        first_order = self._create_order(referencia="mesa:5")
+        first = self.client.post(f"/orden/{first_order}/self-ordering/link").get_json()["link"]
+        second_order = self._create_order(referencia="mesa:5")
+
+        response = self.client.get(f"/orden/{second_order}")
+
+        self.assertEqual(response.status_code, 200)
+        row = self._link_row(first["id"])
+        self.assertEqual(row[0], first_order)
+        self.assertEqual(row[1], first["token"])
 
     def test_public_endpoint_ignores_manipulated_order_id_parameter(self):
         mesa_3_order = self._create_order(referencia="mesa:3")
@@ -858,17 +907,16 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertIn('if (optional) button.classList.remove("selected");', html_text)
         self.assertIn('if (previous) previous.classList.remove("selected");', html_text)
 
-    def test_public_catalog_has_frontend_cart_without_submission_mutation(self):
+    def test_public_catalog_has_frontend_cart_without_immediate_submission_mutation(self):
         html_text = self._public_catalog_html()
 
         self.assertIn('id="cartBar"', html_text)
         self.assertIn('id="cartSheet"', html_text)
         self.assertIn('id="cartLines"', html_text)
         self.assertIn("Agregar al pedido", html_text)
-        self.assertIn("Envio disponible proximamente", html_text)
+        self.assertIn("Enviar solicitud", html_text)
         self.assertIn("data-add-to-cart", html_text)
         self.assertNotIn("Disponible proximamente</button>\n                <button", html_text)
-        self.assertNotIn("fetch(", html_text)
         self.assertNotIn('method="post"', html_text.lower())
         self.assertNotIn("escapeText(", html_text)
 
@@ -898,12 +946,14 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertIn("if (total > group.maximas) return false;", html_text)
         self.assertIn("button.disabled = !configIsValid(config);", html_text)
 
-    def test_public_catalog_cart_merges_only_same_product_and_configuration(self):
+    def test_public_catalog_cart_merges_only_same_product_configuration_and_note(self):
         html_text = self._public_catalog_html()
 
         self.assertIn("function configKey(config)", html_text)
         self.assertIn("valores: group.valores.slice().sort()", html_text)
-        self.assertIn('const key = productId + "|" + configKey(config);', html_text)
+        self.assertIn("function normalizeNote(note)", html_text)
+        self.assertIn("function lineKey(productId, config, note)", html_text)
+        self.assertIn("const key = lineKey(productId, config, indication);", html_text)
         self.assertIn("existing.quantity += 1;", html_text)
         self.assertIn("cart.push({", html_text)
         self.assertIn("titulo: group.titulo", html_text)
@@ -924,11 +974,11 @@ class SelfOrderingRoutesTest(unittest.TestCase):
             normalized.sort(key=lambda group: group["titulo"])
             return str(normalized)
 
-        def line_key(config):
-            return f"{product_id}|{config_key(config)}"
+        def line_key(config, note=""):
+            return f"{product_id}|{config_key(config)}|{note.strip()}"
 
-        def add(cart, config):
-            key = line_key(config)
+        def add(cart, config, note=""):
+            key = line_key(config, note)
             existing = next((item for item in cart if item["key"] == key), None)
             if existing:
                 existing["quantity"] += 1
@@ -967,7 +1017,93 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         add(cart, with_extra)
         self.assertEqual(len(cart), 2)
         self.assertIn("function configKey(config)", html_text)
-        self.assertIn('const key = productId + "|" + configKey(config);', html_text)
+        self.assertIn("const key = lineKey(productId, config, indication);", html_text)
+
+    def test_public_catalog_cart_key_includes_normalized_customer_note(self):
+        html_text = self._public_catalog_html()
+        familiar = self._catalog_product("Familiar")
+        product_id = familiar.id
+        config = [
+            {"titulo": "Pollos", "valores": ["Pollo BBQ"]},
+            {"titulo": "Arroces", "valores": ["Triple"]},
+            {"titulo": "Sabores", "valores": ["Coca Cola"]},
+            {"titulo": "Extra", "valores": []},
+        ]
+
+        def config_key(config):
+            normalized = [
+                {
+                    "titulo": group["titulo"],
+                    "valores": sorted(group["valores"]),
+                }
+                for group in config
+            ]
+            normalized.sort(key=lambda group: group["titulo"])
+            return str(normalized)
+
+        def line_key(note):
+            return f"{product_id}|{config_key(config)}|{note.strip()}"
+
+        def add(cart, note):
+            key = line_key(note)
+            existing = next((item for item in cart if item["key"] == key), None)
+            if existing:
+                existing["quantity"] += 1
+            else:
+                cart.append({"key": key, "quantity": 1})
+
+        cart = []
+        add(cart, "sin cebolla")
+        add(cart, "sin cebolla")
+        self.assertEqual(len(cart), 1)
+        self.assertEqual(cart[0]["quantity"], 2)
+
+        cart = []
+        add(cart, "sin cebolla")
+        add(cart, "sin salsa")
+        self.assertEqual(len(cart), 2)
+
+        self.assertIn('data-customer-note maxlength="180"', html_text)
+        self.assertIn("Nota para cocina (opcional)", html_text)
+        self.assertIn('note.textContent = "Nota: " + item.indication;', html_text)
+        self.assertIn("normalizeNote(note)", html_text)
+
+    def test_public_catalog_note_field_is_not_collected_as_configuration_group(self):
+        html_text = self._public_catalog_html()
+        simple_modal = self._product_modal_html(html_text, "Neko Clan Triple")
+
+        self.assertIn('class="customer-note-group"', simple_modal)
+        self.assertIn("data-customer-note", simple_modal)
+        self.assertNotIn('class="option-group">\n                <div class="option-title">\n                    <span>Nota para cocina', simple_modal)
+        self.assertNotIn('data-title=""', simple_modal)
+        self.assertNotIn("querySelectorAll(\".option-group\")", html_text)
+        self.assertIn('querySelectorAll("[data-option-group]")', html_text)
+
+    def test_public_catalog_simple_product_payload_contract_has_empty_configuration_and_note(self):
+        html_text = self._public_catalog_html()
+        simple_modal = self._product_modal_html(html_text, "Neko Clan Triple")
+
+        self.assertEqual(simple_modal.count("data-option-group"), 0)
+        self.assertIn("const indication = normalizeNote(noteInput ? noteInput.value : \"\");", html_text)
+        self.assertIn("configuracion: item.config.map(function(group)", html_text)
+        self.assertIn("indicacion: item.indication || \"\"", html_text)
+
+    def test_public_catalog_configurable_modals_with_note_only_have_real_option_groups(self):
+        html_text = self._public_catalog_html()
+        cases = {
+            "Familiar": ["Pollos", "Arroces", "Sabores", "Extra"],
+            "Neko Combo 1": ["Acompanantes", "Bebidas"],
+            "Refresco 1 Lt": ["Sabores"],
+        }
+
+        for product_name, expected_titles in cases.items():
+            with self.subTest(product_name=product_name):
+                modal = self._product_modal_html(html_text, product_name)
+                titles = re.findall(r'data-title="([^"]*)"', modal)
+                self.assertEqual(titles, expected_titles)
+                self.assertNotIn("", titles)
+                self.assertIn('class="customer-note-group"', modal)
+                self.assertEqual(modal.count("data-option-group"), len(expected_titles))
 
     def test_public_catalog_cart_quantity_controls_and_total_are_present(self):
         html_text = self._public_catalog_html()
@@ -1099,6 +1235,596 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertEqual(create_response.status_code, 403)
         self.assertEqual(revoke_response.status_code, 403)
         self.assertEqual(self._link_row(link_id)[3], "activo")
+
+    def _link_token_for_order(self, orden_id):
+        return self.client.post(f"/orden/{orden_id}/self-ordering/link").get_json()["link"]["token"]
+
+    def _producto_id(self, nombre):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM productos WHERE nombre=? ORDER BY id LIMIT 1", (nombre,))
+        row = cursor.fetchone()
+        conn.close()
+        self.assertIsNotNone(row, nombre)
+        return row[0]
+
+    def _producto_neko_clan_pollo_camaron(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, nombre, precio
+            FROM productos
+            WHERE nombre LIKE 'Neko Clan Pollo Camar%'
+            ORDER BY id
+            LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+        conn.close()
+        self.assertIsNotNone(row, "Neko Clan Pollo Camaron")
+        return row
+
+    def _submit_payload(self, items, submission_id="submit-test-123"):
+        return {"submission_id": submission_id, "items": items}
+
+    def _simple_item_payload(self, nombre="Neko Clan Triple", cantidad=1, **extra):
+        payload = {
+            "producto_id": self._producto_id(nombre),
+            "cantidad": cantidad,
+            "configuracion": [],
+            "indicacion": "",
+        }
+        payload.update(extra)
+        return payload
+
+    def _familiar_item_payload(self, cantidad=1, extra_lumpias=False, **extra):
+        grupos = [
+            {"titulo": "Pollos", "valores": ["Pollo BBQ"]},
+            {"titulo": "Arroces", "valores": ["Triple"]},
+            {"titulo": "Sabores", "valores": ["Coca Cola"]},
+            {
+                "titulo": "Extra",
+                "valores": [web_app.PROMO_EXTRA_LUMPIAS_NOMBRE] if extra_lumpias else [],
+            },
+        ]
+        payload = {
+            "producto_id": self._producto_id("Familiar"),
+            "cantidad": cantidad,
+            "configuracion": grupos,
+            "indicacion": "",
+        }
+        payload.update(extra)
+        return payload
+
+    def _combo_item_payload(self, cantidad=1, **extra):
+        payload = {
+            "producto_id": self._producto_id("Neko Combo 1"),
+            "cantidad": cantidad,
+            "configuracion": [
+                {"titulo": "Acompanantes", "valores": ["Pollo BBQ"]},
+                {"titulo": "Bebidas", "valores": ["Coca Cola"]},
+            ],
+            "indicacion": "",
+        }
+        payload.update(extra)
+        return payload
+
+    def _post_submit(self, token, payload):
+        return web_app.app.test_client().post(f"/self-order/{token}/submit", json=payload)
+
+    def _table_counts(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM self_order_requests")
+        requests = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM self_order_request_items")
+        request_items = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+        orden_items = cursor.fetchone()[0]
+        conn.close()
+        return requests, request_items, orden_items
+
+    def _orden_items(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT producto, precio, COALESCE(indicacion, '') FROM orden_items WHERE orden_id=? ORDER BY id",
+            (orden_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def _request_item_rows(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT producto_nombre_snapshot, precio_unitario_snapshot, cantidad,
+                   configuracion_json, subtotal_usd
+            FROM self_order_request_items
+            ORDER BY id
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def test_public_submit_valid_creates_accepted_request_snapshots_and_order_items(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload([self._simple_item_payload()]),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["estado"], "aceptada")
+        self.assertEqual(payload["total_usd"], 13.0)
+        self.assertEqual(self._table_counts(orden_id), (1, 1, 1))
+        self.assertEqual(self._orden_items(orden_id)[0][:2], ("Neko Clan Triple", 13.0))
+        snapshot = self._request_item_rows()[0]
+        self.assertEqual(snapshot[0], "Neko Clan Triple")
+        self.assertEqual(snapshot[1], 13.0)
+        self.assertEqual(snapshot[2], 1)
+        self.assertEqual(snapshot[4], 13.0)
+
+    def test_public_submit_accepts_real_simple_neko_clan_product_with_empty_configuration(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        producto_id, nombre, precio = self._producto_neko_clan_pollo_camaron()
+        producto_catalogo = self._catalog_product(nombre)
+
+        self.assertEqual(producto_catalogo.categoria_publica, "Arroz chino")
+        self.assertEqual(producto_catalogo.tipo_configuracion, "simple")
+        self.assertEqual(producto_catalogo.opciones, ())
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    {
+                        "producto_id": producto_id,
+                        "cantidad": 1,
+                        "configuracion": [],
+                        "indicacion": "",
+                    }
+                ],
+                "debug-neko-clan-1",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["estado"], "aceptada")
+        self.assertEqual(response.get_json()["total_usd"], precio)
+        self.assertEqual(self._table_counts(orden_id), (1, 1, 1))
+        self.assertEqual(self._orden_items(orden_id)[0][:2], (nombre, precio))
+        snapshot = self._request_item_rows()[0]
+        self.assertEqual(snapshot[0], nombre)
+        self.assertEqual(snapshot[1], precio)
+        self.assertEqual(snapshot[2], 1)
+
+    def test_public_submit_rejects_invented_configuration_for_real_simple_neko_clan_product(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        producto_id, _, _ = self._producto_neko_clan_pollo_camaron()
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    {
+                        "producto_id": producto_id,
+                        "cantidad": 1,
+                        "configuracion": [{"titulo": "Pollos", "valores": ["Pollo BBQ"]}],
+                        "indicacion": "",
+                    }
+                ],
+                "debug-neko-clan-invented",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "Configuracion invalida.")
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_still_rejects_empty_configuration_for_configurable_product(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    {
+                        "producto_id": self._producto_id("Familiar"),
+                        "cantidad": 1,
+                        "configuracion": [],
+                        "indicacion": "",
+                    }
+                ],
+                "debug-configurable-empty",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "Configuracion invalida.")
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_two_valid_products_share_one_batch(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    self._simple_item_payload("Neko Clan Triple"),
+                    self._simple_item_payload("Refresco 1 Lt", configuracion=[
+                        {"titulo": "Sabores", "valores": ["Coca Cola"]}
+                    ]),
+                ]
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._table_counts(orden_id), (1, 2, 2))
+
+    def test_public_submit_quantity_two_matches_two_order_item_units(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload([self._simple_item_payload(cantidad=2)]),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._table_counts(orden_id), (1, 1, 2))
+        self.assertEqual([row[0] for row in self._orden_items(orden_id)], ["Neko Clan Triple", "Neko Clan Triple"])
+        self.assertEqual(self._request_item_rows()[0][2], 2)
+
+    def test_public_submit_ignores_manipulated_price_and_subtotal(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        item = self._simple_item_payload(precio=1, subtotal=1, precio_base=1)
+
+        response = self._post_submit(token, self._submit_payload([item]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["total_usd"], 13.0)
+        self.assertEqual(self._orden_items(orden_id)[0][1], 13.0)
+        self.assertEqual(self._request_item_rows()[0][1], 13.0)
+
+    def test_public_submit_extra_lumpias_uses_server_price(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload([self._familiar_item_payload(extra_lumpias=True)]),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["total_usd"], 23.0)
+        self.assertEqual(
+            [(row[0], row[1]) for row in self._orden_items(orden_id)],
+            [("Familiar", 20.0), (web_app.PROMO_EXTRA_LUMPIAS_NOMBRE, 3.0)],
+        )
+        self.assertEqual(self._request_item_rows()[0][4], 23.0)
+
+    def test_public_submit_invalid_configuration_rolls_back_all_tables(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        invalid = self._familiar_item_payload()
+        invalid["configuracion"] = [
+            {"titulo": "Pollos", "valores": ["Pollo BBQ"]},
+            {"titulo": "Arroces", "valores": ["Triple"]},
+            {"titulo": "Sabores", "valores": ["Coca Cola"]},
+            {"titulo": "Extra", "valores": ["Extra inventado"]},
+        ]
+
+        response = self._post_submit(token, self._submit_payload([invalid]))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_second_invalid_item_rolls_back_first(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        invalid = self._simple_item_payload("Refresco 1 Lt", configuracion=[
+            {"titulo": "Sabores", "valores": [""]}
+        ])
+
+        response = self._post_submit(
+            token,
+            self._submit_payload([self._simple_item_payload(), invalid]),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_same_submission_id_is_idempotent(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        payload = self._submit_payload([self._simple_item_payload()], submission_id="retry-12345")
+
+        first = self._post_submit(token, payload)
+        second = self._post_submit(token, payload)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertFalse(first.get_json()["idempotente"])
+        self.assertTrue(second.get_json()["idempotente"])
+        self.assertEqual(first.get_json()["request_id"], second.get_json()["request_id"])
+        self.assertEqual(self._table_counts(orden_id), (1, 1, 1))
+
+    def test_public_submit_new_submission_id_creates_new_batch(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        first = self._post_submit(token, self._submit_payload([self._simple_item_payload()], "first-12345"))
+        second = self._post_submit(token, self._submit_payload([self._simple_item_payload()], "second-12345"))
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertNotEqual(first.get_json()["request_id"], second.get_json()["request_id"])
+        self.assertEqual(self._table_counts(orden_id), (2, 2, 2))
+
+    def test_public_submit_closed_order_is_blocked_without_mutation(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        self._update_order(orden_id, estado="cerrada")
+
+        response = self._post_submit(token, self._submit_payload([self._simple_item_payload()]))
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_browser_cannot_control_destination_order(self):
+        mesa_3 = self._create_order(referencia="mesa:3")
+        mesa_4 = self._create_order(referencia="mesa:4")
+        token = self._link_token_for_order(mesa_3)
+        item = self._simple_item_payload(orden_id=mesa_4)
+
+        response = self._post_submit(token, self._submit_payload([item]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._table_counts(mesa_3), (1, 1, 1))
+        self.assertEqual(len(self._orden_items(mesa_4)), 0)
+
+    def test_public_submit_security_validation_rejects_bad_payloads(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        cases = [
+            self._submit_payload([self._simple_item_payload(cantidad=0)], "qty-zero-1"),
+            self._submit_payload([self._simple_item_payload(cantidad=-1)], "qty-neg-1"),
+            self._submit_payload([self._simple_item_payload(cantidad=99)], "qty-big-1"),
+            {"submission_id": "bad", "items": [self._simple_item_payload()]},
+        ]
+
+        for payload in cases:
+            with self.subTest(payload=payload["submission_id"]):
+                response = self._post_submit(token, payload)
+                self.assertEqual(response.status_code, 400)
+
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_inactive_product_is_rejected(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        category_id = self._create_category("Bebidas Auditoria", activo=1)
+        producto_id = self._create_product("Refresco Auditoria Inactivo", 2.0, category_id, activo=0)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    {
+                        "producto_id": producto_id,
+                        "cantidad": 1,
+                        "configuracion": [{"titulo": "Sabores", "valores": ["Coca Cola"]}],
+                    }
+                ]
+            ),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_invalid_token_is_rejected(self):
+        response = self._post_submit(
+            "token-inexistente",
+            self._submit_payload([self._simple_item_payload()]),
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_public_submit_rejects_non_object_or_malformed_json_root(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        client = web_app.app.test_client()
+        cases = [
+            ("array", '["a", "b"]'),
+            ("string", '"texto"'),
+            ("number", "123"),
+            ("boolean", "true"),
+            ("null", "null"),
+            ("malformed", '{"submission_id"'),
+        ]
+
+        for _, body in cases:
+            response = client.post(
+                f"/self-order/{token}/submit",
+                data=body,
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json()["error"], "Payload invalido.")
+
+        ok = self._post_submit(
+            token,
+            self._submit_payload([self._simple_item_payload()], "json-valid-123"),
+        )
+        self.assertEqual(ok.status_code, 200)
+
+    def test_public_submit_rejects_single_select_over_cardinality_without_mutation(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        cases = [
+            self._familiar_item_payload(
+                configuracion=[
+                    {"titulo": "Pollos", "valores": ["Pollo BBQ", "Pollo Agridulce"]},
+                    {"titulo": "Arroces", "valores": ["Triple"]},
+                    {"titulo": "Sabores", "valores": ["Coca Cola"]},
+                    {"titulo": "Extra", "valores": []},
+                ]
+            ),
+            self._combo_item_payload(
+                configuracion=[
+                    {"titulo": "Acompanantes", "valores": ["Pollo BBQ"]},
+                    {"titulo": "Bebidas", "valores": ["Coca Cola", "Frescolita"]},
+                ]
+            ),
+            self._simple_item_payload(
+                "Refresco 1 Lt",
+                configuracion=[{"titulo": "Sabores", "valores": ["Coca Cola", "Frescolita"]}],
+            ),
+        ]
+
+        for index, item in enumerate(cases, start=1):
+            response = self._post_submit(
+                token,
+                self._submit_payload([item], f"single-over-{index}"),
+            )
+            self.assertEqual(response.status_code, 400)
+
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+
+    def test_public_submit_preserves_customer_note_for_simple_item(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [self._simple_item_payload(indicacion="sin cebolla por favor")],
+                "note-simple-123",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._orden_items(orden_id)[0][2], "sin cebolla por favor")
+
+    def test_public_submit_preserves_promotion_configuration_and_customer_note(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [self._familiar_item_payload(indicacion="sin cebolla por favor")],
+                "note-promo-123",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        indicacion = self._orden_items(orden_id)[0][2]
+        datos = deserializar_indicacion(indicacion)
+        self.assertEqual(datos["tipo"], "promocion")
+        self.assertEqual(datos["nota"], "sin cebolla por favor")
+        self.assertEqual(datos["pollo"], "Pollo BBQ")
+
+    def test_public_submit_preserves_combo_configuration_and_customer_note(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [self._combo_item_payload(indicacion="sin cebolla por favor")],
+                "note-combo-123",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        indicacion = self._orden_items(orden_id)[0][2]
+        datos = deserializar_indicacion(indicacion)
+        self.assertEqual(datos["tipo"], "combo")
+        self.assertEqual(datos["nota"], "sin cebolla por favor")
+        self.assertEqual(datos["bebida"], "Coca Cola")
+
+    def test_public_submit_preserves_soda_flavor_and_customer_note(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    self._simple_item_payload(
+                        "Refresco 1 Lt",
+                        configuracion=[{"titulo": "Sabores", "valores": ["Coca Cola"]}],
+                        indicacion="bien frio",
+                    )
+                ],
+                "note-soda-123",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        indicacion = self._orden_items(orden_id)[0][2]
+        self.assertIn("Sabor: Coca Cola", indicacion)
+        self.assertIn("Nota: bien frio", indicacion)
+
+    def test_public_submit_empty_note_keeps_current_structured_indication(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload([self._familiar_item_payload()], "note-empty-123"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        datos = deserializar_indicacion(self._orden_items(orden_id)[0][2])
+        self.assertEqual(datos["tipo"], "promocion")
+        self.assertNotIn("nota", datos)
+
+    def test_public_submit_html_note_is_stored_as_text_and_order_screen_escapes_it(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [self._simple_item_payload(indicacion="<script>alert(1)</script>")],
+                "note-html-123",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._orden_items(orden_id)[0][2], "<script>alert(1)</script>")
+        order_response = self.client.get(f"/orden/{orden_id}")
+        self.assertIn(b"&lt;script&gt;alert(1)&lt;/script&gt;", order_response.data)
+        self.assertNotIn(b"<script>alert(1)</script>", order_response.data)
+
+    def test_public_catalog_frontend_posts_intent_without_prices_or_order_id(self):
+        html_text = self._public_catalog_html()
+
+        self.assertIn('id="sendRequest"', html_text)
+        self.assertIn('fetch(submitUrl', html_text)
+        self.assertIn("crypto.randomUUID", html_text)
+        self.assertIn("Pedido enviado correctamente", html_text)
+        self.assertIn("producto_id: item.productId", html_text)
+        self.assertIn("cantidad: item.quantity", html_text)
+        self.assertIn("indicacion: item.indication || \"\"", html_text)
+        self.assertNotIn("precio_unitario", html_text)
+        self.assertNotIn("subtotal_usd", html_text)
+        self.assertNotIn("orden_id", html_text)
 
 
 if __name__ == "__main__":

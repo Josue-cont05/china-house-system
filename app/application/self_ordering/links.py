@@ -259,6 +259,27 @@ def obtener_o_crear_link_mesa(
     return link, True
 
 
+def activar_link_permanente_para_nueva_orden_mesa(
+    repository: SelfOrderLinkRepository,
+    orden_id: int,
+    ahora_fn: Optional[Callable[[], datetime.datetime]] = None,
+) -> Optional[SelfOrderLink]:
+    _validar_orden_mesa_abierta(repository, orden_id)
+    mesa_clave = _mesa_clave_de_orden(repository, orden_id)
+    link_permanente = repository.buscar_link_mesa_permanente(mesa_clave)
+    if link_permanente is None:
+        return None
+
+    resultado = validar_self_order_link(repository, link_permanente.token, ahora_fn=ahora_fn)
+    if not resultado.valido or resultado.link is None:
+        return None
+
+    _validar_reasignacion_link_mesa(repository, resultado.link, orden_id)
+    if resultado.link.orden_id != orden_id:
+        return repository.asociar_link_mesa_a_orden(resultado.link.id, orden_id)
+    return resultado.link
+
+
 def obtener_link_activo_mesa(
     repository: SelfOrderLinkRepository,
     orden_id: int,
@@ -282,7 +303,8 @@ def obtener_link_activo_mesa(
         vistos.add(link.id)
         resultado = validar_self_order_link(repository, link.token, ahora_fn=ahora_fn)
         if resultado.valido and resultado.link is not None:
-            return resultado.link
+            if resultado.link.orden_id == orden_id:
+                return resultado.link
     return None
 
 

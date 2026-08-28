@@ -16,12 +16,20 @@ from app.application.self_ordering.links import (
 from app.application.self_ordering.mesas import MesaSelfOrderingInvalida
 from app.infrastructure.database.self_ordering_catalog import SqlSelfOrderingCatalogRepository
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
+from app.infrastructure.database.self_ordering_submit import (
+    SqlSelfOrderingSubmitRepository,
+    SubmitSelfOrderingAtomicoError,
+)
 from app.presentation.web.self_ordering_catalog_view import render_catalogo_publico
 from app.presentation.web.self_ordering_ui import (
     ErrorConfiguracionSelfOrdering,
     self_order_public_url,
 )
 from app.shared.qr.svg import qr_svg_data_uri
+from app.application.self_ordering.submit import (
+    ErrorSubmitSelfOrdering,
+    procesar_submit_self_ordering,
+)
 
 
 def crear_self_ordering_blueprint(
@@ -37,6 +45,9 @@ def crear_self_ordering_blueprint(
 
     def catalog_repository():
         return SqlSelfOrderingCatalogRepository(connection_factory)
+
+    def submit_repository():
+        return SqlSelfOrderingSubmitRepository(connection_factory, last_id_getter)
 
     def catalog_rules():
         if catalog_rules_getter is None:
@@ -98,7 +109,27 @@ def crear_self_ordering_blueprint(
             return _respuesta_publica_bloqueada(resultado.estado), 404
 
         catalogo = construir_catalogo_self_ordering(catalog_repository(), catalog_rules())
-        return render_catalogo_publico(catalogo), 200
+        return render_catalogo_publico(catalogo, submit_url=f"/self-order/{html.escape(token, quote=True)}/submit"), 200
+
+    @blueprint.post("/self-order/<token>/submit")
+    def submit_self_order(token):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Payload invalido."}), 400
+        try:
+            resultado = procesar_submit_self_ordering(
+                repository=submit_repository(),
+                catalog_repository=catalog_repository(),
+                reglas=catalog_rules(),
+                token=token,
+                payload=payload,
+            )
+        except ErrorSubmitSelfOrdering as exc:
+            return jsonify({"error": exc.mensaje}), exc.status_code
+        except SubmitSelfOrderingAtomicoError as exc:
+            return jsonify({"error": str(exc)}), 409
+
+        return jsonify(_submit_to_json(resultado)), 200
 
     return blueprint
 
@@ -148,3 +179,22 @@ def _respuesta_mesa_no_habilitada():
     </body>
     </html>
     """
+
+
+def _submit_to_json(resultado):
+    return {
+        "request_id": resultado.request_id,
+        "estado": resultado.estado,
+        "total_usd": resultado.total_usd,
+        "idempotente": resultado.idempotente,
+        "items": [
+            {
+                "producto_id": item.producto_id,
+                "producto": item.producto_nombre_snapshot,
+                "precio_unitario": item.precio_unitario_snapshot,
+                "cantidad": item.cantidad,
+                "subtotal_usd": item.subtotal_usd,
+            }
+            for item in resultado.items
+        ],
+    }
