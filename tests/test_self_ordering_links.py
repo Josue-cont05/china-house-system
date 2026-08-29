@@ -38,7 +38,15 @@ class SelfOrderingLinksTest(unittest.TestCase):
     def _clear_data(self):
         conn = web_app.get_connection()
         cursor = conn.cursor()
-        for table in ("self_order_request_items", "self_order_requests", "self_order_links", "orden_items", "ordenes"):
+        for table in (
+            "orden_comanda_items",
+            "orden_comandas",
+            "self_order_request_items",
+            "self_order_requests",
+            "self_order_links",
+            "orden_items",
+            "ordenes",
+        ):
             cursor.execute(f"DELETE FROM {table}")
         conn.commit()
         conn.close()

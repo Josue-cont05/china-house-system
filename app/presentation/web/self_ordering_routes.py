@@ -37,6 +37,7 @@ def crear_self_ordering_blueprint(
     last_id_getter,
     public_base_url_getter=None,
     catalog_rules_getter=None,
+    numero_orden_provider=None,
 ):
     blueprint = Blueprint("self_ordering", __name__)
 
@@ -47,7 +48,9 @@ def crear_self_ordering_blueprint(
         return SqlSelfOrderingCatalogRepository(connection_factory)
 
     def submit_repository():
-        return SqlSelfOrderingSubmitRepository(connection_factory, last_id_getter)
+        if numero_orden_provider is None:
+            raise RuntimeError("Numeracion de comanda self-ordering no configurada.")
+        return SqlSelfOrderingSubmitRepository(connection_factory, last_id_getter, numero_orden_provider)
 
     def catalog_rules():
         if catalog_rules_getter is None:
@@ -187,6 +190,9 @@ def _submit_to_json(resultado):
         "estado": resultado.estado,
         "total_usd": resultado.total_usd,
         "idempotente": resultado.idempotente,
+        "comanda_id": resultado.comanda_id,
+        "comanda_secuencia": resultado.comanda_secuencia,
+        "numero_orden": resultado.numero_orden,
         "items": [
             {
                 "producto_id": item.producto_id,

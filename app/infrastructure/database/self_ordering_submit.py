@@ -3,6 +3,7 @@ from app.application.self_ordering.submit import (
     RequestItemPreparado,
     ResultadoSubmitSelfOrdering,
 )
+from app.infrastructure.database.kitchen_comandas import crear_comanda_en_cursor
 
 
 class SubmitSelfOrderingAtomicoError(RuntimeError):
@@ -10,9 +11,10 @@ class SubmitSelfOrderingAtomicoError(RuntimeError):
 
 
 class SqlSelfOrderingSubmitRepository:
-    def __init__(self, connection_factory, last_id_getter):
+    def __init__(self, connection_factory, last_id_getter, numero_orden_provider):
         self._connection_factory = connection_factory
         self._last_id_getter = last_id_getter
+        self._numero_orden_provider = numero_orden_provider
 
     def buscar_por_token(self, token):
         conn = self._connection_factory()
@@ -88,6 +90,7 @@ class SqlSelfOrderingSubmitRepository:
                 return existente
 
             self._revalidar_destino(cursor, token, link_id, orden_id)
+            numero_orden_reserva = self._numero_si_hace_falta(cursor, orden_id)
             cursor.execute(
                 """
                 INSERT INTO self_order_requests (
@@ -130,6 +133,7 @@ class SqlSelfOrderingSubmitRepository:
                     ),
                 )
 
+            orden_item_ids = []
             for item in orden_items:
                 cursor.execute(
                     """
@@ -138,6 +142,21 @@ class SqlSelfOrderingSubmitRepository:
                     """,
                     (orden_id, item.producto, item.precio, item.indicacion),
                 )
+                orden_item_ids.append(self._last_id_getter(cursor, "orden_items"))
+
+            try:
+                comanda = crear_comanda_en_cursor(
+                    cursor,
+                    self._last_id_getter,
+                    orden_id=orden_id,
+                    origen="self_ordering",
+                    self_order_request_id=request_id,
+                    orden_item_ids=orden_item_ids,
+                    fecha=fecha,
+                    numero_orden_reserva=numero_orden_reserva,
+                )
+            except Exception as exc:
+                raise SubmitSelfOrderingAtomicoError("No se pudo enviar la comanda a cocina.") from exc
 
             conn.commit()
             return ResultadoSubmitSelfOrdering(
@@ -146,6 +165,9 @@ class SqlSelfOrderingSubmitRepository:
                 total_usd=round(sum(item.subtotal_usd for item in request_items), 2),
                 items=request_items,
                 idempotente=False,
+                comanda_id=comanda.comanda_id,
+                comanda_secuencia=comanda.secuencia,
+                numero_orden=comanda.numero_orden,
             )
         except Exception:
             conn.rollback()
@@ -209,6 +231,7 @@ class SqlSelfOrderingSubmitRepository:
             total_usd=round(sum(item.subtotal_usd for item in items), 2),
             items=items,
             idempotente=True,
+            **self._datos_comanda_request(cursor, request_id),
         )
 
     def _revalidar_destino(self, cursor, token, link_id, orden_id):
@@ -227,5 +250,38 @@ class SqlSelfOrderingSubmitRepository:
 
         cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=? LIMIT 1", (orden_id,))
         orden = cursor.fetchone()
-        if orden is None or orden[0] != "abierta" or orden[1] is not None:
+        if orden is None or orden[0] == "cerrada" or orden[1] is not None:
             raise SubmitSelfOrderingAtomicoError("Mesa no habilitada.")
+
+    def _numero_si_hace_falta(self, cursor, orden_id):
+        cursor.execute(
+            """
+            SELECT numero_orden
+            FROM ordenes
+            WHERE id=?
+            LIMIT 1
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise SubmitSelfOrderingAtomicoError("Mesa no habilitada.")
+        return self._numero_orden_provider() if row[0] is None else row[0]
+
+    def _datos_comanda_request(self, cursor, request_id):
+        cursor.execute(
+            """
+            SELECT id, secuencia, (
+                SELECT numero_orden FROM ordenes WHERE id=orden_comandas.orden_id
+            )
+            FROM orden_comandas
+            WHERE self_order_request_id=?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (request_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return {"comanda_id": None, "comanda_secuencia": None, "numero_orden": None}
+        return {"comanda_id": row[0], "comanda_secuencia": row[1], "numero_orden": row[2]}

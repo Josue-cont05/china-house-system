@@ -1,8 +1,11 @@
 import re
+import threading
 import unittest
+from unittest import mock
 
 from app.domain.sales.item_descriptions import deserializar_indicacion
 from app.application.self_ordering.catalog import construir_catalogo_self_ordering
+from app.application.kitchen.comandas import texto_numero_comanda
 from app.infrastructure.database.self_ordering_catalog import SqlSelfOrderingCatalogRepository
 
 from tests.support_env import TEST_DB, cleanup_test_db, import_web_app
@@ -31,6 +34,8 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         conn = self._conn()
         cursor = conn.cursor()
         for table in (
+            "orden_comanda_items",
+            "orden_comandas",
             "self_order_request_items",
             "self_order_requests",
             "self_order_links",
@@ -1351,6 +1356,59 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         conn.close()
         return rows
 
+    def _comandas(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, orden_id, secuencia, origen, self_order_request_id, estado
+            FROM orden_comandas
+            WHERE orden_id=?
+            ORDER BY secuencia, id
+            """,
+            (orden_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def _comanda_items(self, comanda_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT oi.id, oi.producto, oi.precio, COALESCE(oi.indicacion, '')
+            FROM orden_comanda_items ci
+            JOIN orden_items oi ON oi.id = ci.orden_item_id
+            WHERE ci.comanda_id=?
+            ORDER BY ci.id
+            """,
+            (comanda_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def _order_state(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT estado, numero_orden FROM ordenes WHERE id=?", (orden_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row
+
+    def _insert_order_item(self, orden_id, producto="Neko Clan Triple", precio=13.0):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (orden_id, producto, precio),
+        )
+        item_id = web_app.obtener_ultimo_id(cursor, "orden_items")
+        conn.commit()
+        conn.close()
+        return item_id
+
     def test_public_submit_valid_creates_accepted_request_snapshots_and_order_items(self):
         orden_id = self._create_order()
         token = self._link_token_for_order(orden_id)
@@ -1365,6 +1423,7 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertEqual(payload["estado"], "aceptada")
         self.assertEqual(payload["total_usd"], 13.0)
         self.assertEqual(self._table_counts(orden_id), (1, 1, 1))
+        self.assertEqual(len(self._comandas(orden_id)), 1)
         self.assertEqual(self._orden_items(orden_id)[0][:2], ("Neko Clan Triple", 13.0))
         snapshot = self._request_item_rows()[0]
         self.assertEqual(snapshot[0], "Neko Clan Triple")
@@ -1560,7 +1619,281 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertFalse(first.get_json()["idempotente"])
         self.assertTrue(second.get_json()["idempotente"])
         self.assertEqual(first.get_json()["request_id"], second.get_json()["request_id"])
+        self.assertEqual(first.get_json()["comanda_id"], second.get_json()["comanda_id"])
         self.assertEqual(self._table_counts(orden_id), (1, 1, 1))
+        self.assertEqual(len(self._comandas(orden_id)), 1)
+
+    def test_public_submit_creates_kitchen_comanda_for_exact_batch_items(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        response = self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    self._simple_item_payload("Neko Clan Triple"),
+                    self._simple_item_payload(
+                        "Refresco 1 Lt",
+                        configuracion=[{"titulo": "Sabores", "valores": ["Coca Cola"]}],
+                    ),
+                ],
+                "batch-kitchen-1",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        comandas = self._comandas(orden_id)
+        self.assertEqual(len(comandas), 1)
+        self.assertEqual(comandas[0][2:], (0, "self_ordering", payload["request_id"], "en_cocina"))
+        self.assertEqual(payload["comanda_id"], comandas[0][0])
+        self.assertEqual(payload["comanda_secuencia"], 0)
+        self.assertEqual([row[1] for row in self._comanda_items(comandas[0][0])], ["Neko Clan Triple", "Refresco 1 Lt"])
+        self.assertEqual(self._order_state(orden_id)[0], "en cocina")
+
+    def test_comanda_number_text_uses_sequence_without_changing_order_number(self):
+        self.assertEqual(texto_numero_comanda(7, 0), "Orden 7")
+        self.assertEqual(texto_numero_comanda(7, 1), "Orden 7.1")
+
+    def test_public_submit_new_batch_creates_next_comanda_sequence_only_for_new_items(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        first = self._post_submit(token, self._submit_payload([self._simple_item_payload()], "batch-one-1"))
+        second = self._post_submit(token, self._submit_payload([self._simple_item_payload()], "batch-two-2"))
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        comandas = self._comandas(orden_id)
+        self.assertEqual([row[2] for row in comandas], [0, 1])
+        self.assertEqual([len(self._comanda_items(row[0])) for row in comandas], [1, 1])
+        self.assertNotEqual(first.get_json()["comanda_id"], second.get_json()["comanda_id"])
+
+    def test_concurrent_self_order_submissions_reserve_unique_consecutive_sequences(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        product_id = self._producto_id("Neko Clan Triple")
+        barrier = threading.Barrier(10)
+        results = []
+        lock = threading.Lock()
+
+        def submit(index):
+            client = web_app.app.test_client()
+            payload = self._submit_payload(
+                [
+                    {
+                        "producto_id": product_id,
+                        "cantidad": 1,
+                        "configuracion": [],
+                        "indicacion": "",
+                    }
+                ],
+                f"thread-submit-{index:02d}",
+            )
+            try:
+                barrier.wait(timeout=10)
+                response = client.post(f"/self-order/{token}/submit", json=payload)
+                with lock:
+                    results.append((response.status_code, response.get_json(silent=True)))
+            except Exception as exc:
+                with lock:
+                    results.append(("error", str(exc)))
+
+        threads = [threading.Thread(target=submit, args=(index,)) for index in range(10)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+
+        self.assertEqual(len(results), 10)
+        self.assertTrue(all(status == 200 for status, _ in results), results)
+        comandas = self._comandas(orden_id)
+        self.assertEqual(len(comandas), 10)
+        self.assertEqual([row[2] for row in comandas], list(range(10)))
+        self.assertEqual(self._table_counts(orden_id), (10, 10, 10))
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM orden_items oi
+            LEFT JOIN orden_comanda_items ci ON ci.orden_item_id = oi.id
+            WHERE oi.orden_id=? AND ci.id IS NULL
+            """,
+            (orden_id,),
+        )
+        self.assertEqual(cursor.fetchone()[0], 0)
+        conn.close()
+
+    def test_comanda_sequence_allocator_does_not_depend_on_max_sequence_at_insert_time(self):
+        import inspect
+        from app.infrastructure.database import kitchen_comandas
+
+        source = inspect.getsource(kitchen_comandas.crear_comanda_en_cursor)
+
+        self.assertNotIn("MAX(secuencia)", source)
+        self.assertIn("_reservar_secuencia_comanda", source)
+
+    def test_cocina_renders_self_order_batches_as_separate_comanda_cards(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        self._post_submit(token, self._submit_payload([self._simple_item_payload()], "screen-one-1"))
+        self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    self._simple_item_payload(
+                        "Refresco 1 Lt",
+                        configuracion=[{"titulo": "Sabores", "valores": ["Coca Cola"]}],
+                    )
+                ],
+                "screen-two-2",
+            ),
+        )
+        self._login(rol="cocina")
+
+        response = self.client.get("/cocina")
+        html_text = response.data.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Orden 1", html_text)
+        self.assertIn("Orden 1.1", html_text)
+        self.assertIn("/comanda/", html_text)
+        self.assertNotIn('href="/listo/', html_text)
+
+    def test_ordenes_cocina_json_returns_each_comanda_with_only_its_items(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        self._post_submit(token, self._submit_payload([self._simple_item_payload()], "json-one-1"))
+        self._post_submit(
+            token,
+            self._submit_payload(
+                [
+                    self._simple_item_payload(
+                        "Refresco 1 Lt",
+                        configuracion=[{"titulo": "Sabores", "valores": ["Coca Cola"]}],
+                    )
+                ],
+                "json-two-2",
+            ),
+        )
+
+        response = web_app.app.test_client().get("/ordenes_cocina")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(payload), 2)
+        self.assertEqual([item["secuencia"] for item in payload], [0, 1])
+        self.assertEqual(payload[0]["items"], ["1x Neko Clan Triple"])
+        self.assertEqual(payload[1]["items"], ["1x Refresco 1 Lt (Sabor: Coca Cola)"])
+
+    def test_marking_one_comanda_ready_keeps_order_in_kitchen_until_all_ready(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        self._post_submit(token, self._submit_payload([self._simple_item_payload()], "ready-one-1"))
+        self._post_submit(token, self._submit_payload([self._simple_item_payload()], "ready-two-2"))
+        comandas = self._comandas(orden_id)
+        self._login(rol="cocina")
+
+        first = self.client.post(f"/comanda/{comandas[0][0]}/listo")
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(self._order_state(orden_id)[0], "en cocina")
+        self.assertEqual([row[5] for row in self._comandas(orden_id)], ["listo", "en_cocina"])
+
+        second = self.client.post(f"/comanda/{comandas[1][0]}/listo")
+        self.assertEqual(second.status_code, 302)
+        self.assertEqual(self._order_state(orden_id)[0], "listo")
+        self.assertEqual([row[5] for row in self._comandas(orden_id)], ["listo", "listo"])
+
+    def test_manual_send_to_kitchen_creates_comanda_for_unsent_items_only(self):
+        orden_id = self._create_order()
+        first_item = self._insert_order_item(orden_id, "Neko Clan Triple", 13.0)
+
+        first = self.client.get(f"/enviar_cocina/{orden_id}")
+        self.assertEqual(first.status_code, 302)
+        first_comanda = self._comandas(orden_id)[0]
+        self.assertEqual(first_comanda[2:], (0, "manual", None, "en_cocina"))
+        self.assertEqual([row[0] for row in self._comanda_items(first_comanda[0])], [first_item])
+
+        second_item = self._insert_order_item(orden_id, "Refresco 1 Lt", 2.0)
+        second = self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self.assertEqual(second.status_code, 302)
+        comandas = self._comandas(orden_id)
+        self.assertEqual([row[2] for row in comandas], [0, 1])
+        self.assertEqual([row[0] for row in self._comanda_items(comandas[1][0])], [second_item])
+
+    def test_mixed_manual_and_self_ordering_batches_share_one_sequence_by_item_id(self):
+        orden_id = self._create_order()
+        item_a = self._insert_order_item(orden_id, "Manual A", 1.0)
+        item_b = self._insert_order_item(orden_id, "Manual B", 2.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        item_c = self._insert_order_item(orden_id, "Manual C", 3.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        token = self._link_token_for_order(orden_id)
+        response = self._post_submit(token, self._submit_payload([self._simple_item_payload()], "mixed-self-1"))
+        self.assertEqual(response.status_code, 200)
+        self_order_item = self._comanda_items(response.get_json()["comanda_id"])[0][0]
+
+        item_e = self._insert_order_item(orden_id, "Manual E", 5.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual([row[2] for row in comandas], [0, 1, 2, 3])
+        self.assertEqual([row[0] for row in self._comanda_items(comandas[0][0])], [item_a, item_b])
+        self.assertEqual([row[0] for row in self._comanda_items(comandas[1][0])], [item_c])
+        self.assertEqual([row[0] for row in self._comanda_items(comandas[2][0])], [self_order_item])
+        self.assertEqual([row[0] for row in self._comanda_items(comandas[3][0])], [item_e])
+
+    def test_legacy_kitchen_order_without_comanda_still_appears_without_duplication(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Legacy Item", 4.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET estado='en cocina', numero_orden=15 WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+        self._login(rol="cocina")
+
+        cocina_response = self.client.get("/cocina")
+        cocina_html = cocina_response.data.decode("utf-8")
+        json_response = web_app.app.test_client().get("/ordenes_cocina")
+        payload = json_response.get_json()
+
+        self.assertEqual(cocina_response.status_code, 200)
+        self.assertIn("Orden #15", cocina_html)
+        self.assertIn("Legacy Item", cocina_html)
+        self.assertEqual(cocina_html.count("Legacy Item"), 1)
+        self.assertEqual(json_response.status_code, 200)
+        self.assertEqual(len(payload), 1)
+        self.assertIsNone(payload[0]["comanda_id"])
+        self.assertEqual(payload[0]["items"], ["1x Legacy Item"])
+
+    def test_public_submit_rolls_back_everything_if_comanda_creation_fails(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+
+        with mock.patch(
+            "app.infrastructure.database.self_ordering_submit.crear_comanda_en_cursor",
+            side_effect=RuntimeError("fallo comanda"),
+        ):
+            response = self._post_submit(
+                token,
+                self._submit_payload([self._simple_item_payload()], "rollback-comanda-1"),
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self._table_counts(orden_id), (0, 0, 0))
+        self.assertEqual(self._comandas(orden_id), [])
+        self.assertEqual(self._order_state(orden_id)[0], "abierta")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(proxima_secuencia_comanda, 0) FROM ordenes WHERE id=?", (orden_id,))
+        self.assertEqual(cursor.fetchone()[0], 0)
+        conn.close()
 
     def test_public_submit_new_submission_id_creates_new_batch(self):
         orden_id = self._create_order()

@@ -23,6 +23,8 @@ class SelfOrderingSchemaTest(unittest.TestCase):
         conn = self._conn()
         cursor = conn.cursor()
         for table in (
+            "orden_comanda_items",
+            "orden_comandas",
             "self_order_request_items",
             "self_order_requests",
             "self_order_links",
@@ -159,12 +161,26 @@ class SelfOrderingSchemaTest(unittest.TestCase):
         conn.close()
         return item_id
 
+    def _create_order_item(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, ?)",
+            (orden_id, "Producto cocina", 5.0, ""),
+        )
+        item_id = web_app.obtener_ultimo_id(cursor, "orden_items")
+        conn.commit()
+        conn.close()
+        return item_id
+
     def test_creates_self_ordering_tables(self):
         self.assertTrue(
             {
                 "self_order_links",
                 "self_order_requests",
                 "self_order_request_items",
+                "orden_comandas",
+                "orden_comanda_items",
             }.issubset(self._table_names())
         )
 
@@ -213,6 +229,111 @@ class SelfOrderingSchemaTest(unittest.TestCase):
                 "subtotal_usd",
             },
         )
+        self.assertEqual(
+            set(self._columns("orden_comandas")),
+            {
+                "id",
+                "orden_id",
+                "secuencia",
+                "origen",
+                "self_order_request_id",
+                "estado",
+                "fecha_creacion",
+                "fecha_listo",
+                "reimpresion_token",
+            },
+        )
+        self.assertEqual(
+            set(self._columns("orden_comanda_items")),
+            {"id", "comanda_id", "orden_item_id"},
+        )
+
+    def test_order_comanda_sequence_is_unique_per_order(self):
+        orden_id = self._create_order()
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO orden_comandas (
+                orden_id, secuencia, origen, estado, fecha_creacion
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (orden_id, 0, "manual", "en_cocina", "2026-08-25 10:05:00"),
+        )
+        conn.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            cursor.execute(
+                """
+                INSERT INTO orden_comandas (
+                    orden_id, secuencia, origen, estado, fecha_creacion
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (orden_id, 0, "self_ordering", "en_cocina", "2026-08-25 10:06:00"),
+            )
+            conn.commit()
+        conn.rollback()
+        conn.close()
+
+    def test_order_item_can_belong_to_only_one_comanda(self):
+        orden_id = self._create_order()
+        orden_item_id = self._create_order_item(orden_id)
+        conn = self._conn()
+        cursor = conn.cursor()
+        for secuencia in (0, 1):
+            cursor.execute(
+                """
+                INSERT INTO orden_comandas (
+                    orden_id, secuencia, origen, estado, fecha_creacion
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (orden_id, secuencia, "manual", "en_cocina", "2026-08-25 10:05:00"),
+            )
+        conn.commit()
+        cursor.execute("SELECT id FROM orden_comandas ORDER BY secuencia")
+        comanda_ids = [row[0] for row in cursor.fetchall()]
+        cursor.execute(
+            "INSERT INTO orden_comanda_items (comanda_id, orden_item_id) VALUES (?, ?)",
+            (comanda_ids[0], orden_item_id),
+        )
+        conn.commit()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            cursor.execute(
+                "INSERT INTO orden_comanda_items (comanda_id, orden_item_id) VALUES (?, ?)",
+                (comanda_ids[1], orden_item_id),
+            )
+            conn.commit()
+        conn.rollback()
+        conn.close()
+
+    def test_comanda_sequence_counter_respects_existing_comandas_on_reinit(self):
+        orden_id = self._create_order()
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET proxima_secuencia_comanda=0 WHERE id=?", (orden_id,))
+        for secuencia in (0, 1, 2):
+            cursor.execute(
+                """
+                INSERT INTO orden_comandas (
+                    orden_id, secuencia, origen, estado, fecha_creacion
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (orden_id, secuencia, "manual", "en_cocina", "2026-08-25 10:05:00"),
+            )
+        conn.commit()
+        conn.close()
+
+        web_app.crear_tablas_comandas()
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT proxima_secuencia_comanda FROM ordenes WHERE id=?", (orden_id,))
+        self.assertEqual(cursor.fetchone()[0], 3)
+        conn.close()
 
     def test_self_order_link_token_is_unique(self):
         self._create_link(token="unico")

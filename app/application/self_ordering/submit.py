@@ -62,6 +62,9 @@ class ResultadoSubmitSelfOrdering:
     total_usd: float
     items: tuple[RequestItemPreparado, ...]
     idempotente: bool = False
+    comanda_id: int | None = None
+    comanda_secuencia: int | None = None
+    numero_orden: int | None = None
 
 
 class SubmitSelfOrderingRepository(Protocol):

@@ -63,6 +63,12 @@ from app.application.self_ordering.mesas import (
     normalizar_mesa_clave,
     opciones_mesa_html,
 )
+from app.application.kitchen.comandas import (
+    OrdenComandaNoExiste,
+    OrdenComandaSinItems,
+    texto_numero_comanda,
+)
+from app.infrastructure.database.kitchen_comandas import SqlKitchenComandaRepository
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
@@ -1545,6 +1551,71 @@ def crear_tablas_self_ordering():
         """
     )
 
+    conn.commit()
+    conn.close()
+
+
+def crear_tablas_comandas():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS orden_comandas (
+            id {pk_autoincrement_sql()},
+            orden_id INTEGER NOT NULL,
+            secuencia INTEGER NOT NULL,
+            origen TEXT NOT NULL
+                CHECK (origen IN ('manual', 'self_ordering')),
+            self_order_request_id INTEGER,
+            estado TEXT NOT NULL
+                CHECK (estado IN ('en_cocina', 'listo')),
+            fecha_creacion TEXT,
+            fecha_listo TEXT,
+            reimpresion_token TEXT,
+            UNIQUE (orden_id, secuencia)
+        )
+        """
+    )
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS orden_comanda_items (
+            id {pk_autoincrement_sql()},
+            comanda_id INTEGER NOT NULL,
+            orden_item_id INTEGER NOT NULL,
+            UNIQUE (comanda_id, orden_item_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orden_comanda_items_item
+        ON orden_comanda_items (orden_item_id)
+        """
+    )
+    conn.commit()
+    conn.close()
+    asegurar_columna("ordenes", "proxima_secuencia_comanda", "INTEGER DEFAULT 0")
+    _sincronizar_contador_comandas_existentes()
+
+
+def _sincronizar_contador_comandas_existentes():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE ordenes
+        SET proxima_secuencia_comanda = (
+            SELECT COALESCE(MAX(c.secuencia) + 1, COALESCE(ordenes.proxima_secuencia_comanda, 0))
+            FROM orden_comandas c
+            WHERE c.orden_id = ordenes.id
+        )
+        WHERE COALESCE(proxima_secuencia_comanda, 0) < (
+            SELECT COALESCE(MAX(c.secuencia) + 1, 0)
+            FROM orden_comandas c
+            WHERE c.orden_id = ordenes.id
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -3223,6 +3294,7 @@ def proteger_sistema():
         "eliminar_producto",
         "editar_producto",
         "reimprimir_cocina",
+        "reimprimir_comanda",
         "cambiar_tasa",
         "usuarios",
         "crear_usuario",
@@ -3277,7 +3349,7 @@ def proteger_sistema():
     }
 
     # Pantalla operativa de cocina.
-    acceso_cocina = {"cocina", "pantalla_cocina", "marcar_listo"}
+    acceso_cocina = {"cocina", "pantalla_cocina", "marcar_listo", "marcar_comanda_listo"}
 
     if request.endpoint in {"login", "static"}:
         return
@@ -3523,6 +3595,7 @@ def init_db():
     crear_tablas_cierre_jornada()
     crear_tablas_cuentas_por_cobrar()
     crear_tablas_delivery()
+    crear_tablas_comandas()
     crear_tablas_self_ordering()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
@@ -8160,37 +8233,16 @@ def agregar(orden_id, producto_id):
 
 @app.route("/enviar_cocina/<int:orden_id>")
 def enviar_cocina(orden_id):
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT numero_orden
-        FROM ordenes
-        WHERE id=? AND cierre_id IS NULL
-        """,
-        (orden_id,),
-    )
-    row = cursor.fetchone()
-
-    if not row:
-        conn.close()
+    repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+    try:
+        repository.crear_manual_para_pendientes(
+            orden_id,
+            ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    except OrdenComandaNoExiste:
         return "Orden no encontrada"
-
-    numero_actual = row[0]
-    if numero_actual is None:
-        numero_actual = siguiente_numero()
-
-    cursor.execute(
-        """
-        UPDATE ordenes
-        SET estado='en cocina', numero_orden=?
-        WHERE id=? AND cierre_id IS NULL
-        """,
-        (numero_actual, orden_id),
-    )
-    conn.commit()
-    conn.close()
+    except OrdenComandaSinItems:
+        return redirect(f"/orden/{orden_id}")
     return redirect(f"/orden/{orden_id}")
 
 
@@ -8221,19 +8273,36 @@ def reimprimir_cocina(orden_id):
         return "Solo se pueden reimprimir ordenes en cocina, listas o cerradas"
 
     reimpresion_token = ahora_venezuela().strftime("%Y%m%d%H%M%S%f")
-
-    cursor.execute(
-        """
-        UPDATE ordenes
-        SET reimpresion_token=?
-        WHERE id=?
-        """,
-        (reimpresion_token, orden_id),
-    )
-
     conn.commit()
     conn.close()
+
+    repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+    if not repository.reimprimir_ultima_comanda_de_orden(orden_id, reimpresion_token):
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET reimpresion_token=?
+            WHERE id=?
+            """,
+            (reimpresion_token, orden_id),
+        )
+        conn.commit()
+        conn.close()
     return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/reimprimir_comanda/<int:comanda_id>")
+def reimprimir_comanda(comanda_id):
+    if not usuario_puede_reimprimir_cocina():
+        return "Acceso denegado", 403
+
+    repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+    reimpresion_token = ahora_venezuela().strftime("%Y%m%d%H%M%S%f")
+    if not repository.reimprimir_comanda(comanda_id, reimpresion_token):
+        return "Comanda no encontrada", 404
+    return redirect("/cocina")
 
 
 @app.route("/eliminar_item/<int:item_id>/<int:orden_id>", methods=["POST"])
@@ -10353,24 +10422,14 @@ def cerrar_jornada():
 
 @app.route("/cocina")
 def pantalla_cocina():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT o.id, o.numero_orden, o.tipo, o.referencia, o.fecha_hora, u.nombre,
-               COALESCE(o.observacion, '')
-        FROM ordenes o
-        LEFT JOIN usuarios u ON o.usuario_id = u.id
-        WHERE o.estado = 'en cocina'
-        ORDER BY o.numero_orden ASC, o.fecha_hora ASC
-        """
-    )
-    ordenes = cursor.fetchall()
+    repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+    comandas = repository.listar_comandas_cocina()
 
     ahora = ahora_venezuela()
     arroz_html = ""
     caliente_html = ""
-    total_ordenes = len(ordenes)
+    ordenes_legacy = repository.listar_ordenes_legacy_cocina_sin_comanda()
+    total_ordenes = len(comandas) + len(ordenes_legacy)
     cocina_links = '<a href="/cocina">🍳 Cocina</a>'
     if usuario_es_master():
         cocina_links = '<a href="/">🏠 Inicio</a>' + cocina_links
@@ -10435,7 +10494,47 @@ def pantalla_cocina():
             <div class="col-title">🍚 Estación Arroz</div>
     """
 
-    for o in ordenes:
+    for o in comandas:
+        fecha_orden = parsear_fecha_hora_venezuela(o[6])
+        minutos = (ahora - fecha_orden).total_seconds() / 60
+
+        if minutos < 5:
+            color_class = "green"
+        elif minutos < 10:
+            color_class = "orange"
+        else:
+            color_class = "red"
+
+        items = repository.obtener_items_comanda(o[0])
+        tiene_arroz = any("Arroz chino" in i[0] for i in items)
+        tiene_otro = any("Arroz chino" not in i[0] for i in items)
+        lineas_comanda = agrupar_items_comanda(items, observacion=o[8])
+
+        bloque = f"""
+        <div class="orden {color_class}">
+            <h2>{texto_numero_comanda(o[2], o[3])}</h2>
+            <p>{html_lib.escape(o[4] or '')} - {html_lib.escape(o[5] or '')}</p>
+            <p class="mesonera">👩 Mesonera: {html_lib.escape((o[7] or '-').upper())}</p>
+            <p>{int(minutos)} min</p>
+        """
+
+        for linea in lineas_comanda:
+            linea_html = html_lib.escape(quitar_prefijo_cantidad_visual(linea)).replace("\n", "<br>")
+            bloque += f"<p>{linea_html}</p>"
+
+        bloque += f"""
+            <form method="post" action="/comanda/{o[0]}/listo">
+                <button class="btn">✅ LISTO</button>
+            </form>
+        </div>
+        """
+
+        if tiene_arroz:
+            arroz_html += bloque
+        if tiene_otro:
+            caliente_html += bloque
+
+    for o in ordenes_legacy:
         fecha_orden = parsear_fecha_hora_venezuela(o[4])
         minutos = (ahora - fecha_orden).total_seconds() / 60
 
@@ -10446,15 +10545,7 @@ def pantalla_cocina():
         else:
             color_class = "red"
 
-        cursor.execute(
-            """
-            SELECT producto, COALESCE(indicacion, '')
-            FROM orden_items
-            WHERE orden_id=?
-            """,
-            (o[0],),
-        )
-        items = cursor.fetchall()
+        items = repository.obtener_items_orden(o[0])
         tiene_arroz = any("Arroz chino" in i[0] for i in items)
         tiene_otro = any("Arroz chino" not in i[0] for i in items)
         lineas_comanda = agrupar_items_comanda(items, observacion=o[6])
@@ -10462,8 +10553,8 @@ def pantalla_cocina():
         bloque = f"""
         <div class="orden {color_class}">
             <h2>Orden {texto_numero_orden(o[1])}</h2>
-            <p>{o[2]} - {o[3]}</p>
-            <p class="mesonera">👩 Mesonera: {(o[5] or '-').upper()}</p>
+            <p>{html_lib.escape(o[2] or '')} - {html_lib.escape(o[3] or '')}</p>
+            <p class="mesonera">👩 Mesonera: {html_lib.escape((o[5] or '-').upper())}</p>
             <p>{int(minutos)} min</p>
         """
 
@@ -10499,12 +10590,26 @@ def pantalla_cocina():
     </body>
     </html>
     """
-    conn.close()
     return html
+
+
+@app.route("/comanda/<int:comanda_id>/listo", methods=["POST"])
+def marcar_comanda_listo(comanda_id):
+    repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+    try:
+        repository.marcar_lista(comanda_id, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"))
+    except OrdenComandaNoExiste:
+        return "Comanda no encontrada", 404
+    return redirect("/cocina")
 
 
 @app.route("/listo/<int:orden_id>")
 def marcar_listo(orden_id):
+    repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+    repository.marcar_todas_listas_de_orden(
+        orden_id,
+        ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
+    )
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -10606,73 +10711,81 @@ def ordenes_listas():
 @app.route("/ordenes_cocina")
 def ordenes_cocina():
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
-                   o.estado, o.reimpresion_token, COALESCE(o.observacion, '')
-            FROM ordenes o
-            LEFT JOIN usuarios u ON o.usuario_id = u.id
-            WHERE o.estado = 'en cocina'
-               OR (o.estado = 'cerrada' AND o.reimpresion_token IS NOT NULL)
-               OR (o.estado = 'en cocina' AND o.reimpresion_token IS NOT NULL)
-            ORDER BY o.numero_orden ASC, o.fecha_hora ASC
-            """
-        )
-
+        repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
         ordenes = []
         reimpresiones_emitidas = []
+        reimpresiones_legacy_emitidas = []
 
-        for o in cursor.fetchall():
-            cursor.execute(
-                """
-                SELECT producto, COALESCE(indicacion, '')
-                FROM orden_items
-                WHERE orden_id=?
-                """,
-                (o[0],),
-            )
+        for o in repository.listar_comandas_cocina():
             items = [
                 quitar_prefijo_cantidad_visual(item)
-                for item in agrupar_items_comanda(cursor.fetchall(), observacion=o[8])
+                for item in agrupar_items_comanda(
+                    repository.obtener_items_comanda(o[0]),
+                    observacion=o[8],
+                )
             ]
 
-            evento_impresion = f"{o[0]}-{o[7] if o[7] else 'base'}"
+            evento_impresion = f"comanda-{o[0]}-{o[10] if o[10] else 'base'}"
 
             ordenes.append(
                 {
-                    "id": o[0],
-                    "numero": o[1],
-                    "tipo": o[2],
-                    "cliente": o[3],
-                    "referencia": o[4],
-                    "usuario": o[5] if o[5] else "N/A",
-                    "estado": o[6],
+                    "id": o[1],
+                    "comanda_id": o[0],
+                    "numero": o[2],
+                    "numero_comanda": texto_numero_comanda(o[2], o[3]),
+                    "secuencia": o[3],
+                    "tipo": o[4],
+                    "cliente": o[12],
+                    "referencia": o[5],
+                    "usuario": o[7] if o[7] else "N/A",
+                    "estado": o[13],
+                    "estado_comanda": o[9],
                     "items": items,
                     "observacion": o[8],
-                    "reimpresion_token": o[7],
+                    "reimpresion_token": o[10],
                     "evento_impresion": evento_impresion,
                 }
             )
 
-            if o[7]:
+            if o[10]:
                 reimpresiones_emitidas.append(o[0])
 
         if reimpresiones_emitidas:
-            placeholders = ",".join("?" for _ in reimpresiones_emitidas)
-            cursor.execute(
-                f"""
-                UPDATE ordenes
-                SET reimpresion_token=NULL
-                WHERE id IN ({placeholders})
-                """,
-                reimpresiones_emitidas,
-            )
-            conn.commit()
+            repository.limpiar_tokens_reimpresion(reimpresiones_emitidas)
 
-        conn.close()
+        for o in repository.listar_ordenes_legacy_cocina_sin_comanda():
+            items = [
+                quitar_prefijo_cantidad_visual(item)
+                for item in agrupar_items_comanda(
+                    repository.obtener_items_orden(o[0]),
+                    observacion=o[6],
+                )
+            ]
+            evento_impresion = f"{o[0]}-{o[7] if o[7] else 'base'}"
+            ordenes.append(
+                {
+                    "id": o[0],
+                    "comanda_id": None,
+                    "numero": o[1],
+                    "numero_comanda": f"Orden {texto_numero_orden(o[1])}",
+                    "secuencia": 0,
+                    "tipo": o[2],
+                    "cliente": o[8],
+                    "referencia": o[3],
+                    "usuario": o[5] if o[5] else "N/A",
+                    "estado": o[9],
+                    "estado_comanda": "legacy",
+                    "items": items,
+                    "observacion": o[6],
+                    "reimpresion_token": o[7],
+                    "evento_impresion": evento_impresion,
+                }
+            )
+            if o[7]:
+                reimpresiones_legacy_emitidas.append(o[0])
+
+        if reimpresiones_legacy_emitidas:
+            repository.limpiar_tokens_reimpresion_legacy(reimpresiones_legacy_emitidas)
         return jsonify(ordenes)
 
     except Exception as e:
@@ -11153,6 +11266,7 @@ app.register_blueprint(
         obtener_ultimo_id,
         lambda: CONFIG.get("SELF_ORDER_PUBLIC_BASE_URL", ""),
         reglas_catalogo_self_ordering,
+        siguiente_numero,
     )
 )
 
