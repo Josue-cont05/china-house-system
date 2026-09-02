@@ -52,6 +52,12 @@ from app.domain.sales.item_builder import (
     construir_items_orden,
     es_producto_refresco,
 )
+from app.domain.sales.order_states import (
+    orden_archivada,
+    puede_editar_indicacion_item,
+    puede_eliminar_orden,
+    puede_modificar_orden as puede_modificar_estado_orden,
+)
 from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
 from app.application.self_ordering.links import (
     MesaSelfOrderingOcupada,
@@ -7096,10 +7102,12 @@ def orden(orden_id):
     total_delivery_bs = round((delivery_usd + delivery_legacy_usd) * tasa, 2)
     total_orden_bs = round(total_bs_final + total_delivery_bs, 2)
     total_orden_usd = round((total_orden_bs / tasa) if tasa else total_cliente_usd, 2)
-    bloqueada_por_cierre = o[10] is not None
+    bloqueada_por_cierre = orden_archivada(o[10])
     edicion_emergencia_activa = emergencia_activa(orden_id)
-    puede_modificar_orden = (not bloqueada_por_cierre) and (
-        estado != "cerrada" or edicion_emergencia_activa
+    puede_modificar_orden = puede_modificar_estado_orden(
+        estado,
+        o[10],
+        edicion_emergencia_activa,
     )
     self_ordering_panel = render_self_ordering_panel(
         orden_id,
@@ -8147,11 +8155,12 @@ def agregar(orden_id, producto_id):
         conn.close()
         return "Orden no encontrada"
 
-    if row[1] is not None:
+    if orden_archivada(row[1]):
         conn.close()
         return "No puedes modificar una orden archivada en cierre de jornada"
 
-    if row[0] == "cerrada" and not emergencia_activa(orden_id):
+    edicion_emergencia_activa = emergencia_activa(orden_id)
+    if not puede_modificar_estado_orden(row[0], row[1], edicion_emergencia_activa):
         conn.close()
         return "No puedes agregar productos a una orden cerrada"
 
@@ -8219,7 +8228,7 @@ def agregar(orden_id, producto_id):
             """,
             (orden_id, item_extra.producto, item_extra.precio, item_extra.indicacion),
         )
-    if row[0] == "cerrada" and emergencia_activa(orden_id):
+    if row[0] == "cerrada" and edicion_emergencia_activa:
         registrar_auditoria_emergencia(
             cursor,
             orden_id,
@@ -8320,12 +8329,13 @@ def eliminar_item(item_id, orden_id):
         conn.close()
         return "Orden no encontrada"
 
-    if row[1] is not None:
+    if orden_archivada(row[1]):
         conn.close()
         return "Orden archivada, no se puede modificar"
 
     estado = row[0]
-    if estado == "cerrada" and not emergencia_activa(orden_id):
+    edicion_emergencia_activa = emergencia_activa(orden_id)
+    if not puede_modificar_estado_orden(estado, row[1], edicion_emergencia_activa):
         conn.close()
         return "Orden cerrada, no se puede modificar"
 
@@ -8343,7 +8353,7 @@ def eliminar_item(item_id, orden_id):
         return "Producto no encontrado en esta orden"
 
     cursor.execute("DELETE FROM orden_items WHERE id=? AND orden_id=?", (item_id, orden_id))
-    if estado == "cerrada" and emergencia_activa(orden_id):
+    if estado == "cerrada" and edicion_emergencia_activa:
         registrar_auditoria_emergencia(
             cursor,
             orden_id,
@@ -8369,13 +8379,12 @@ def actualizar_indicacion_item(item_id, orden_id):
         return "Orden no encontrada"
 
     estado, cierre_id = row
-    if cierre_id is not None:
+    if orden_archivada(cierre_id):
         conn.close()
         return "Orden archivada, no se puede modificar"
 
-    if estado not in ("abierta", "en cocina") and not (
-        estado == "cerrada" and emergencia_activa(orden_id)
-    ):
+    edicion_emergencia_activa = emergencia_activa(orden_id)
+    if not puede_editar_indicacion_item(estado, cierre_id, edicion_emergencia_activa):
         conn.close()
         return "Orden cerrada, no se puede modificar"
 
@@ -8401,7 +8410,7 @@ def actualizar_indicacion_item(item_id, orden_id):
         (indicacion, item_id, orden_id),
     )
 
-    if estado == "cerrada" and emergencia_activa(orden_id):
+    if estado == "cerrada" and edicion_emergencia_activa:
         registrar_auditoria_emergencia(
             cursor,
             orden_id,
@@ -8426,11 +8435,12 @@ def editar_orden(orden_id):
         return "Orden no encontrada"
 
     estado_orden, cierre_id = bloqueo
-    if cierre_id is not None:
+    if orden_archivada(cierre_id):
         conn.close()
         return "Esta orden ya pertenece a un cierre de jornada. Primero debes revertirla desde reportes."
 
-    if estado_orden == "cerrada" and not emergencia_activa(orden_id):
+    edicion_emergencia_activa = emergencia_activa(orden_id)
+    if not puede_modificar_estado_orden(estado_orden, cierre_id, edicion_emergencia_activa):
         conn.close()
         return "Orden cerrada, no se puede modificar"
 
@@ -8447,7 +8457,7 @@ def editar_orden(orden_id):
             """,
             (tipo, referencia, cliente, observacion, orden_id),
         )
-        if estado_orden == "cerrada" and emergencia_activa(orden_id):
+        if estado_orden == "cerrada" and edicion_emergencia_activa:
             registrar_auditoria_emergencia(
                 cursor,
                 orden_id,
@@ -8531,13 +8541,13 @@ def eliminar_orden(orden_id):
         conn.close()
         return "Orden no encontrada"
 
-    if row[1] is not None:
+    if orden_archivada(row[1]):
         conn.close()
         return "No se puede eliminar una orden archivada"
 
     estado = row[0]
 
-    if estado not in ("abierta", "en cocina"):
+    if not puede_eliminar_orden(estado, row[1]):
         conn.close()
         return "No se puede eliminar esta orden"
 
