@@ -1389,6 +1389,13 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         conn.close()
         return rows
 
+    def _set_comanda_reimpresion(self, comanda_id, token):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orden_comandas SET reimpresion_token=? WHERE id=?", (token, comanda_id))
+        conn.commit()
+        conn.close()
+
     def _order_state(self, orden_id):
         conn = self._conn()
         cursor = conn.cursor()
@@ -1871,6 +1878,94 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertEqual(len(payload), 1)
         self.assertIsNone(payload[0]["comanda_id"])
         self.assertEqual(payload[0]["items"], ["1x Legacy Item"])
+
+    def test_active_kitchen_comanda_appears_in_feed(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Active Item", 4.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = web_app.SqlKitchenComandaRepository(
+            web_app.get_connection,
+            web_app.obtener_ultimo_id,
+            web_app.siguiente_numero,
+        ).listar_comandas_cocina()
+
+        self.assertEqual(len(comandas), 1)
+        self.assertEqual(comandas[0][1], orden_id)
+        self.assertEqual(comandas[0][9], "en_cocina")
+        self.assertEqual(comandas[0][13], "en cocina")
+
+    def test_closed_order_with_pending_comanda_is_hidden_from_feed(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Closed Stale Item", 4.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._update_order(orden_id, estado="cerrada")
+
+        comandas = web_app.SqlKitchenComandaRepository(
+            web_app.get_connection,
+            web_app.obtener_ultimo_id,
+            web_app.siguiente_numero,
+        ).listar_comandas_cocina()
+
+        self.assertEqual(comandas, [])
+
+    def test_closed_order_with_pending_comanda_reprint_still_appears(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Closed Reprint Item", 4.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        comanda_id = self._comandas(orden_id)[0][0]
+        self._update_order(orden_id, estado="cerrada")
+        self._set_comanda_reimpresion(comanda_id, "reprint-token")
+
+        comandas = web_app.SqlKitchenComandaRepository(
+            web_app.get_connection,
+            web_app.obtener_ultimo_id,
+            web_app.siguiente_numero,
+        ).listar_comandas_cocina()
+
+        self.assertEqual(len(comandas), 1)
+        self.assertEqual(comandas[0][0], comanda_id)
+        self.assertEqual(comandas[0][10], "reprint-token")
+        self.assertEqual(comandas[0][13], "cerrada")
+
+    def test_archived_order_with_pending_comanda_is_hidden_from_active_feed(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Archived Stale Item", 4.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._update_order(orden_id, cierre_id=123)
+
+        comandas = web_app.SqlKitchenComandaRepository(
+            web_app.get_connection,
+            web_app.obtener_ultimo_id,
+            web_app.siguiente_numero,
+        ).listar_comandas_cocina()
+
+        self.assertEqual(comandas, [])
+
+    def test_cocina_hides_closed_stale_comanda(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Closed Stale Item", 4.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._update_order(orden_id, estado="cerrada")
+        self._login(rol="cocina")
+
+        response = self.client.get("/cocina")
+        html_text = response.data.decode("utf-8")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Closed Stale Item", html_text)
+
+    def test_ordenes_cocina_hides_closed_stale_comanda(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Closed Stale Item", 4.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._update_order(orden_id, estado="cerrada")
+
+        response = web_app.app.test_client().get("/ordenes_cocina")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload, [])
 
     def test_public_submit_rolls_back_everything_if_comanda_creation_fails(self):
         orden_id = self._create_order()

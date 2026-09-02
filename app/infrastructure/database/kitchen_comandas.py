@@ -162,7 +162,11 @@ class SqlKitchenComandaRepository:
                 FROM orden_comandas c
                 JOIN ordenes o ON o.id = c.orden_id
                 LEFT JOIN usuarios u ON o.usuario_id = u.id
-                WHERE c.estado = ?
+                WHERE (
+                    c.estado = ?
+                    AND o.cierre_id IS NULL
+                    AND o.estado IN ('en cocina', 'listo')
+                )
                    OR (c.reimpresion_token IS NOT NULL AND o.estado IN ('en cocina', 'listo', 'cerrada'))
                 ORDER BY o.numero_orden ASC, c.secuencia ASC, c.id ASC
                 """,
