@@ -58,6 +58,10 @@ from app.domain.sales.order_states import (
     puede_eliminar_orden,
     puede_modificar_orden as puede_modificar_estado_orden,
 )
+from app.domain.sales.order_totals import (
+    calcular_totales_visuales_delivery,
+    calcular_totales_visuales_orden,
+)
 from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
 from app.application.self_ordering.links import (
     MesaSelfOrderingOcupada,
@@ -403,26 +407,6 @@ def a_float(valor, default=0.0):
         return float(texto)
     except Exception:
         return default
-
-
-def calcular_totales_visuales_delivery(items, delivery_usd):
-    venta_restaurante = 0.0
-    delivery_legacy = 0.0
-    for item in items:
-        producto = item[0]
-        precio = a_float(item[1])
-        categoria = item[4] if len(item) > 4 else None
-        if es_producto_delivery_legacy(producto, categoria):
-            delivery_legacy += precio
-        else:
-            venta_restaurante += precio
-    delivery_explicit = a_float(delivery_usd)
-    return {
-        "venta_restaurante_usd": round(venta_restaurante, 2),
-        "delivery_usd": round(delivery_explicit, 2),
-        "delivery_legacy_usd": round(delivery_legacy, 2),
-        "total_cliente_usd": round(venta_restaurante + delivery_legacy + delivery_explicit, 2),
-    }
 
 
 def es_combo_con_favorito(nombre):
@@ -7090,18 +7074,24 @@ def orden(orden_id):
 
     delivery_usd = a_float(o[11])
     delivery_repartidor_id = o[12]
-    totales_visuales = calcular_totales_visuales_delivery(items, delivery_usd)
-    total_usd = totales_visuales["venta_restaurante_usd"]
-    total_bs = total_usd * tasa
-    total_cliente_usd = totales_visuales["total_cliente_usd"]
-    total_cliente_bs = total_cliente_usd * tasa
-    delivery_legacy_usd = totales_visuales["delivery_legacy_usd"]
-    tiene_delivery_legacy = delivery_legacy_usd > TOLERANCIA_COBRO
     descuento = o[8] if o[8] else 0
-    total_bs_final = max(total_bs - descuento, 0)
-    total_delivery_bs = round((delivery_usd + delivery_legacy_usd) * tasa, 2)
-    total_orden_bs = round(total_bs_final + total_delivery_bs, 2)
-    total_orden_usd = round((total_orden_bs / tasa) if tasa else total_cliente_usd, 2)
+    totales_visuales = calcular_totales_visuales_orden(
+        items,
+        delivery_usd,
+        tasa,
+        descuento,
+    )
+    total_usd = totales_visuales["total_usd"]
+    total_bs = totales_visuales["total_bs"]
+    total_cliente_usd = totales_visuales["total_cliente_usd"]
+    total_cliente_bs = totales_visuales["total_cliente_bs"]
+    delivery_legacy_usd = totales_visuales["delivery_legacy_usd"]
+    tiene_delivery_legacy = totales_visuales["tiene_delivery_legacy"]
+    descuento = totales_visuales["descuento"]
+    total_bs_final = totales_visuales["total_bs_final"]
+    total_delivery_bs = totales_visuales["total_delivery_bs"]
+    total_orden_bs = totales_visuales["total_orden_bs"]
+    total_orden_usd = totales_visuales["total_orden_usd"]
     bloqueada_por_cierre = orden_archivada(o[10])
     edicion_emergencia_activa = emergencia_activa(orden_id)
     puede_modificar_orden = puede_modificar_estado_orden(
