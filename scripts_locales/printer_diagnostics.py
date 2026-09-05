@@ -44,11 +44,20 @@ from datetime import datetime
 from pathlib import Path
 
 import neko_config
+import print_queue_client
 
 # Estados finales de una sesion de deteccion/reparacion.
 ESTADO_OK = "OK"
 ESTADO_SIN_CANDIDATOS = "SIN_CANDIDATOS"
 ESTADO_PAREADA_SIN_ENLACE = "PAIRED_BUT_NO_WORKING_SERIAL_LINK"
+# Caso real de produccion: NekoPOS responde pero la cola central de
+# impresion no (antes de esto, un antes_de_request del backend excluia
+# los endpoints /api/printing/* de las rutas publicas -- ver
+# web_app.py::proteger_sistema). No tiene sentido guiar al socio por el
+# emparejamiento Bluetooth si el problema real es que el backend no
+# esta aceptando la cola: por eso es un estado propio, detectado ANTES
+# de la deteccion de puertos (ver neko_local.py::_trabajo_deteccion).
+ESTADO_COLA_SIN_CONEXION = "PRINTING_API_SIN_CONEXION"
 
 _TIMEOUT_APERTURA_SEG = 4.0
 
@@ -177,7 +186,8 @@ def esperar_puertos_nuevos(obtener_puertos, snapshot_antes, intentos=5, espera_s
 
 Diagnostico = namedtuple(
     "Diagnostico",
-    "bluetooth pos58_pareada candidatos resultados estado puerto_confirmado marca_tiempo",
+    "bluetooth pos58_pareada candidatos resultados estado puerto_confirmado marca_tiempo "
+    "nekopos_ok printing_api_estado printing_api_detalle",
 )
 
 
@@ -189,6 +199,9 @@ def construir_diagnostico(
     bluetooth=None,
     pos58_pareada=None,
     marca_tiempo=None,
+    nekopos_ok=None,
+    printing_api_estado=None,
+    printing_api_detalle=None,
 ):
     return Diagnostico(
         bluetooth=bluetooth,
@@ -198,6 +211,9 @@ def construir_diagnostico(
         estado=estado,
         puerto_confirmado=puerto_confirmado,
         marca_tiempo=marca_tiempo or datetime.now(),
+        nekopos_ok=nekopos_ok,
+        printing_api_estado=printing_api_estado,
+        printing_api_detalle=printing_api_detalle,
     )
 
 
@@ -223,12 +239,19 @@ def resumen_humano(diagnostico):
     else:
         enlace, prueba = "Desconocido", "Pendiente"
 
-    return [
+    lineas = [
         ("Bluetooth", _texto_estado_bool(diagnostico.bluetooth, "OK", "Problema")),
         ("POS58", _texto_estado_bool(diagnostico.pos58_pareada, "Emparejada", "No encontrada")),
         ("Enlace de impresión", enlace),
         ("Prueba", prueba),
     ]
+    if diagnostico.printing_api_estado is not None:
+        lineas.append(("NekoPOS", "Conectado" if diagnostico.nekopos_ok else "Sin conexión"))
+        lineas.append((
+            "Cola de impresión",
+            "OK" if diagnostico.printing_api_estado == print_queue_client.ESTADO_CONECTADA else "No responde",
+        ))
+    return lineas
 
 
 def formatear_diagnostico_texto(diagnostico, version_texto, frozen, sistema=None):
@@ -245,6 +268,9 @@ def formatear_diagnostico_texto(diagnostico, version_texto, frozen, sistema=None
         "",
         f"Bluetooth disponible: {diagnostico.bluetooth}",
         f"POS58 emparejada (segun Windows): {diagnostico.pos58_pareada}",
+        f"NekoPOS accesible: {diagnostico.nekopos_ok}",
+        f"Printing API: {diagnostico.printing_api_estado or 'no comprobado'}"
+        + (f" ({diagnostico.printing_api_detalle})" if diagnostico.printing_api_detalle else ""),
         f"Estado final: {diagnostico.estado}",
         f"Puerto confirmado: {diagnostico.puerto_confirmado.device if diagnostico.puerto_confirmado else '-'}",
         "",

@@ -51,6 +51,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -73,6 +74,7 @@ import neko_config
 import neko_log
 import neko_version
 import port_detection
+import print_dispatcher
 import print_queue_client
 import printer_diagnostics
 import resource_paths
@@ -517,6 +519,33 @@ class NekoLocalApp:
         fingerprint_conocido = config.get("printer_fingerprint")
         baudrate = config.get("baudrate") or neko_config.DEFAULT_BAUDRATE
 
+        # Caso real de produccion (mision "Cola: sin conexion"): NekoPOS
+        # puede estar OK con la cola de impresion caida (o viceversa).
+        # Se comprueba ANTES del baile de Bluetooth/COM: si el problema
+        # es la cola, guiar al socio por el emparejamiento Bluetooth no
+        # sirve de nada -- el puerto podria estar perfecto.
+        progreso("Comprobando NekoPOS...")
+        nekopos_ok = nekopos_accesible()
+        if nekopos_ok:
+            progreso("Comprobando cola de impresión...")
+            try:
+                roles_estacion = station_roles.roles_validos(config.get("roles"))
+            except ValueError:
+                roles_estacion = ()
+            if not roles_estacion:
+                roles_estacion = station_roles.roles_por_perfil(station_roles.PERFIL_TODO)
+
+            estado_cola, _datos_cola, detalle_cola = print_queue_client.evaluar_status(roles_estacion)
+            if estado_cola != print_queue_client.ESTADO_CONECTADA:
+                log.warning(
+                    "Diagnostico: NekoPOS OK pero Printing API no responde (%s): %s",
+                    estado_cola, detalle_cola,
+                )
+                return printer_diagnostics.construir_diagnostico(
+                    candidatos=[], resultados=[], estado=printer_diagnostics.ESTADO_COLA_SIN_CONEXION,
+                    nekopos_ok=True, printing_api_estado=estado_cola, printing_api_detalle=detalle_cola,
+                )
+
         progreso("Revisando Bluetooth...")
         bluetooth_ok, pos58_pareada = windows_bluetooth.evaluar_bluetooth()
         log.info("Diagnostico: bluetooth=%s pos58_pareada=%s", bluetooth_ok, pos58_pareada)
@@ -569,13 +598,72 @@ class NekoLocalApp:
             return
 
         diagnostico = resultado
-        if diagnostico.estado == printer_diagnostics.ESTADO_SIN_CANDIDATOS:
+        if diagnostico.estado == printer_diagnostics.ESTADO_COLA_SIN_CONEXION:
+            self._mostrar_cola_sin_conexion(diagnostico)
+        elif diagnostico.estado == printer_diagnostics.ESTADO_SIN_CANDIDATOS:
             self._mostrar_sin_candidatos()
         elif diagnostico.estado == printer_diagnostics.ESTADO_OK:
             messagebox.showinfo("Neko Local", "IMPRESORA CONFIGURADA")
             self._actualizar_estados()
         else:  # ESTADO_PAREADA_SIN_ENLACE
             self._mostrar_asistente_reparacion(diagnostico)
+
+    def _mostrar_cola_sin_conexion(self, diagnostico):
+        """Mision 'Cola: sin conexion': NekoPOS responde pero la cola
+        central de impresion no. Nunca sugiere Bluetooth/COM aqui -- ese
+        no es el problema real en este caso."""
+        ventana = tk.Toplevel(self.root)
+        ventana.title("Neko Local — Cola de impresión")
+        ventana.resizable(False, False)
+
+        marco = ttk.Frame(ventana, padding=14)
+        marco.pack()
+        ttk.Label(
+            marco,
+            text="NEKO POS ESTÁ CONECTADO,\nPERO LA COLA DE IMPRESIÓN NO RESPONDE.",
+            font=("", 11, "bold"),
+            justify="center",
+        ).pack(pady=(0, 10))
+        ttk.Label(
+            marco,
+            text=(
+                "Los pedidos siguen guardados en NekoPOS con seguridad.\n"
+                "Esto suele resolverse solo al recuperar la conexión."
+            ),
+            justify="center",
+            wraplength=320,
+        ).pack(pady=(0, 10))
+
+        botones = ttk.Frame(marco)
+        botones.pack(fill="x")
+        ttk.Button(
+            botones, text="COMPROBAR DE NUEVO",
+            command=lambda: (ventana.destroy(), self._comprobar_cola_de_nuevo()),
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones, text="Ver detalles técnicos", command=lambda: self._mostrar_detalles(diagnostico)
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones, text="Copiar diagnóstico", command=lambda: self._copiar_diagnostico(diagnostico)
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones, text="Guardar diagnóstico", command=lambda: self._guardar_diagnostico(diagnostico)
+        ).pack(fill="x", pady=2)
+
+    def _comprobar_cola_de_nuevo(self):
+        """Autorreparacion segura (mision seccion 11): si el dispatcher
+        ya no esta corriendo, se reinicia (solo el nuestro, nunca un
+        proceso ajeno) antes de volver a consultar. Nunca reinicia
+        Windows/Render, nunca borra config/dedup/station_id, nunca
+        cambia el COM ni toca Bluetooth si la POS58 ya esta lista."""
+        if not self.gestor_dispatcher.activo:
+            config = neko_config.cargar_config()
+            if neko_config.tiene_impresora_configurada(config):
+                resultado = resolver_y_persistir_puerto(config)
+                if resultado.port:
+                    log.info("Dispatcher estaba detenido; reiniciando antes de comprobar la cola de nuevo.")
+                    self.gestor_dispatcher.iniciar(resultado.port)
+        self._lanzar_diagnostico()
 
     def _mostrar_sin_candidatos(self):
         ventana = tk.Toplevel(self.root)
@@ -787,7 +875,7 @@ class NekoLocalApp:
             self._var_impresora.set("No disponible")
             self._var_puerto.set("-")
 
-        self._var_impresion.set("Activa" if self.gestor_dispatcher.activo else "Detenida")
+        self._var_impresion.set(self._texto_estado_impresion())
 
         if impresora_lista:
             self._var_nota.set("")
@@ -808,12 +896,33 @@ class NekoLocalApp:
         self._var_nekopos.set("verificando...")
         self.root.after(0, self._verificar_nekopos_async)
 
+    def _texto_estado_impresion(self):
+        """Mision 'Cola: sin conexion': distinguir proceso vivo/muerto/
+        colgado (nunca decir "Activa" si el proceso ya no existe, ni si
+        dejo de avanzar -- ver print_dispatcher.leer_heartbeat)."""
+        if not self.gestor_dispatcher.activo:
+            return "Detenida"
+
+        heartbeat = print_dispatcher.leer_heartbeat()
+        if heartbeat is None:
+            return "Activa"  # recien iniciado, todavia no escribio su primer heartbeat
+        antiguedad = time.time() - heartbeat.get("actualizado_en", 0)
+        if antiguedad > print_dispatcher.HEARTBEAT_OBSOLETO_SEG:
+            log.warning("Dispatcher activo pero sin heartbeat reciente (%.0fs); posible colgado.", antiguedad)
+            return "Activa (sin respuesta)"
+        return "Activa"
+
     def _consultar_cola_async(self, roles):
-        estado = print_queue_client.consultar_status(roles)
-        if estado is None:
-            self._var_cola.set("sin conexión")
+        estado, datos, detalle = print_queue_client.evaluar_status(roles)
+        if estado == print_queue_client.ESTADO_CONECTADA:
+            pendientes = datos["pendientes"]
+            self._var_cola.set("conectada" if pendientes == 0 else f"{pendientes} pendientes")
+        elif estado == print_queue_client.ESTADO_ERROR_BACKEND:
+            self._var_cola.set("error del servidor")
+            log.warning("Cola: error del servidor: %s", detalle)
         else:
-            self._var_cola.set(f"{estado['pendientes']} pendientes")
+            self._var_cola.set("sin conexión")
+            log.warning("Cola: sin conexión: %s", detalle)
 
     def _verificar_nekopos_async(self):
         accesible = nekopos_accesible()
@@ -896,6 +1005,29 @@ def _mostrar_diagnostics():
     print(f"perfil: {config.get('profile') or '(sin asignar todavia)'}")
     print(f"roles: {config.get('roles') or '(sin asignar todavia)'}")
 
+    print()
+    print("Comprobando conectividad (solo lectura: sin claim, sin COM, sin imprimir, sin abrir navegador)...")
+
+    nekopos_ok = nekopos_accesible()
+    print(f"NekoPOS API: {'OK' if nekopos_ok else 'ERROR'}")
+
+    try:
+        roles = station_roles.roles_validos(config.get("roles"))
+    except ValueError:
+        roles = ()
+    if not roles:
+        roles = station_roles.roles_por_perfil(station_roles.PERFIL_TODO)
+
+    estado, datos, detalle = print_queue_client.evaluar_status(roles)
+    if estado == print_queue_client.ESTADO_CONECTADA:
+        print("Printing API: OK")
+        print("Status code: 200")
+        print(f"Pendientes: {datos['pendientes']}")
+    else:
+        print(f"Printing API: ERROR ({estado})")
+        if detalle:
+            print(f"Detalle: {detalle}")
+
 
 def main(argv=None):
     args = _construir_parser().parse_args(argv)
@@ -909,8 +1041,6 @@ def main(argv=None):
         return 0
 
     if args.print_dispatcher:
-        import print_dispatcher
-
         return print_dispatcher.main(["--port", args.port] if args.port else [])
 
     if args.kitchen_worker:

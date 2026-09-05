@@ -3293,6 +3293,18 @@ def proteger_sistema():
         "api_tasa",
         "self_ordering.self_order_publico",
         "self_ordering.submit_self_order",
+        # Cola central de impresion (Neko Local / print_dispatcher.py):
+        # cliente de maquina sin sesion de navegador, igual que los
+        # endpoints legacy de arriba. Sin esto, before_request los
+        # redirige a /login (302 -> HTML), y un cliente que sigue
+        # redirects en silencio (como `requests`) ve un 200 con HTML en
+        # vez de JSON -- exactamente el bug real de "Cola: sin conexion"
+        # en Neko Local 1.1.1 pese a que el endpoint respondia bien
+        # desde un navegador con sesion activa.
+        "api_printing_status",
+        "api_printing_claim",
+        "api_printing_ack",
+        "api_printing_fail",
     }
 
     # Administracion total y operaciones destructivas.

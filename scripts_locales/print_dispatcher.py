@@ -57,6 +57,14 @@ POLL_CON_JOB_SEG = 0.2  # tras imprimir uno, revisa el siguiente casi de inmedia
 POLL_SIN_JOB_SEG = 3.0
 POLL_SIN_ROLES_SEG = 10.0
 
+# Backoff ante fallas de CONEXION con la cola central (red caida, error
+# del backend...): mision seccion 15, "no bombardear Render". Escala
+# hasta un tope moderado y vuelve a POLL_SIN_JOB_SEG en cuanto la cola
+# vuelve a responder (ver `fallos_conexion_consecutivos` en
+# ejecutar_polling). Distinto de MAX_FALLOS_CONSECUTIVOS (ese es sobre
+# fallos de IMPRESION fisica, no de red).
+BACKOFF_CONEXION_SEG = (3, 5, 10, 20, 30)
+
 # Tras estos fallos de impresion CONSECUTIVOS, el dispatcher deja de
 # reclamar (mision seccion 53: "si el puerto deja de funcionar... NO
 # claim nuevos jobs") hasta que un reclamo posterior tenga exito o se
@@ -66,6 +74,48 @@ MAX_FALLOS_CONSECUTIVOS = 3
 ARCHIVO_DEDUP_COCINA = "comandas_impresas.txt"
 ARCHIVO_DEDUP_RECIBOS = "facturas_impresas.txt"
 ARCHIVO_PENDIENTES_ACK = "pendientes_ack.txt"
+ARCHIVO_HEARTBEAT = "dispatcher_heartbeat.json"
+
+# Heartbeat "viejo" mas alla de este umbral = el proceso sigue vivo pero
+# dejo de avanzar (colgado): usado por neko_local.py para distinguir
+# "activo y funcionando" de "activo pero sin respuesta" (mision seccion
+# 13). Generoso frente al peor caso normal (backoff maximo + timeout de
+# claim): nunca debe dar un falso "colgado" en operacion normal.
+HEARTBEAT_OBSOLETO_SEG = 60
+
+
+# ----------------------------------------------------------------------
+# Heartbeat (mision seccion 12/13): archivo simple, sin IPC complejo,
+# que la GUI puede leer para saber si el dispatcher sigue avanzando
+# (nunca solo si el proceso sigue vivo -- eso ya lo sabe por si misma
+# via GestorWorkerProceso.activo).
+# ----------------------------------------------------------------------
+def escribir_heartbeat(estado_cola, ruta=None):
+    """Nunca lanza: el heartbeat es diagnostico, no debe poder tumbar
+    el dispatcher si el disco falla."""
+    try:
+        ruta = Path(ruta) if ruta else neko_config.state_dir() / ARCHIVO_HEARTBEAT
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        contenido = json.dumps(
+            {"actualizado_en": time.time(), "estado_cola": estado_cola}, ensure_ascii=False
+        )
+        tmp = ruta.with_suffix(ruta.suffix + ".tmp")
+        tmp.write_text(contenido, encoding="utf-8")
+        tmp.replace(ruta)
+    except Exception as e:
+        print(f"ADVERTENCIA: no se pudo escribir el heartbeat del dispatcher: {e}")
+
+
+def leer_heartbeat(ruta=None):
+    """Usado por neko_local.py. None si nunca se escribio o no se pudo
+    leer (p. ej. el dispatcher nunca ha corrido en esta PC)."""
+    ruta = Path(ruta) if ruta else neko_config.state_dir() / ARCHIVO_HEARTBEAT
+    if not ruta.exists():
+        return None
+    try:
+        return json.loads(ruta.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 # ----------------------------------------------------------------------
@@ -315,55 +365,128 @@ def resolver_puerto_worker(override_port):
     return None, None
 
 
+class EstadoDispatcher:
+    """Contadores/transiciones que persisten entre ciclos de
+    ejecutar_un_ciclo(). Objeto mutable simple a proposito (sin IPC ni
+    framework): separado de ejecutar_polling() para poder probar la
+    logica de un ciclo sin threads, sin time.sleep real y sin un loop
+    infinito real."""
+
+    def __init__(self, puerto, baudrate):
+        self.puerto = puerto
+        self.baudrate = baudrate
+        self.fallos_impresion_consecutivos = 0
+        self.fallos_conexion_consecutivos = 0
+        self.estado_cola_anterior = None
+        self.hubo_trabajo_la_ultima_vez = None
+
+
+def ejecutar_un_ciclo(estado, station_id, roles, cliente, dedup_cocina, dedup_recibos, pendientes_ack, log=None, evaluar_claim_fn=None):
+    """Un solo ciclo de trabajo del dispatcher, SIN time.sleep ni loop
+    infinito: evalua conectividad, decide si puede reclamar, procesa un
+    job si hay uno, y devuelve (resultado, espera_seg, estado_heartbeat)
+    para que ejecutar_polling() decida cuanto dormir. `estado` (un
+    EstadoDispatcher) se muta in-place con los contadores/transiciones.
+
+    `resultado` es uno de: "circuito_abierto", "ack_pendiente",
+    "sin_conexion", "error_backend", "sin_trabajos", "trabajo_procesado".
+    Nunca hace claim/imprime/suena si la cola no esta CONECTADA (mision
+    seccion 14): esto es lo que hace testeable, sin red ni hardware
+    reales, el caso critico "Printing API falla -> no claim/print/beep".
+    """
+    evaluar_claim_fn = evaluar_claim_fn or print_queue_client.evaluar_claim
+
+    if estado.fallos_impresion_consecutivos >= MAX_FALLOS_CONSECUTIVOS:
+        if log:
+            log.warning(
+                "Circuito abierto tras %d fallos consecutivos de impresion; en espera.",
+                estado.fallos_impresion_consecutivos,
+            )
+        nuevo_puerto, nuevo_baudrate = resolver_puerto_worker(None)
+        if nuevo_puerto:
+            estado.puerto, estado.baudrate = nuevo_puerto, nuevo_baudrate
+            estado.fallos_impresion_consecutivos = 0
+            if log:
+                log.info("Impresora recuperada; reanudando reclamos (puerto=%s).", nuevo_puerto)
+        return "circuito_abierto", POLL_SIN_JOB_SEG * 3, "IMPRESORA_EN_ESPERA"
+
+    pendientes_restantes = reintentar_pendientes_ack(cliente, pendientes_ack, log=log)
+    if pendientes_restantes > 0:
+        return "ack_pendiente", POLL_SIN_JOB_SEG, "ACK_PENDIENTE"
+
+    # evaluar_claim (no el `reclamar()` simple) para distinguir "cola
+    # vacia" de "no se pudo hablar con la cola" -- esa distincion es
+    # exactamente lo que faltaba para diagnosticar el caso real "Cola:
+    # sin conexion" pese a que el backend si respondia.
+    estado_cola, job, detalle = evaluar_claim_fn(station_id, roles)
+
+    if estado_cola != estado.estado_cola_anterior and log:
+        if estado_cola == print_queue_client.ESTADO_CONECTADA:
+            log.info("Cola: conectada.")
+        elif estado_cola == print_queue_client.ESTADO_SIN_CONEXION:
+            log.warning("Cola: sin conexion (%s).", detalle)
+        else:
+            log.warning("Cola: error del backend (%s).", detalle)
+    estado.estado_cola_anterior = estado_cola
+
+    if estado_cola != print_queue_client.ESTADO_CONECTADA:
+        # NUNCA claim/print/beep/ack si la cola no es usable (seccion
+        # 14). Backoff progresivo para no bombardear Render (seccion
+        # 15); vuelve a polling normal apenas la cola responda de nuevo.
+        estado.fallos_conexion_consecutivos += 1
+        espera = BACKOFF_CONEXION_SEG[min(estado.fallos_conexion_consecutivos - 1, len(BACKOFF_CONEXION_SEG) - 1)]
+        resultado = "sin_conexion" if estado_cola == print_queue_client.ESTADO_SIN_CONEXION else "error_backend"
+        return resultado, espera, estado_cola
+    estado.fallos_conexion_consecutivos = 0
+
+    if job is None:
+        if estado.hubo_trabajo_la_ultima_vez is not False:
+            if log:
+                log.info("Sin trabajos pendientes; en espera.")
+            estado.hubo_trabajo_la_ultima_vez = False
+        return "sin_trabajos", POLL_SIN_JOB_SEG, estado_cola
+    estado.hubo_trabajo_la_ultima_vez = True
+
+    if log:
+        log.info("Job reclamado: id=%s rol=%s evento=%s", job["id"], job["required_role"], job["event_key"])
+    resultado_job = procesar_un_job(
+        cliente, job, lambda j: _imprimir_por_rol(j, estado.puerto, estado.baudrate),
+        dedup_cocina, dedup_recibos, pendientes_ack, station_id, log=log,
+    )
+    if resultado_job == "fallo_impresion":
+        estado.fallos_impresion_consecutivos += 1
+    else:
+        estado.fallos_impresion_consecutivos = 0
+    return "trabajo_procesado", POLL_CON_JOB_SEG, estado_cola
+
+
 def ejecutar_polling(puerto, baudrate, station_id, roles):
     cliente = _ClienteQueue(station_id)
     dedup_cocina = DedupLocal(ARCHIVO_DEDUP_COCINA, Path(__file__).resolve().parent / ARCHIVO_DEDUP_COCINA)
     dedup_recibos = DedupLocal(ARCHIVO_DEDUP_RECIBOS, Path(__file__).resolve().parent / ARCHIVO_DEDUP_RECIBOS)
     pendientes_ack = PendientesAck()
+    estado = EstadoDispatcher(puerto, baudrate)
 
+    station_id_resumido = f"{station_id[:8]}..." if station_id and len(station_id) > 8 else station_id
     print(f"Dispatcher iniciado. station_id={station_id} roles={list(roles)} puerto={puerto} baudrate={baudrate}")
-    log.info("%s dispatcher iniciado: puerto=%s roles=%s", neko_version.version_texto(), puerto, list(roles))
-
-    fallos_consecutivos = 0
+    log.info(
+        "%s dispatcher iniciado: backend=%s puerto=%s station_id=%s roles=%s",
+        neko_version.version_texto(), print_queue_client.URL_STATUS.rsplit("/api/", 1)[0],
+        puerto, station_id_resumido, list(roles),
+    )
+    escribir_heartbeat("INICIANDO")
 
     while True:
         try:
-            if fallos_consecutivos >= MAX_FALLOS_CONSECUTIVOS:
-                print("[DISPATCHER] Demasiados fallos seguidos; en espera (revisa la impresora).")
-                log.warning("Circuito abierto tras %d fallos consecutivos; en espera.", fallos_consecutivos)
-                time.sleep(POLL_SIN_JOB_SEG * 3)
-                # Un solo intento de recuperacion por ciclo largo: si
-                # la config/puerto cambio (p. ej. el socio reparo la
-                # impresora desde Neko Local), se vuelve a intentar.
-                nuevo_puerto, nuevo_baudrate = resolver_puerto_worker(None)
-                if nuevo_puerto:
-                    puerto, baudrate = nuevo_puerto, nuevo_baudrate
-                    fallos_consecutivos = 0
-                continue
-
-            pendientes_restantes = reintentar_pendientes_ack(cliente, pendientes_ack, log=log)
-            if pendientes_restantes > 0:
-                time.sleep(POLL_SIN_JOB_SEG)
-                continue
-
-            job = cliente.reclamar(roles)
-            if job is None:
-                time.sleep(POLL_SIN_JOB_SEG)
-                continue
-
-            resultado = procesar_un_job(
-                cliente, job, lambda j: _imprimir_por_rol(j, puerto, baudrate),
-                dedup_cocina, dedup_recibos, pendientes_ack, station_id, log=log,
+            _resultado, espera_seg, estado_heartbeat = ejecutar_un_ciclo(
+                estado, station_id, roles, cliente, dedup_cocina, dedup_recibos, pendientes_ack, log=log,
             )
-            if resultado == "fallo_impresion":
-                fallos_consecutivos += 1
-            else:
-                fallos_consecutivos = 0
-            time.sleep(POLL_CON_JOB_SEG)
-
+            escribir_heartbeat(estado_heartbeat)
+            time.sleep(espera_seg)
         except Exception as e:
             print(f"ERROR general en el dispatcher: {e}")
             log.warning("Error general en el ciclo del dispatcher: %s", e)
+            escribir_heartbeat("ERROR_INTERNO")
             time.sleep(POLL_SIN_JOB_SEG)
 
 
@@ -395,6 +518,13 @@ def main(argv=None):
 
     try:
         ejecutar_polling(puerto, baudrate, station_id, roles)
+    except Exception as e:
+        # ejecutar_polling() corre en un `while True` con su propio
+        # manejo de errores por ciclo: llegar aqui es una falla
+        # realmente inesperada (nunca deberia pasar en operacion
+        # normal), asi que queda registrada explicitamente.
+        log.error("Dispatcher detenido inesperadamente: %s", e)
+        raise
     finally:
         lock.release()
 

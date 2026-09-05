@@ -271,5 +271,164 @@ class ImprimirPorRolTest(unittest.TestCase):
         mock_factura.assert_called_once()
 
 
+class EjecutarUnCicloTest(unittest.TestCase):
+    """Regresion del caso real "Cola: sin conexion": ejecutar_un_ciclo()
+    debe distinguir 'cola vacia' (CONECTADA, sin job) de 'no se pudo
+    hablar con la cola' (SIN_CONEXION/ERROR_BACKEND), y NUNCA debe
+    llamar a procesar_un_job() (imprimir/beep/ack) cuando la cola no
+    esta usable -- mision seccion 14/16-19."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._patch = mock.patch.object(
+            __import__("neko_config"), "config_dir", return_value=Path(self._tmpdir.name) / "NekoWok"
+        )
+        self._patch.start()
+        self.estado = dispatcher.EstadoDispatcher("COM6", 9600)
+        self.dedup_cocina = dispatcher.DedupLocal("comandas_impresas.txt")
+        self.dedup_recibos = dispatcher.DedupLocal("facturas_impresas.txt")
+        self.pendientes_ack = dispatcher.PendientesAck()
+        self.cliente = _ClienteFalso()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmpdir.cleanup()
+
+    def _ciclo(self, evaluar_claim_fn):
+        return dispatcher.ejecutar_un_ciclo(
+            self.estado, "st1", ("COCINA",), self.cliente,
+            self.dedup_cocina, self.dedup_recibos, self.pendientes_ack,
+            evaluar_claim_fn=evaluar_claim_fn,
+        )
+
+    def test_conectada_sin_trabajos_no_imprime_nada(self):
+        # Mision seccion 16: backend OK, status 200, sin pendientes.
+        evaluar = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_CONECTADA, None, None))
+        with mock.patch("print_dispatcher._imprimir_por_rol") as mock_imprimir:
+            resultado, espera, heartbeat = self._ciclo(evaluar)
+
+        self.assertEqual(resultado, "sin_trabajos")
+        self.assertEqual(heartbeat, dispatcher.print_queue_client.ESTADO_CONECTADA)
+        mock_imprimir.assert_not_called()
+
+    def test_conectada_con_trabajo_lo_procesa(self):
+        job = {"id": 1, "event_key": "comanda-1-base", "job_type": "comanda", "required_role": "COCINA", "lease_token": "tok", "payload": {}}
+        evaluar = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_CONECTADA, job, None))
+        with mock.patch("print_dispatcher._imprimir_por_rol") as mock_imprimir:
+            resultado, espera, heartbeat = self._ciclo(evaluar)
+
+        self.assertEqual(resultado, "trabajo_procesado")
+        mock_imprimir.assert_called_once()
+        self.assertEqual(self.cliente.acks_llamados, [(1, "st1", "tok")])
+
+    def test_sin_conexion_no_reclama_no_imprime_no_suena(self):
+        # Mision seccion 17: connection error.
+        evaluar = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_SIN_CONEXION, None, "timeout"))
+        with mock.patch("print_dispatcher._imprimir_por_rol") as mock_imprimir:
+            resultado, espera, heartbeat = self._ciclo(evaluar)
+
+        self.assertEqual(resultado, "sin_conexion")
+        self.assertEqual(heartbeat, dispatcher.print_queue_client.ESTADO_SIN_CONEXION)
+        mock_imprimir.assert_not_called()
+        self.assertEqual(self.cliente.acks_llamados, [])
+        self.assertGreater(espera, 0)
+
+    def test_error_backend_http_500_no_marca_conectado_no_reclama(self):
+        # Mision seccion 18: HTTP 500 -- no debe tratarse como conectado.
+        evaluar = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_ERROR_BACKEND, None, "HTTP 500"))
+        with mock.patch("print_dispatcher._imprimir_por_rol") as mock_imprimir:
+            resultado, espera, heartbeat = self._ciclo(evaluar)
+
+        self.assertEqual(resultado, "error_backend")
+        mock_imprimir.assert_not_called()
+
+    def test_json_invalido_se_trata_como_error_backend_no_claim(self):
+        # Mision seccion 19: HTTP 200 pero respuesta invalida (el bug
+        # real: pagina HTML de login en vez de JSON).
+        evaluar = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_ERROR_BACKEND, None, "content-type inesperado: text/html"))
+        with mock.patch("print_dispatcher._imprimir_por_rol") as mock_imprimir:
+            resultado, espera, heartbeat = self._ciclo(evaluar)
+
+        self.assertEqual(resultado, "error_backend")
+        mock_imprimir.assert_not_called()
+
+    def test_backoff_aumenta_con_fallos_de_conexion_consecutivos(self):
+        evaluar = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_SIN_CONEXION, None, "timeout"))
+        esperas = []
+        for _ in range(len(dispatcher.BACKOFF_CONEXION_SEG) + 2):
+            _resultado, espera, _hb = self._ciclo(evaluar)
+            esperas.append(espera)
+
+        self.assertEqual(esperas[: len(dispatcher.BACKOFF_CONEXION_SEG)], list(dispatcher.BACKOFF_CONEXION_SEG))
+        # Tope: no sigue creciendo indefinidamente.
+        self.assertEqual(esperas[-1], dispatcher.BACKOFF_CONEXION_SEG[-1])
+
+    def test_recuperacion_reinicia_el_backoff(self):
+        sin_conexion = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_SIN_CONEXION, None, "timeout"))
+        self._ciclo(sin_conexion)
+        self._ciclo(sin_conexion)
+        self.assertGreater(self.estado.fallos_conexion_consecutivos, 0)
+
+        conectada = mock.Mock(return_value=(dispatcher.print_queue_client.ESTADO_CONECTADA, None, None))
+        self._ciclo(conectada)
+        self.assertEqual(self.estado.fallos_conexion_consecutivos, 0)
+
+    def test_no_hace_claim_en_absoluto_si_hay_acks_pendientes(self):
+        self.pendientes_ack.agregar(1, "st1", "tok1", "e1")
+        self.cliente.ack_ok = False
+        evaluar = mock.Mock()
+
+        resultado, espera, heartbeat = self._ciclo(evaluar)
+
+        self.assertEqual(resultado, "ack_pendiente")
+        evaluar.assert_not_called()
+
+    def test_circuito_abierto_tras_max_fallos_de_impresion_no_reclama(self):
+        self.estado.fallos_impresion_consecutivos = dispatcher.MAX_FALLOS_CONSECUTIVOS
+        evaluar = mock.Mock()
+
+        with mock.patch("print_dispatcher.resolver_puerto_worker", return_value=(None, None)):
+            resultado, espera, heartbeat = self._ciclo(evaluar)
+
+        self.assertEqual(resultado, "circuito_abierto")
+        evaluar.assert_not_called()
+
+
+class HeartbeatTest(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.ruta = Path(self._tmpdir.name) / "heartbeat.json"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_sin_heartbeat_previo_devuelve_none(self):
+        self.assertIsNone(dispatcher.leer_heartbeat(ruta=self.ruta))
+
+    def test_escribir_y_leer(self):
+        dispatcher.escribir_heartbeat("CONECTADA", ruta=self.ruta)
+        datos = dispatcher.leer_heartbeat(ruta=self.ruta)
+        self.assertEqual(datos["estado_cola"], "CONECTADA")
+        self.assertIn("actualizado_en", datos)
+
+    def test_escrituras_sucesivas_actualizan_el_timestamp(self):
+        dispatcher.escribir_heartbeat("CONECTADA", ruta=self.ruta)
+        primero = dispatcher.leer_heartbeat(ruta=self.ruta)["actualizado_en"]
+        dispatcher.escribir_heartbeat("SIN_CONEXION", ruta=self.ruta)
+        segundo = dispatcher.leer_heartbeat(ruta=self.ruta)
+        self.assertEqual(segundo["estado_cola"], "SIN_CONEXION")
+        self.assertGreaterEqual(segundo["actualizado_en"], primero)
+
+    def test_archivo_corrupto_no_lanza(self):
+        self.ruta.parent.mkdir(parents=True, exist_ok=True)
+        self.ruta.write_text("no es json{", encoding="utf-8")
+        self.assertIsNone(dispatcher.leer_heartbeat(ruta=self.ruta))
+
+    def test_directorio_inexistente_no_lanza_al_escribir(self):
+        ruta_rara = Path(self._tmpdir.name) / "sub" / "otro" / "heartbeat.json"
+        dispatcher.escribir_heartbeat("CONECTADA", ruta=ruta_rara)
+        self.assertTrue(ruta_rara.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

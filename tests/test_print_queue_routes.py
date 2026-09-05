@@ -380,5 +380,96 @@ class CasoMoverImpresoraTest(PrintQueueRoutesTest):
         self.assertIsNone(respuesta_a_despues["job"])  # NO imprime #300 de nuevo
 
 
+_PRIVATE_DB_PATH_SIN_SESION = os.path.join(
+    tempfile.gettempdir(), f"neko_pos_test_print_queue_sin_sesion_{os.getpid()}.db"
+)
+
+
+class EndpointsSinSesionTest(unittest.TestCase):
+    """REGRESION DEL BUG REAL: los 4 endpoints de /api/printing/* deben
+    responder JSON a un cliente SIN sesion de navegador (exactamente
+    como Neko Local, que nunca hace login) -- ver
+    web_app.py::proteger_sistema, rutas_publicas.
+
+    Todos los demas tests de este archivo (PrintQueueRoutesTest) llaman
+    self._login() en su setUp(), asi que NUNCA habrian detectado este
+    bug: probaban la logica de las rutas con una sesion activa, no el
+    caso real de un cliente maquina sin sesion. Esta clase, deliberada
+    y unicamente, NUNCA inicia sesion."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._original_sqlite_path = web_app.CONFIG["SQLITE_PATH"]
+        web_app.CONFIG["SQLITE_PATH"] = _PRIVATE_DB_PATH_SIN_SESION
+        try:
+            web_app.init_db()
+        except Exception:
+            web_app.CONFIG["SQLITE_PATH"] = cls._original_sqlite_path
+            raise
+
+    @classmethod
+    def tearDownClass(cls):
+        web_app.CONFIG["SQLITE_PATH"] = cls._original_sqlite_path
+        try:
+            os.unlink(_PRIVATE_DB_PATH_SIN_SESION)
+        except OSError:
+            pass
+
+    def setUp(self):
+        self.client = web_app.app.test_client()
+        # Deliberadamente SIN self._login(): asi es como Neko Local
+        # habla con el backend en la vida real.
+
+    def _es_json_real(self, respuesta):
+        tipo = (respuesta.content_type or "").split(";")[0].strip()
+        return tipo == "application/json"
+
+    def test_status_responde_json_sin_sesion(self):
+        respuesta = self.client.get(
+            "/api/printing/status?roles=COCINA,RECIBO_MESA,RECIBO_PICKUP,RECIBO_DELIVERY"
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertTrue(self._es_json_real(respuesta), f"content_type={respuesta.content_type!r}")
+        datos = respuesta.get_json()
+        self.assertTrue(datos["ok"])
+
+    def test_status_sin_roles_tambien_responde_json_sin_sesion(self):
+        # El caso exacto que el usuario probo manualmente desde el
+        # navegador (sin query param roles).
+        respuesta = self.client.get("/api/printing/status")
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertTrue(self._es_json_real(respuesta))
+        self.assertEqual(respuesta.get_json(), {"ok": True, "pendientes": 0, "por_rol": {}})
+
+    def test_claim_responde_json_sin_sesion_no_redirige_a_login(self):
+        respuesta = self.client.post(
+            "/api/printing/claim", json={"station_id": "st1", "roles": ["COCINA"]}
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertTrue(self._es_json_real(respuesta))
+        self.assertNotIn("login", (respuesta.get_data(as_text=True) or "").lower())
+
+    def test_ack_responde_sin_sesion_no_redirige_a_login(self):
+        respuesta = self.client.post(
+            "/api/printing/1/ack", json={"station_id": "st1", "lease_token": "tok"}
+        )
+        # No existe el job (404), pero la clave es que responda JSON de
+        # verdad y no la pagina de login (que devolveria 200/302 con HTML).
+        self.assertTrue(self._es_json_real(respuesta), f"content_type={respuesta.content_type!r}")
+
+    def test_fail_responde_sin_sesion_no_redirige_a_login(self):
+        respuesta = self.client.post(
+            "/api/printing/1/fail", json={"station_id": "st1", "lease_token": "tok", "error": "x"}
+        )
+        self.assertTrue(self._es_json_real(respuesta), f"content_type={respuesta.content_type!r}")
+
+    def test_no_se_sigue_ninguna_redireccion_a_login(self):
+        # follow_redirects=False (default del test client): si antes de
+        # este fix la respuesta fuera un 302, esto lo detectaria
+        # inmediatamente en vez de seguirlo en silencio como `requests`.
+        respuesta = self.client.get("/api/printing/status")
+        self.assertNotEqual(respuesta.status_code, 302)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -291,6 +291,36 @@ class ResumenHumanoTest(unittest.TestCase):
         self.assertEqual(resumen["Bluetooth"], "Desconocido")
         self.assertEqual(resumen["POS58"], "Desconocido")
 
+    def test_caso_real_nekopos_conectado_pero_cola_sin_respuesta(self):
+        # Caso real de produccion: NekoPOS OK, POS58 lista, pero
+        # /api/printing/* devolvia la pagina de login (antes del fix a
+        # rutas_publicas). El resumen debe distinguir esto de un
+        # problema de Bluetooth/COM.
+        diagnostico = pd.construir_diagnostico(
+            candidatos=[], resultados=[], estado=pd.ESTADO_COLA_SIN_CONEXION,
+            nekopos_ok=True,
+            printing_api_estado=pd.print_queue_client.ESTADO_ERROR_BACKEND,
+            printing_api_detalle="content-type inesperado: text/html",
+        )
+
+        resumen = dict(pd.resumen_humano(diagnostico))
+
+        self.assertEqual(resumen["NekoPOS"], "Conectado")
+        self.assertEqual(resumen["Cola de impresión"], "No responde")
+
+    def test_sin_chequeo_de_printing_api_no_agrega_esas_lineas(self):
+        # Los flujos de diagnostico existentes (Bluetooth/COM) no pasan
+        # printing_api_estado: el resumen no debe inventar una fila para
+        # algo que nunca se comprobo.
+        diagnostico = pd.construir_diagnostico(
+            candidatos=[], resultados=[], estado=pd.ESTADO_SIN_CANDIDATOS,
+        )
+
+        resumen = dict(pd.resumen_humano(diagnostico))
+
+        self.assertNotIn("NekoPOS", resumen)
+        self.assertNotIn("Cola de impresión", resumen)
+
 
 class FormatearDiagnosticoTextoTest(unittest.TestCase):
     def test_incluye_datos_tecnicos_relevantes(self):
@@ -312,6 +342,20 @@ class FormatearDiagnosticoTextoTest(unittest.TestCase):
         self.assertIn("COM4", texto)
         self.assertIn("PAIRED_BUT_NO_WORKING_SERIAL_LINK", texto)
         self.assertIn("Windows-10", texto)
+
+    def test_incluye_printing_api_cuando_se_comprobo(self):
+        diagnostico = pd.construir_diagnostico(
+            candidatos=[], resultados=[], estado=pd.ESTADO_COLA_SIN_CONEXION,
+            nekopos_ok=True,
+            printing_api_estado=pd.print_queue_client.ESTADO_ERROR_BACKEND,
+            printing_api_detalle="content-type inesperado: text/html",
+        )
+
+        texto = pd.formatear_diagnostico_texto(diagnostico, "Neko Local 1.1.2", True)
+
+        self.assertIn("NekoPOS accesible: True", texto)
+        self.assertIn("ERROR_BACKEND", texto)
+        self.assertIn("text/html", texto)
 
     def test_no_incluye_credenciales_ni_secretos(self):
         diagnostico = pd.construir_diagnostico(candidatos=[], resultados=[], estado=pd.ESTADO_SIN_CANDIDATOS)
