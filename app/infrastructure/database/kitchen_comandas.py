@@ -7,6 +7,8 @@ from app.application.kitchen.comandas import (
     OrdenComandaSinItems,
     ResultadoComanda,
 )
+from app.domain.sales.print_queue import ROL_COCINA, TIPO_JOB_COMANDA
+from app.infrastructure.database.print_queue import crear_job_en_cursor
 
 
 class SqlKitchenComandaRepository:
@@ -96,13 +98,19 @@ class SqlKitchenComandaRepository:
         finally:
             conn.close()
 
-    def reimprimir_ultima_comanda_de_orden(self, orden_id, token):
+    def reimprimir_ultima_comanda_de_orden(self, orden_id, token, fecha):
+        """Marca la ultima comanda de la orden para reimpresion Y crea un
+        print_job NUEVO (event_key distinto, mismo evento nunca se
+        confunde con el original) en la MISMA transaccion. El job usa
+        el acumulado de items ya enviados (no solo el ultimo lote) y las
+        horas HISTORICAS originales de esa comanda, nunca la hora de la
+        reimpresion."""
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
             cursor.execute(
                 """
-                SELECT id
+                SELECT id, secuencia, fecha_creacion
                 FROM orden_comandas
                 WHERE orden_id=?
                 ORDER BY secuencia DESC, id DESC
@@ -112,14 +120,26 @@ class SqlKitchenComandaRepository:
             )
             row = cursor.fetchone()
             if row is None:
+                conn.rollback()
                 return False
+
+            comanda_id, secuencia, fecha_agregado = row
             cursor.execute(
                 """
                 UPDATE orden_comandas
                 SET reimpresion_token=?
                 WHERE id=?
                 """,
-                (token, row[0]),
+                (token, comanda_id),
+            )
+            _crear_print_job_reimpresion_en_cursor(
+                cursor,
+                orden_id=orden_id,
+                comanda_id=comanda_id,
+                secuencia=secuencia,
+                fecha_agregado=fecha_agregado,
+                token=token,
+                fecha_evento=fecha,
             )
             conn.commit()
             return True
@@ -129,10 +149,20 @@ class SqlKitchenComandaRepository:
         finally:
             conn.close()
 
-    def reimprimir_comanda(self, comanda_id, token):
+    def reimprimir_comanda(self, comanda_id, token, fecha):
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
+            cursor.execute(
+                "SELECT orden_id, secuencia, fecha_creacion FROM orden_comandas WHERE id=?",
+                (comanda_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            orden_id, secuencia, fecha_agregado = row
+
             cursor.execute(
                 """
                 UPDATE orden_comandas
@@ -142,8 +172,81 @@ class SqlKitchenComandaRepository:
                 (token, comanda_id),
             )
             afectadas = cursor.rowcount
+            if afectadas > 0:
+                _crear_print_job_reimpresion_en_cursor(
+                    cursor,
+                    orden_id=orden_id,
+                    comanda_id=comanda_id,
+                    secuencia=secuencia,
+                    fecha_agregado=fecha_agregado,
+                    token=token,
+                    fecha_evento=fecha,
+                )
             conn.commit()
             return afectadas > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def crear_reimpresion_legacy_job(self, orden_id, token, fecha):
+        """Caso legacy (mision seccion 1, listar_ordenes_legacy_cocina_sin_comanda):
+        una orden con reimpresion_token puesto directamente en `ordenes`
+        porque nunca tuvo fila en orden_comandas (de antes de que
+        existiera ese tracking). Usa TODOS los items de la orden (no hay
+        nocion de lotes) y, a falta de fecha_creacion historica de
+        comanda, usa `ordenes.fecha_hora` como mejor aproximacion
+        disponible de "cuando se envio" - documentado: es la unica
+        fecha que existe para este caso legacy."""
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT o.numero_orden, o.tipo, o.referencia, o.cliente,
+                       COALESCE(o.observacion, ''), o.estado, o.fecha_hora, u.nombre
+                FROM ordenes o
+                LEFT JOIN usuarios u ON o.usuario_id = u.id
+                WHERE o.id=?
+                LIMIT 1
+                """,
+                (orden_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            numero_orden, tipo, referencia, cliente, observacion, estado_orden, fecha_hora, usuario = row
+
+            items_crudos = _items_crudos_de_orden_completa(cursor, orden_id)
+            payload = {
+                "id": orden_id,
+                "comanda_id": None,
+                "numero": numero_orden,
+                "secuencia": 0,
+                "tipo": tipo,
+                "cliente": cliente,
+                "referencia": referencia,
+                "usuario": usuario,
+                "estado": estado_orden,
+                "estado_comanda": "legacy",
+                "observacion": observacion,
+                "reimpresion_token": token,
+                "items_crudos": items_crudos,
+                "hora_pedido": fecha_hora,
+                "hora_agregado": fecha_hora,
+            }
+            crear_job_en_cursor(
+                cursor,
+                event_key=f"{orden_id}-{token}",
+                job_type=TIPO_JOB_COMANDA,
+                required_role=ROL_COCINA,
+                payload=payload,
+                fecha=fecha,
+            )
+            conn.commit()
+            return True
         except Exception:
             conn.rollback()
             raise
@@ -338,9 +441,11 @@ def crear_comanda_en_cursor(
 
     cursor.execute(
         """
-        SELECT numero_orden
-        FROM ordenes
-        WHERE id=? AND cierre_id IS NULL
+        SELECT o.numero_orden, o.tipo, o.referencia, o.cliente,
+               COALESCE(o.observacion, ''), o.estado, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=? AND o.cierre_id IS NULL
         LIMIT 1
         """,
         (orden_id,),
@@ -348,8 +453,9 @@ def crear_comanda_en_cursor(
     row = cursor.fetchone()
     if row is None:
         raise OrdenComandaNoExiste("Orden no encontrada.")
+    numero_orden_actual, tipo, referencia, cliente, observacion, estado_orden, usuario_nombre = row
 
-    numero_orden = row[0] if row[0] is not None else numero_orden_reserva
+    numero_orden = numero_orden_actual if numero_orden_actual is not None else numero_orden_reserva
     cursor.execute(
         """
         UPDATE ordenes
@@ -390,12 +496,154 @@ def crear_comanda_en_cursor(
         )
 
     sincronizar_estado_orden_cursor(cursor, orden_id)
+
+    hora_pedido = fecha if secuencia == 0 else _hora_pedido_de_orden(cursor, orden_id)
+    payload = {
+        "id": orden_id,
+        "comanda_id": comanda_id,
+        "numero": int(numero_orden),
+        "secuencia": secuencia,
+        "tipo": tipo,
+        "cliente": cliente,
+        "referencia": referencia,
+        "usuario": usuario_nombre,
+        "estado": estado_orden,
+        "estado_comanda": ESTADO_COMANDA_EN_COCINA,
+        "observacion": observacion,
+        "reimpresion_token": None,
+        "items_crudos": _items_crudos_por_ids(cursor, orden_item_ids),
+        "hora_pedido": hora_pedido,
+        "hora_agregado": fecha,
+    }
+    crear_job_en_cursor(
+        cursor,
+        event_key=f"comanda-{comanda_id}-base",
+        job_type=TIPO_JOB_COMANDA,
+        required_role=ROL_COCINA,
+        payload=payload,
+        fecha=fecha,
+    )
+
     return ResultadoComanda(
         comanda_id=comanda_id,
         orden_id=orden_id,
         numero_orden=int(numero_orden),
         secuencia=secuencia,
         estado=ESTADO_COMANDA_EN_COCINA,
+    )
+
+
+def _hora_pedido_de_orden(cursor, orden_id):
+    cursor.execute(
+        """
+        SELECT fecha_creacion FROM orden_comandas
+        WHERE orden_id=? AND secuencia=0
+        LIMIT 1
+        """,
+        (orden_id,),
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def _items_crudos_por_ids(cursor, orden_item_ids):
+    """Items (producto, indicacion) CRUDOS -- sin agrupar/formatear -- en
+    el mismo orden que `orden_item_ids`. El formateo para el papel
+    (agrupar_items_comanda) se aplica luego, en el momento del claim,
+    en web_app.py (ver print_queue.py de infraestructura para el porque
+    no se hace aqui)."""
+    if not orden_item_ids:
+        return []
+    placeholders = ",".join("?" for _ in orden_item_ids)
+    cursor.execute(
+        f"""
+        SELECT id, producto, COALESCE(indicacion, '')
+        FROM orden_items
+        WHERE id IN ({placeholders})
+        """,
+        orden_item_ids,
+    )
+    filas = {row[0]: [row[1], row[2]] for row in cursor.fetchall()}
+    return [filas[item_id] for item_id in orden_item_ids if item_id in filas]
+
+
+def _items_crudos_acumulados_de_orden(cursor, orden_id):
+    cursor.execute(
+        """
+        SELECT oi.producto, COALESCE(oi.indicacion, '')
+        FROM orden_comanda_items ci
+        JOIN orden_comandas c ON c.id = ci.comanda_id
+        JOIN orden_items oi ON oi.id = ci.orden_item_id
+        WHERE c.orden_id=?
+        ORDER BY c.secuencia ASC, ci.id ASC
+        """,
+        (orden_id,),
+    )
+    return [[p, i] for p, i in cursor.fetchall()]
+
+
+def _items_crudos_de_orden_completa(cursor, orden_id):
+    cursor.execute(
+        """
+        SELECT producto, COALESCE(indicacion, '')
+        FROM orden_items
+        WHERE orden_id=?
+        ORDER BY id ASC
+        """,
+        (orden_id,),
+    )
+    return [[p, i] for p, i in cursor.fetchall()]
+
+
+def _crear_print_job_reimpresion_en_cursor(
+    cursor, *, orden_id, comanda_id, secuencia, fecha_agregado, token, fecha_evento
+):
+    """Job de reimpresion: mismo evento nunca se confunde con el
+    original (event_key distinto), usa el acumulado de items YA
+    enviados (no solo el ultimo lote, igual que el comportamiento actual
+    de /ordenes_cocina), y conserva las horas HISTORICAS de la comanda
+    original -- nunca la hora en que se pidio la reimpresion."""
+    cursor.execute(
+        """
+        SELECT o.numero_orden, o.tipo, o.referencia, o.cliente,
+               COALESCE(o.observacion, ''), o.estado, u.nombre
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=?
+        LIMIT 1
+        """,
+        (orden_id,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise OrdenComandaNoExiste("Orden no encontrada.")
+    numero_orden, tipo, referencia, cliente, observacion, estado_orden, usuario_nombre = row
+
+    hora_pedido = fecha_agregado if secuencia == 0 else _hora_pedido_de_orden(cursor, orden_id)
+    payload = {
+        "id": orden_id,
+        "comanda_id": comanda_id,
+        "numero": numero_orden,
+        "secuencia": secuencia,
+        "tipo": tipo,
+        "cliente": cliente,
+        "referencia": referencia,
+        "usuario": usuario_nombre,
+        "estado": estado_orden,
+        "estado_comanda": ESTADO_COMANDA_EN_COCINA,
+        "observacion": observacion,
+        "reimpresion_token": token,
+        "items_crudos": _items_crudos_acumulados_de_orden(cursor, orden_id),
+        "hora_pedido": hora_pedido,
+        "hora_agregado": fecha_agregado,
+    }
+    crear_job_en_cursor(
+        cursor,
+        event_key=f"comanda-{comanda_id}-{token}",
+        job_type=TIPO_JOB_COMANDA,
+        required_role=ROL_COCINA,
+        payload=payload,
+        fecha=fecha_evento,
     )
 
 

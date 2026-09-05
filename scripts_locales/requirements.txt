@@ -1,6 +1,7 @@
 pyserial==3.5
 Pillow>=10.0
 requests>=2.31
+pytz>=2024.1  # kitchen_ticket_times.py: America/Caracas para la hora impresa en comandas
 
 # NOTA: script_factura.py (Bloque B, facturas - todavia no integrado en
 # Neko Local) usa win32print y requiere ademas `pywin32`. No se agrega

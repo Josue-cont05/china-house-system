@@ -39,11 +39,13 @@ datas = [
     (str(SCRIPTS_LOCALES / "logo_neko_thermal.png"), "."),
 ]
 
-# script_comanda_cocina/script_factura se importan de forma DINAMICA
-# (dentro de neko_local.main(), solo cuando --kitchen-worker/
-# --receipt-worker) - el analisis estatico de PyInstaller no los detecta
-# solo; se declaran aqui explicitamente para que queden incluidos.
+# print_dispatcher/script_comanda_cocina/script_factura se importan de
+# forma DINAMICA (dentro de neko_local.main(), solo cuando
+# --print-dispatcher/--kitchen-worker/--receipt-worker) - el analisis
+# estatico de PyInstaller no los detecta solo; se declaran aqui
+# explicitamente para que queden incluidos.
 hiddenimports = [
+    "print_dispatcher",
     "script_comanda_cocina",
     "script_factura",
     "comanda_presentacion",
@@ -53,8 +55,12 @@ hiddenimports = [
     "neko_log",
     "neko_version",
     "port_detection",
+    "print_queue_client",
+    "station_roles",
     "printer_diagnostics",
     "windows_bluetooth",
+    "kitchen_ticket_times",
+    "pytz",
     "resource_paths",
     "single_instance",
     "launcher_core",

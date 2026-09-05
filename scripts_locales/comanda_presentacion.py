@@ -29,6 +29,7 @@ import winsound
 
 import resource_paths
 from bluetooth_printer import BluetoothPrinter, PrinterError, PrinterConnectionError
+from kitchen_ticket_times import encabezado_horas_comanda
 
 # Resuelto via resource_paths (source: junto a este archivo; frozen:
 # junto a NekoLocal.exe) - ver resource_paths.py para el porque.
@@ -250,6 +251,17 @@ def imprimir_comanda(orden, port, baudrate=9600):
 
         printer.feed(1)
         printer.align("left")
+
+        # 6. Hora historica de envio a cocina (HORA / PEDIDO+AGREGADO
+        # segun sea comanda inicial, incremental o reimpresion - ver
+        # kitchen_ticket_times.encabezado_horas_comanda). SIEMPRE la
+        # hora en que la orden entro a cocina, NUNCA la hora actual: si
+        # el papel sale minutos u horas despues (p. ej. tras un apagon),
+        # esta linea sigue mostrando la hora original.
+        for etiqueta, valor in encabezado_horas_comanda(
+            secuencia, reimpresion, orden.get("hora_pedido"), orden.get("hora_agregado")
+        ):
+            _imprimir_campo(printer, f"{etiqueta}:", valor)
 
         # 7. Datos normales (etiqueta en negrita; valor normal salvo casos
         # especiales: REF completa en negrita en DELIVERY, CLIENTE completo

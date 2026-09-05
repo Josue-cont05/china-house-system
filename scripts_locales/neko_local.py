@@ -73,15 +73,15 @@ import neko_config
 import neko_log
 import neko_version
 import port_detection
+import print_queue_client
 import printer_diagnostics
 import resource_paths
+import station_roles
 import windows_bluetooth
 from launcher_core import (
     GestorWorkerProceso,
-    MODO_FROZEN_COCINA,
-    MODO_FROZEN_FACTURA,
-    WORKER_COCINA_PATH,
-    WORKER_FACTURA_PATH,
+    MODO_FROZEN_DISPATCHER,
+    WORKER_DISPATCHER_PATH,
     nekopos_accesible,
     resolver_y_persistir_puerto,
 )
@@ -326,6 +326,83 @@ class AsistenteImpresora(tk.Toplevel):
         self.destroy()
 
 
+class EditorEstacion(tk.Toplevel):
+    """Nombre y perfil de esta estacion (mision "NEKO PRINTING 2.0",
+    seccion 73): el socio normal solo elige un perfil (Todo/Cocina/
+    Salón); los roles sueltos ("Personalizado") quedan como escape para
+    soporte tecnico, no para uso normal."""
+
+    def __init__(self, master, on_guardado=None):
+        super().__init__(master)
+        self.title("Estación y perfil")
+        self.resizable(False, False)
+        self._on_guardado = on_guardado
+
+        config = neko_config.asegurar_identidad_estacion()
+
+        marco = ttk.Frame(self, padding=14)
+        marco.pack()
+
+        ttk.Label(marco, text="Nombre de esta estación:").pack(anchor="w")
+        self._var_nombre = tk.StringVar(value=config.get("station_name") or "")
+        ttk.Entry(marco, textvariable=self._var_nombre, width=32).pack(anchor="w", pady=(2, 10))
+
+        ttk.Label(marco, text="Perfil:").pack(anchor="w")
+        self._var_perfil = tk.StringVar(value=config.get("profile") or station_roles.PERFIL_TODO)
+        for perfil in (
+            station_roles.PERFIL_TODO,
+            station_roles.PERFIL_COCINA,
+            station_roles.PERFIL_SALON,
+            station_roles.PERFIL_PERSONALIZADO,
+        ):
+            ttk.Radiobutton(
+                marco, text=station_roles.ETIQUETAS_PERFIL[perfil], value=perfil,
+                variable=self._var_perfil, command=self._actualizar_checkboxes,
+            ).pack(anchor="w")
+
+        self._marco_roles = ttk.Frame(marco, padding=(18, 4, 0, 0))
+        self._marco_roles.pack(anchor="w", fill="x")
+        self._vars_roles = {}
+        roles_actuales = set(config.get("roles") or ())
+        for rol in (
+            station_roles.ROL_COCINA,
+            station_roles.ROL_RECIBO_MESA,
+            station_roles.ROL_RECIBO_PICKUP,
+            station_roles.ROL_RECIBO_DELIVERY,
+        ):
+            var = tk.BooleanVar(value=rol in roles_actuales)
+            ttk.Checkbutton(self._marco_roles, text=rol, variable=var).pack(anchor="w")
+            self._vars_roles[rol] = var
+
+        ttk.Button(marco, text="Guardar", command=self._guardar).pack(fill="x", pady=(12, 0))
+        self._actualizar_checkboxes()
+
+    def _actualizar_checkboxes(self):
+        estado = "normal" if self._var_perfil.get() == station_roles.PERFIL_PERSONALIZADO else "disabled"
+        for hijo in self._marco_roles.winfo_children():
+            hijo.configure(state=estado)
+
+    def _guardar(self):
+        perfil = self._var_perfil.get()
+        roles_personalizados = [rol for rol, var in self._vars_roles.items() if var.get()]
+        try:
+            roles = station_roles.roles_por_perfil(perfil, roles_personalizados)
+            roles = station_roles.roles_validos(roles)
+        except ValueError as e:
+            messagebox.showerror("Neko Local", f"No se pudo guardar: {e}")
+            return
+
+        config = neko_config.cargar_config()
+        config["station_name"] = self._var_nombre.get().strip() or neko_config.DEFAULT_STATION_NAME
+        config["profile"] = perfil
+        config["roles"] = list(roles)
+        neko_config.guardar_config(config)
+
+        if self._on_guardado:
+            self._on_guardado(config)
+        self.destroy()
+
+
 class NekoLocalApp:
     def __init__(self):
         self.root = tk.Tk()
@@ -333,12 +410,11 @@ class NekoLocalApp:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._al_cerrar)
 
-        self.gestor_cocina = GestorWorkerProceso(
-            worker_path=WORKER_COCINA_PATH, modo_frozen=MODO_FROZEN_COCINA
+        self.gestor_dispatcher = GestorWorkerProceso(
+            worker_path=WORKER_DISPATCHER_PATH, modo_frozen=MODO_FROZEN_DISPATCHER
         )
-        self.gestor_recibos = GestorWorkerProceso(
-            worker_path=WORKER_FACTURA_PATH, modo_frozen=MODO_FROZEN_FACTURA
-        )
+
+        neko_config.asegurar_identidad_estacion()
 
         log.info(
             "%s iniciado (frozen=%s)", neko_version.version_texto(), resource_paths.es_frozen()
@@ -356,20 +432,29 @@ class NekoLocalApp:
         self._var_nekopos = tk.StringVar(value="Verificando...")
         self._var_impresora = tk.StringVar(value="Verificando...")
         self._var_puerto = tk.StringVar(value="-")
-        self._var_cocina = tk.StringVar(value="Detenida")
-        self._var_recibos = tk.StringVar(value="Detenidos")
+        self._var_estacion = tk.StringVar(value="-")
+        self._var_perfil = tk.StringVar(value="-")
+        self._var_cola = tk.StringVar(value="-")
+        self._var_impresion = tk.StringVar(value="Detenida")
 
         for etiqueta, var in (
             ("NekoPOS", self._var_nekopos),
-            ("Impresora", self._var_impresora),
+            ("POS58", self._var_impresora),
             ("Puerto", self._var_puerto),
-            ("Cocina", self._var_cocina),
-            ("Recibos", self._var_recibos),
+            ("Estación", self._var_estacion),
+            ("Perfil", self._var_perfil),
+            ("Cola", self._var_cola),
+            ("Impresión", self._var_impresion),
         ):
             fila = ttk.Frame(marco)
             fila.pack(fill="x", pady=2)
             ttk.Label(fila, text=etiqueta, width=12).pack(side="left")
             ttk.Label(fila, textvariable=var).pack(side="left")
+
+        self._var_nota = tk.StringVar(value="")
+        ttk.Label(marco, textvariable=self._var_nota, foreground="#6b7280", wraplength=340, justify="left").pack(
+            fill="x", pady=(4, 0)
+        )
 
         botones = ttk.Frame(marco)
         botones.pack(fill="x", pady=(12, 0))
@@ -387,6 +472,9 @@ class NekoLocalApp:
             command=self._solucionar_problemas,
         ).pack(fill="x", pady=2)
         ttk.Button(
+            botones, text="Estación y perfil", command=self._abrir_editor_estacion
+        ).pack(fill="x", pady=2)
+        ttk.Button(
             botones, text="Configuración avanzada", command=self._abrir_asistente
         ).pack(fill="x", pady=2)
         ttk.Button(botones, text="ABRIR NEKOPOS", command=self._abrir_nekopos).pack(
@@ -396,6 +484,9 @@ class NekoLocalApp:
     # ------------------------------------------------------------------
     def _abrir_asistente(self):
         AsistenteImpresora(self.root, on_guardado=lambda config: self._actualizar_estados())
+
+    def _abrir_editor_estacion(self):
+        EditorEstacion(self.root, on_guardado=lambda config: self._actualizar_estados())
 
     def _configurar_automaticamente(self):
         """Flujo prioritario: el socio NO elige COM. Comparte el mismo
@@ -660,30 +751,32 @@ class NekoLocalApp:
             self._solucionar_problemas()
             return
 
-        if not self.gestor_cocina.activo:
-            self.gestor_cocina.iniciar(resultado.port)
-            log.info("Worker de cocina iniciado (puerto=%s)", resultado.port)
-        if not self.gestor_recibos.activo:
-            self.gestor_recibos.iniciar(resultado.port)
-            log.info("Worker de recibos iniciado (puerto=%s)", resultado.port)
+        if not self.gestor_dispatcher.activo:
+            self.gestor_dispatcher.iniciar(resultado.port)
+            log.info("Dispatcher de impresion iniciado (puerto=%s)", resultado.port)
 
         self._abrir_nekopos()
         self._actualizar_estados()
 
     def _detener(self):
-        self.gestor_cocina.detener()
-        self.gestor_recibos.detener()
+        self.gestor_dispatcher.detener()
         self._actualizar_estados()
 
     # ------------------------------------------------------------------
     def _actualizar_estados(self):
-        config = neko_config.cargar_config()
+        config = neko_config.asegurar_identidad_estacion()
 
+        self._var_estacion.set(config.get("station_name") or "-")
+        perfil = config.get("profile") or station_roles.PERFIL_TODO
+        self._var_perfil.set(station_roles.ETIQUETAS_PERFIL.get(perfil, perfil))
+
+        impresora_lista = False
         if neko_config.tiene_impresora_configurada(config):
             resultado = resolver_y_persistir_puerto(config)
             if resultado.status in ("ok", "rematched"):
-                self._var_impresora.set("configurada")
+                self._var_impresora.set("Lista")
                 self._var_puerto.set(resultado.port)
+                impresora_lista = True
             elif resultado.status == "ambiguous":
                 self._var_impresora.set("necesita atención (varios puertos posibles)")
                 self._var_puerto.set("-")
@@ -691,14 +784,36 @@ class NekoLocalApp:
                 self._var_impresora.set("necesita atención")
                 self._var_puerto.set("-")
         else:
-            self._var_impresora.set("necesita configuracion")
+            self._var_impresora.set("No disponible")
             self._var_puerto.set("-")
 
-        self._var_cocina.set("activa" if self.gestor_cocina.activo else "detenida")
-        self._var_recibos.set("activos" if self.gestor_recibos.activo else "detenidos")
+        self._var_impresion.set("Activa" if self.gestor_dispatcher.activo else "Detenida")
+
+        if impresora_lista:
+            self._var_nota.set("")
+        else:
+            self._var_nota.set(
+                "Los trabajos permanecerán guardados en NekoPOS y se imprimirán "
+                "cuando vuelva la impresora."
+            )
+
+        self._var_cola.set("-")
+        try:
+            roles = station_roles.roles_validos(config.get("roles"))
+        except ValueError:
+            roles = ()
+        if roles:
+            self.root.after(0, lambda: self._consultar_cola_async(roles))
 
         self._var_nekopos.set("verificando...")
         self.root.after(0, self._verificar_nekopos_async)
+
+    def _consultar_cola_async(self, roles):
+        estado = print_queue_client.consultar_status(roles)
+        if estado is None:
+            self._var_cola.set("sin conexión")
+        else:
+            self._var_cola.set(f"{estado['pendientes']} pendientes")
 
     def _verificar_nekopos_async(self):
         accesible = nekopos_accesible()
@@ -713,21 +828,20 @@ class NekoLocalApp:
 
     # ------------------------------------------------------------------
     def _al_cerrar(self):
-        if not self.gestor_cocina.activo and not self.gestor_recibos.activo:
+        if not self.gestor_dispatcher.activo:
             self.root.destroy()
             return
 
         respuesta = messagebox.askyesnocancel(
             "Neko Local",
-            "Cocina y/o recibos siguen activos. ¿Quieres mantenerlos imprimiendo y "
-            "solo cerrar esta ventana?\n\nSi - mantener activos\n"
-            "No - detener todo y cerrar\nCancelar - no cerrar",
+            "La impresión sigue activa. ¿Quieres mantenerla e imprimiendo y "
+            "solo cerrar esta ventana?\n\nSi - mantener activa\n"
+            "No - detener y cerrar\nCancelar - no cerrar",
         )
         if respuesta is None:
             return
         if not respuesta:
-            self.gestor_cocina.detener()
-            self.gestor_recibos.detener()
+            self.gestor_dispatcher.detener()
         self.root.destroy()
 
     def run(self):
@@ -747,17 +861,22 @@ def _construir_parser():
         help="Muestra version/rutas/config (sin secretos) y termina. No toca hardware.",
     )
     parser.add_argument(
+        "--print-dispatcher",
+        action="store_true",
+        help="Modo interno: dispatcher unificado de impresion (lo usa Neko Local, no es para uso manual).",
+    )
+    parser.add_argument(
         "--kitchen-worker",
         action="store_true",
-        help="Modo interno: actua como worker de cocina (lo usa Neko Local, no es para uso manual).",
+        help="Modo interno LEGACY: worker de cocina por separado (solo diagnostico manual con --port).",
     )
     parser.add_argument(
         "--receipt-worker",
         action="store_true",
-        help="Modo interno: actua como worker de recibos (lo usa Neko Local, no es para uso manual).",
+        help="Modo interno LEGACY: worker de recibos por separado (solo diagnostico manual con --port).",
     )
     parser.add_argument(
-        "--port", default=None, help="Override manual de puerto para --kitchen-worker/--receipt-worker."
+        "--port", default=None, help="Override manual de puerto para --print-dispatcher/--kitchen-worker/--receipt-worker."
     )
     return parser
 
@@ -773,6 +892,9 @@ def _mostrar_diagnostics():
     print(f"impresora configurada: {neko_config.tiene_impresora_configurada(config)}")
     if config.get("printer_port"):
         print(f"puerto guardado: {config.get('printer_port')}")
+    print(f"estacion: {config.get('station_name') or '(sin asignar todavia)'}")
+    print(f"perfil: {config.get('profile') or '(sin asignar todavia)'}")
+    print(f"roles: {config.get('roles') or '(sin asignar todavia)'}")
 
 
 def main(argv=None):
@@ -785,6 +907,11 @@ def main(argv=None):
     if args.diagnostics:
         _mostrar_diagnostics()
         return 0
+
+    if args.print_dispatcher:
+        import print_dispatcher
+
+        return print_dispatcher.main(["--port", args.port] if args.port else [])
 
     if args.kitchen_worker:
         import script_comanda_cocina

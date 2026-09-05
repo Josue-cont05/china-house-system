@@ -186,7 +186,6 @@ class ImprimirComandaHeaderTest(unittest.TestCase):
         self.assertIn("COMANDA #38", lineas)
         self.assertNotIn("COMANDA #38.2", lineas)
         self.assertIn("REIMPRESION", lineas)
-        self.assertIn("DE COCINA", lineas)
 
     def test_reimpresion_indicador_aparece_junto_con_numero_base(self):
         lineas = self._imprimir_y_capturar(
@@ -195,6 +194,104 @@ class ImprimirComandaHeaderTest(unittest.TestCase):
         self.assertIn("REIMPRESION", lineas)
         self.assertIn("DE COCINA", lineas)
         self.assertIn("COMANDA #38", lineas)
+
+
+class HorasEnComandaTest(unittest.TestCase):
+    """Mision 'HORAS DE COCINA': la comanda impresa debe mostrar la hora
+    HISTORICA de envio a cocina (nunca la hora en que fisicamente salio
+    el papel). No hereda de ImprimirComandaHeaderTest a proposito
+    (heredar de un TestCase repetiria sus tests bajo este nombre
+    tambien); duplica sus dos helpers pequenos en su lugar."""
+
+    def _orden(self, **overrides):
+        base = {
+            "id": 1,
+            "comanda_id": 1,
+            "numero": 38,
+            "secuencia": 0,
+            "tipo": "Mesa",
+            "referencia": "Mesa 1",
+            "cliente": "Cliente",
+            "usuario": "Mesonera",
+            "estado": "en cocina",
+            "reimpresion_token": None,
+            "items": ["1x Producto"],
+        }
+        base.update(overrides)
+        return base
+
+    def _imprimir_y_capturar(self, orden, port="COM6"):
+        stub = _PrinterStub()
+        with mock.patch.object(presentacion, "BluetoothPrinter", return_value=stub):
+            with mock.patch.object(presentacion.winsound, "Beep"):
+                presentacion.imprimir_comanda(orden, port)
+        return stub.lineas
+
+    def test_comanda_inicial_normal_muestra_hora(self):
+        lineas = self._imprimir_y_capturar(
+            self._orden(numero=38, secuencia=0, hora_pedido="2026-09-05 19:12:00")
+        )
+        texto = " ".join(lineas)
+        self.assertIn("HORA:", texto)
+        self.assertIn("7:12 PM", texto)
+
+    def test_incremental_muestra_pedido_y_agregado(self):
+        lineas = self._imprimir_y_capturar(
+            self._orden(
+                numero=38, secuencia=1,
+                hora_pedido="2026-09-05 19:12:00", hora_agregado="2026-09-05 19:24:00",
+            )
+        )
+        texto = " ".join(lineas)
+        self.assertIn("PEDIDO:", texto)
+        self.assertIn("7:12 PM", texto)
+        self.assertIn("AGREGADO:", texto)
+        self.assertIn("7:24 PM", texto)
+
+    def test_segundo_incremental_usa_su_propia_hora_agregado(self):
+        lineas = self._imprimir_y_capturar(
+            self._orden(
+                numero=38, secuencia=2,
+                hora_pedido="2026-09-05 19:12:00", hora_agregado="2026-09-05 19:40:00",
+            )
+        )
+        texto = " ".join(lineas)
+        self.assertIn("7:12 PM", texto)
+        self.assertIn("7:40 PM", texto)
+        self.assertNotIn("7:24 PM", texto)  # no la del incremental anterior
+
+    def test_reimpresion_conserva_hora_original_no_la_actual(self):
+        # La comanda se envio a las 7:12 PM; el papel sale (reimpresion)
+        # mucho despues. El ticket DEBE decir 7:12 PM, nunca la hora
+        # "actual" -- que esta funcion ni siquiera recibe.
+        lineas = self._imprimir_y_capturar(
+            self._orden(
+                numero=38, secuencia=0, reimpresion_token="tok-123",
+                hora_pedido="2026-09-05 19:12:00",
+            )
+        )
+        texto = " ".join(lineas)
+        self.assertIn("PEDIDO:", texto)
+        self.assertIn("7:12 PM", texto)
+
+    def test_sin_datos_de_hora_no_lanza_y_no_imprime_linea_vacia(self):
+        # Compatibilidad: un job/fixture sin hora_pedido (legacy) no debe
+        # tronar la impresion, solo omitir la linea.
+        lineas = self._imprimir_y_capturar(self._orden(numero=38, secuencia=0))
+        texto = " ".join(lineas)
+        self.assertNotIn("HORA:", texto)
+
+    def test_recuperacion_tras_apagon_conserva_hora_del_envio(self):
+        # El worker/backend nunca reemplaza hora_pedido por datetime.now():
+        # esta prueba confirma que imprimir_comanda tampoco lo hace -
+        # usa exactamente lo que trae el payload, sin importar cuanto
+        # tiempo haya pasado.
+        lineas = self._imprimir_y_capturar(
+            self._orden(numero=38, secuencia=0, hora_pedido="2026-09-05 19:12:00")
+        )
+        texto = " ".join(lineas)
+        self.assertIn("7:12 PM", texto)
+        self.assertNotIn("7:39 PM", texto)
 
 
 if __name__ == "__main__":

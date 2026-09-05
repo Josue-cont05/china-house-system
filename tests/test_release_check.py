@@ -53,6 +53,7 @@ class ArchivoProhibidoTest(unittest.TestCase):
     def test_dedup_real_prohibido(self):
         self.assertTrue(release_check.archivo_prohibido("comandas_impresas.txt"))
         self.assertTrue(release_check.archivo_prohibido("facturas_impresas.txt"))
+        self.assertTrue(release_check.archivo_prohibido("pendientes_ack.txt"))
 
     def test_tasa_cache_prohibido(self):
         self.assertTrue(release_check.archivo_prohibido("tasa_cache.txt"))

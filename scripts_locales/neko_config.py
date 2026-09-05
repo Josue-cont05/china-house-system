@@ -23,7 +23,10 @@ Bloque de facturas, no se toca en este bloque).
 import json
 import os
 import shutil
+import uuid
 from pathlib import Path
+
+import station_roles
 
 NEKOPOS_BASE_URL = "https://neko-wok-system.onrender.com"
 
@@ -31,6 +34,12 @@ _APP_DIR_NAME = "NekoWok"
 _CONFIG_FILE_NAME = "config.json"
 
 DEFAULT_BAUDRATE = 9600
+
+# Instalacion actual: una sola POS58 hace de todo (mision "NEKO PRINTING
+# 2.0", seccion 8). Cuando llegue una segunda impresora para el salon,
+# esto se cambia por CONFIGURACION, nunca por codigo (seccion 48).
+DEFAULT_STATION_NAME = "Cocina Principal"
+DEFAULT_PROFILE = station_roles.PERFIL_TODO
 
 
 def config_dir():
@@ -64,6 +73,14 @@ def _config_por_defecto():
         "printer_port": None,
         "baudrate": DEFAULT_BAUDRATE,
         "printer_fingerprint": None,
+        # Identidad de estacion (mision "NEKO PRINTING 2.0"): None hasta
+        # que asegurar_identidad_estacion() la genere y persista una
+        # sola vez. Nunca None despues de la primera vez que arranca
+        # Neko Local -- ver ese comentario para el porque.
+        "station_id": None,
+        "station_name": None,
+        "profile": None,
+        "roles": None,
     }
 
 
@@ -112,6 +129,44 @@ def guardar_config(config):
 
 def tiene_impresora_configurada(config):
     return bool(config.get("printer_port")) and bool(config.get("printer_fingerprint"))
+
+
+def asegurar_identidad_estacion(config=None):
+    """Asegura que la config tenga station_id/station_name/profile/roles,
+    migrando instalaciones existentes automaticamente (mision "NEKO
+    PRINTING 2.0", seccion 46): station_name="Cocina Principal",
+    profile="TODO", roles=los 4 -- sin pedir nada al usuario.
+
+    station_id es un UUID generado UNA SOLA VEZ y persistido de
+    inmediato: nunca cambia al actualizar Neko Local, y nunca se basa en
+    COM/hostname/IP (esos SI pueden cambiar; la identidad de la
+    estacion no debe). Idempotente: si ya existe todo, no reescribe
+    nada ni toca printer_port/printer_fingerprint ya configurados.
+
+    Devuelve la config (ya con identidad asegurada). No la vuelve a
+    cargar del disco si se le paso `config` explicitamente, para que el
+    llamador pueda encadenar otros cambios sobre el mismo dict antes de
+    guardar una sola vez si asi lo prefiere.
+    """
+    config = cargar_config() if config is None else dict(config)
+    cambio = False
+
+    if not config.get("station_id"):
+        config["station_id"] = uuid.uuid4().hex
+        cambio = True
+    if not config.get("station_name"):
+        config["station_name"] = DEFAULT_STATION_NAME
+        cambio = True
+    if not config.get("profile"):
+        config["profile"] = DEFAULT_PROFILE
+        cambio = True
+    if not config.get("roles"):
+        config["roles"] = list(station_roles.roles_por_perfil(config["profile"]))
+        cambio = True
+
+    if cambio:
+        guardar_config(config)
+    return config
 
 
 def _leer_eventos(ruta):

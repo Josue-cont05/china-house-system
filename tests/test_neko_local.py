@@ -18,6 +18,7 @@ SCRIPTS_LOCALES_DIR = Path(__file__).resolve().parent.parent / "scripts_locales"
 if str(SCRIPTS_LOCALES_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_LOCALES_DIR))
 
+import launcher_core  # noqa: E402
 import neko_local  # noqa: E402
 import neko_version  # noqa: E402
 import printer_diagnostics  # noqa: E402
@@ -73,6 +74,27 @@ class VersionYAyudaTest(unittest.TestCase):
 
 
 class DespachoWorkerTest(unittest.TestCase):
+    def test_print_dispatcher_delega_en_print_dispatcher(self):
+        modulo_falso = mock.Mock()
+        modulo_falso.main.return_value = 0
+
+        with mock.patch.dict(sys.modules, {"print_dispatcher": modulo_falso}):
+            with mock.patch.object(neko_local, "NekoLocalApp") as MockApp:
+                resultado = neko_local.main(["--print-dispatcher"])
+
+        MockApp.assert_not_called()
+        modulo_falso.main.assert_called_once_with([])
+        self.assertEqual(resultado, 0)
+
+    def test_print_dispatcher_reenvia_override_de_puerto(self):
+        modulo_falso = mock.Mock()
+        modulo_falso.main.return_value = 0
+
+        with mock.patch.dict(sys.modules, {"print_dispatcher": modulo_falso}):
+            neko_local.main(["--print-dispatcher", "--port", "COM9"])
+
+        modulo_falso.main.assert_called_once_with(["--port", "COM9"])
+
     def test_kitchen_worker_delega_en_script_comanda_cocina(self):
         modulo_falso = mock.Mock()
         modulo_falso.main.return_value = 0
@@ -116,19 +138,25 @@ class DespachoWorkerTest(unittest.TestCase):
         modulo_falso.main.assert_called_once_with(["--port", "COM9"])
 
 
-class GuiConAmbosWorkersTest(unittest.TestCase):
-    """La app arranca con los dos GestorWorkerProceso ya configurados con
-    su modo_frozen correcto, sin necesitar abrir Tkinter de verdad para
-    inspeccionarlo (se construye la app real: Tk se crea igual que en
-    los tests existentes de neko_local en la mision anterior)."""
+class GuiConDispatcherUnificadoTest(unittest.TestCase):
+    """La app arranca con UN solo GestorWorkerProceso para el dispatcher
+    unificado (mision "NEKO PRINTING 2.0", seccion 29: una sola tuberia
+    fisica hacia la POS58, nunca dos procesos escribiendole al mismo
+    tiempo), sin necesitar abrir Tkinter de verdad para inspeccionarlo."""
 
-    def test_gestores_tienen_worker_path_y_modo_frozen_distintos(self):
+    def test_gestor_dispatcher_tiene_worker_path_y_modo_frozen_correctos(self):
         app = neko_local.NekoLocalApp()
         try:
-            self.assertNotEqual(app.gestor_cocina.worker_path, app.gestor_recibos.worker_path)
-            self.assertNotEqual(app.gestor_cocina.modo_frozen, app.gestor_recibos.modo_frozen)
-            self.assertEqual(app.gestor_cocina.modo_frozen, neko_local.MODO_FROZEN_COCINA)
-            self.assertEqual(app.gestor_recibos.modo_frozen, neko_local.MODO_FROZEN_FACTURA)
+            self.assertEqual(app.gestor_dispatcher.worker_path, launcher_core.WORKER_DISPATCHER_PATH)
+            self.assertEqual(app.gestor_dispatcher.modo_frozen, launcher_core.MODO_FROZEN_DISPATCHER)
+        finally:
+            app.root.destroy()
+
+    def test_no_existen_gestores_separados_de_cocina_y_recibos(self):
+        app = neko_local.NekoLocalApp()
+        try:
+            self.assertFalse(hasattr(app, "gestor_cocina"))
+            self.assertFalse(hasattr(app, "gestor_recibos"))
         finally:
             app.root.destroy()
 

@@ -213,5 +213,93 @@ class MigrarDedupLegacyTest(unittest.TestCase):
         self.assertEqual(self._eventos(resultado), {"1-base"})
 
 
+class IdentidadEstacionTest(unittest.TestCase):
+    """Mision 'NEKO PRINTING 2.0': migracion automatica a station_id/
+    station_name/profile/roles para instalaciones existentes. No hereda
+    de NekoConfigTest a proposito (heredar de un TestCase con muchos
+    test_* repetiria todos esos tests bajo este nombre tambien)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._patch = mock.patch.object(
+            neko_config, "config_dir", return_value=Path(self._tmpdir.name) / "NekoWok"
+        )
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmpdir.cleanup()
+
+    def test_instalacion_nueva_genera_station_id_y_lo_persiste(self):
+        config = neko_config.asegurar_identidad_estacion()
+
+        self.assertTrue(config["station_id"])
+        recargada = neko_config.cargar_config()
+        self.assertEqual(recargada["station_id"], config["station_id"])
+
+    def test_migra_a_perfil_todo_y_los_cuatro_roles_por_defecto(self):
+        config = neko_config.asegurar_identidad_estacion()
+
+        self.assertEqual(config["station_name"], "Cocina Principal")
+        self.assertEqual(config["profile"], "TODO")
+        self.assertEqual(
+            set(config["roles"]), {"COCINA", "RECIBO_MESA", "RECIBO_PICKUP", "RECIBO_DELIVERY"}
+        )
+
+    def test_es_idempotente_no_cambia_el_station_id_en_llamadas_repetidas(self):
+        primera = neko_config.asegurar_identidad_estacion()
+        segunda = neko_config.asegurar_identidad_estacion()
+
+        self.assertEqual(primera["station_id"], segunda["station_id"])
+
+    def test_no_pisa_station_name_ni_profile_ya_configurados(self):
+        config = neko_config.cargar_config()
+        config["station_name"] = "Salón"
+        config["profile"] = "SALON"
+        config["roles"] = ["RECIBO_MESA"]
+        neko_config.guardar_config(config)
+
+        resultado = neko_config.asegurar_identidad_estacion()
+
+        self.assertEqual(resultado["station_name"], "Salón")
+        self.assertEqual(resultado["profile"], "SALON")
+        self.assertEqual(resultado["roles"], ["RECIBO_MESA"])
+
+    def test_no_pisa_printer_port_ni_fingerprint_ya_configurados(self):
+        config = neko_config.cargar_config()
+        config["printer_port"] = "COM6"
+        config["printer_fingerprint"] = {"hwid": "BTHENUM\\X"}
+        neko_config.guardar_config(config)
+
+        resultado = neko_config.asegurar_identidad_estacion()
+
+        self.assertEqual(resultado["printer_port"], "COM6")
+        self.assertEqual(resultado["printer_fingerprint"], {"hwid": "BTHENUM\\X"})
+
+    def test_migracion_existente_sin_station_id_conserva_impresora(self):
+        # Simula una instalacion YA EXISTENTE (config de antes de esta
+        # mision): tiene impresora configurada pero ningun campo de
+        # estacion todavia.
+        config_vieja = {
+            "printer_port": "COM8",
+            "baudrate": 9600,
+            "printer_fingerprint": {"hwid": "BTHENUM\\Y"},
+        }
+        neko_config.guardar_config(config_vieja)
+
+        migrada = neko_config.asegurar_identidad_estacion()
+
+        self.assertEqual(migrada["printer_port"], "COM8")
+        self.assertTrue(migrada["station_id"])
+        self.assertEqual(migrada["profile"], "TODO")
+
+    def test_station_id_no_se_parece_a_com_hostname_ni_ip(self):
+        config = neko_config.asegurar_identidad_estacion()
+        # No es exhaustivo, pero al menos confirma que es un UUID hex
+        # (32 caracteres hex), no algo derivado de COM/hostname/IP.
+        self.assertEqual(len(config["station_id"]), 32)
+        int(config["station_id"], 16)  # no lanza si es hex valido
+
+
 if __name__ == "__main__":
     unittest.main()

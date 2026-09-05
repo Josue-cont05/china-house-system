@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import uuid
 import zipfile
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -85,12 +86,35 @@ from app.application.kitchen.comandas import (
     texto_numero_comanda,
 )
 from app.infrastructure.database.kitchen_comandas import SqlKitchenComandaRepository
+from app.domain.sales.print_queue import (
+    ROL_COCINA,
+    TIPO_JOB_RECIBO,
+    TipoOrdenDesconocido,
+    rol_recibo_por_tipo_orden,
+    roles_validos,
+)
+from app.infrastructure.database.print_queue import (
+    RESULTADO_LEASE_INVALIDO,
+    RESULTADO_NO_ENCONTRADO,
+    RESULTADO_OK,
+    RESULTADO_OK_IDEMPOTENTE,
+    SqlPrintQueueRepository,
+    crear_job_en_cursor,
+    crear_tabla_print_jobs,
+)
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
+
+# Cola central de impresion (mision "NEKO PRINTING 2.0"): cuanto dura un
+# lease antes de que un job LEASED vuelva a quedar elegible si la
+# estacion que lo reclamo nunca confirma (ACK) ni falla explicitamente
+# (p. ej. se apago a media impresion). Generoso a proposito: mejor un
+# job tardio que uno duplicado por un lease demasiado corto.
+PRINT_QUEUE_LEASE_TTL_SEG = 90
 
 ORDEN_CATEGORIAS_POS = [
     "Neko Combos",
@@ -3593,6 +3617,7 @@ def init_db():
     crear_tablas_cuentas_por_cobrar()
     crear_tablas_delivery()
     crear_tablas_comandas()
+    crear_tabla_print_jobs(get_connection, pk_autoincrement_sql)
     crear_tablas_self_ordering()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
@@ -8246,8 +8271,10 @@ def reimprimir_cocina(orden_id):
     conn.commit()
     conn.close()
 
+    fecha_evento = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
     repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
-    if not repository.reimprimir_ultima_comanda_de_orden(orden_id, reimpresion_token):
+    if not repository.reimprimir_ultima_comanda_de_orden(orden_id, reimpresion_token, fecha_evento):
+        repository.crear_reimpresion_legacy_job(orden_id, reimpresion_token, fecha_evento)
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -8270,7 +8297,8 @@ def reimprimir_comanda(comanda_id):
 
     repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
     reimpresion_token = ahora_venezuela().strftime("%Y%m%d%H%M%S%f")
-    if not repository.reimprimir_comanda(comanda_id, reimpresion_token):
+    fecha_evento = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    if not repository.reimprimir_comanda(comanda_id, reimpresion_token, fecha_evento):
         return "Comanda no encontrada", 404
     return redirect("/cocina")
 
@@ -10951,6 +10979,97 @@ def facturas_pendientes():
         return jsonify([])
 
 
+def _crear_print_job_recibo(cursor, orden_id, token, fecha_evento):
+    """Snapshot inmutable del recibo (mismo contrato que /facturas_pendientes,
+    construido con la MISMA autoridad financiera -- construir_recibo_provisional/
+    construir_recibo_cobrado, nunca recalculado aparte) guardado como
+    payload de un print_job nuevo. `token` es None para la activacion
+    normal (evento "base") o el token de una reimpresion explicita (evento
+    distinto, mision seccion 43: nunca se confunde con el original).
+
+    Si el tipo de orden no es uno de los 3 conocidos (Mesa/Delivery/Para
+    llevar), NO se crea el job (se loguea y se deja constancia): mejor no
+    enrutar un recibo a un rol adivinado que enrutarlo mal. El polling
+    legacy de /facturas_pendientes sigue funcionando como red de
+    seguridad mientras tanto.
+    """
+    cursor.execute(
+        """
+        SELECT o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
+               o.fecha_hora, o.fecha_cobro, o.tasa_cobro, o.subtotal_usd,
+               o.descuento_bs_snapshot, o.total_usd, o.total_bs,
+               o.venta_restaurante_usd, o.delivery_usd, o.total_cliente_usd,
+               o.total_cliente_bs, o.descuento
+        FROM ordenes o
+        LEFT JOIN usuarios u ON o.usuario_id = u.id
+        WHERE o.id=?
+        LIMIT 1
+        """,
+        (orden_id,),
+    )
+    o = cursor.fetchone()
+    if o is None:
+        return False
+
+    try:
+        rol = rol_recibo_por_tipo_orden(o[1])
+    except TipoOrdenDesconocido as e:
+        print(f"ADVERTENCIA: no se creo print_job de recibo para orden {orden_id}: {e}")
+        return False
+
+    cursor.execute(
+        """
+        SELECT producto, precio, COALESCE(indicacion, '')
+        FROM orden_items
+        WHERE orden_id=?
+        ORDER BY id ASC
+        """,
+        (orden_id,),
+    )
+    items = cursor.fetchall()
+
+    tasa_cobro = o[7]
+    if tasa_cobro is None:
+        tasa_actual = obtener_tasa_actual(cursor)
+        recibo = construir_recibo_provisional(
+            items, delivery_usd=o[13], descuento_bs=o[16], tasa_actual=tasa_actual
+        )
+    else:
+        recibo = construir_recibo_cobrado(
+            items,
+            tasa_cobro=tasa_cobro,
+            subtotal_usd=o[8],
+            descuento_bs=o[9],
+            total_usd=o[10],
+            total_bs=o[11],
+            venta_restaurante_usd=o[12],
+            delivery_usd=o[13],
+            total_cliente_usd=o[14],
+            total_cliente_bs=o[15],
+        )
+
+    payload = {
+        "id": orden_id,
+        "numero": o[0],
+        "tipo": o[1],
+        "cliente": o[2],
+        "referencia": o[3],
+        "usuario": o[4] if o[4] else "N/A",
+        "fecha_hora": o[6] if o[6] else o[5],
+        **recibo,
+    }
+    event_key = f"{orden_id}-{token if token else 'base'}"
+    crear_job_en_cursor(
+        cursor,
+        event_key=event_key,
+        job_type=TIPO_JOB_RECIBO,
+        required_role=rol,
+        payload=payload,
+        fecha=fecha_evento,
+    )
+    return True
+
+
 @app.route("/activar_factura/<int:orden_id>")
 def activar_factura(orden_id):
     conn = get_connection()
@@ -10959,6 +11078,7 @@ def activar_factura(orden_id):
         "UPDATE ordenes SET facturar=1, factura_reimpresion_token=NULL WHERE id=? AND cierre_id IS NULL",
         (orden_id,),
     )
+    _crear_print_job_recibo(cursor, orden_id, None, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"))
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -10996,6 +11116,7 @@ def reimprimir_factura(orden_id):
         """,
         (token, orden_id),
     )
+    _crear_print_job_recibo(cursor, orden_id, token, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"))
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -11029,6 +11150,145 @@ def desactivar_factura(orden_id):
             except Exception:
                 pass
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _parsear_roles_request(roles_crudo):
+    """`roles_crudo` puede venir como string separado por comas (query
+    param) o como lista (JSON body). Nunca confia en el valor: lo valida
+    contra el enum fijo de roles conocidos (mision seccion 49)."""
+    if isinstance(roles_crudo, str):
+        roles = [r.strip() for r in roles_crudo.split(",") if r.strip()]
+    else:
+        roles = list(roles_crudo or [])
+    return roles_validos(roles)
+
+
+@app.route("/api/printing/status")
+def api_printing_status():
+    try:
+        roles = _parsear_roles_request(request.args.get("roles", ""))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    if not roles:
+        return jsonify({"ok": True, "pendientes": 0, "por_rol": {}})
+
+    repo = SqlPrintQueueRepository(get_connection)
+    ahora_texto = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+    por_rol = repo.contar_pendientes_por_rol(roles, ahora_texto)
+    return jsonify({"ok": True, "pendientes": sum(por_rol.values()), "por_rol": por_rol})
+
+
+@app.route("/api/printing/claim", methods=["POST"])
+def api_printing_claim():
+    datos = request.get_json(silent=True) or {}
+    station_id = str(datos.get("station_id") or "").strip()
+    if not station_id:
+        return jsonify({"ok": False, "error": "station_id requerido"}), 400
+    try:
+        roles = _parsear_roles_request(datos.get("roles"))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if not roles:
+        return jsonify({"ok": True, "job": None})
+
+    try:
+        ahora = ahora_venezuela()
+        ahora_texto = ahora.strftime("%Y-%m-%d %H:%M:%S")
+        lease_expires_texto = (ahora + datetime.timedelta(seconds=PRINT_QUEUE_LEASE_TTL_SEG)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        lease_token = uuid.uuid4().hex
+
+        repo = SqlPrintQueueRepository(get_connection)
+        job = repo.reclamar_job(
+            roles=roles,
+            station_id=station_id,
+            lease_token=lease_token,
+            lease_expires_texto=lease_expires_texto,
+            ahora_texto=ahora_texto,
+        )
+        if job is None:
+            return jsonify({"ok": True, "job": None})
+
+        # El formateo final de items de COCINA (agrupar por producto,
+        # desglosar combos/promos) vive en web_app.py y se aplica AQUI,
+        # al entregar el job -- nunca al crearlo -- para que una edicion
+        # posterior de orden_items no pueda alterar retroactivamente lo
+        # ya guardado como payload (ver app/infrastructure/database/print_queue.py).
+        payload = dict(job["payload"])
+        if job["required_role"] == ROL_COCINA:
+            items_crudos = payload.pop("items_crudos", [])
+            payload["items"] = [
+                quitar_prefijo_cantidad_visual(item)
+                for item in agrupar_items_comanda(items_crudos, observacion=payload.get("observacion", ""))
+            ]
+
+        return jsonify(
+            {
+                "ok": True,
+                "job": {
+                    "id": job["id"],
+                    "event_key": job["event_key"],
+                    "job_type": job["job_type"],
+                    "required_role": job["required_role"],
+                    "lease_token": job["lease_token"],
+                    "payload": payload,
+                },
+            }
+        )
+    except Exception as e:
+        print("ERROR EN PRINTING_CLAIM:", e)
+        return jsonify({"ok": False, "error": "error interno"}), 500
+
+
+@app.route("/api/printing/<int:job_id>/ack", methods=["POST"])
+def api_printing_ack(job_id):
+    datos = request.get_json(silent=True) or {}
+    station_id = str(datos.get("station_id") or "").strip()
+    lease_token = str(datos.get("lease_token") or "").strip()
+    if not station_id or not lease_token:
+        return jsonify({"ok": False, "error": "station_id y lease_token requeridos"}), 400
+
+    try:
+        fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+        repo = SqlPrintQueueRepository(get_connection)
+        resultado = repo.confirmar_ack(job_id=job_id, station_id=station_id, lease_token=lease_token, fecha=fecha)
+        if resultado in (RESULTADO_OK, RESULTADO_OK_IDEMPOTENTE):
+            return jsonify({"ok": True})
+        if resultado == RESULTADO_NO_ENCONTRADO:
+            return jsonify({"ok": False, "error": "job no encontrado"}), 404
+        return jsonify({"ok": False, "error": "lease invalido o vencido"}), 409
+    except Exception as e:
+        print("ERROR EN PRINTING_ACK:", e)
+        return jsonify({"ok": False, "error": "error interno"}), 500
+
+
+@app.route("/api/printing/<int:job_id>/fail", methods=["POST"])
+def api_printing_fail(job_id):
+    datos = request.get_json(silent=True) or {}
+    station_id = str(datos.get("station_id") or "").strip()
+    lease_token = str(datos.get("lease_token") or "").strip()
+    # Sanitizado: recortado, nunca un stacktrace completo (mision seccion 20).
+    error_sanitizado = str(datos.get("error") or "")[:200]
+    if not station_id or not lease_token:
+        return jsonify({"ok": False, "error": "station_id y lease_token requeridos"}), 400
+
+    try:
+        fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+        repo = SqlPrintQueueRepository(get_connection)
+        resultado = repo.liberar_job(
+            job_id=job_id, station_id=station_id, lease_token=lease_token,
+            error_sanitizado=error_sanitizado, fecha=fecha,
+        )
+        if resultado == RESULTADO_OK:
+            return jsonify({"ok": True})
+        if resultado == RESULTADO_NO_ENCONTRADO:
+            return jsonify({"ok": False, "error": "job no encontrado"}), 404
+        return jsonify({"ok": False, "error": "lease invalido"}), 409
+    except Exception as e:
+        print("ERROR EN PRINTING_FAIL:", e)
+        return jsonify({"ok": False, "error": "error interno"}), 500
 
 
 def _reset_neko_wok_db():

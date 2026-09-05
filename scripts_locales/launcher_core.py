@@ -26,12 +26,18 @@ import resource_paths
 SCRIPTS_LOCALES_DIR = Path(__file__).resolve().parent
 WORKER_COCINA_PATH = SCRIPTS_LOCALES_DIR / "script_comanda_cocina.py"
 WORKER_FACTURA_PATH = SCRIPTS_LOCALES_DIR / "script_factura.py"
+# Dispatcher unificado (mision "NEKO PRINTING 2.0"): reemplaza a los dos
+# workers de arriba como fuente de impresion NORMAL de Neko Local (ver
+# print_dispatcher.py). Los workers legacy se conservan para diagnostico
+# manual con --port, pero "INICIAR NEKO" ya no los arranca.
+WORKER_DISPATCHER_PATH = SCRIPTS_LOCALES_DIR / "print_dispatcher.py"
 
 # Flags internas que NekoLocal.exe (frozen, un solo ejecutable) acepta
 # para arrancar como worker en vez de GUI - ver neko_local.main(). En
 # SOURCE no se usan (se lanza el .py del worker directamente).
 MODO_FROZEN_COCINA = "--kitchen-worker"
 MODO_FROZEN_FACTURA = "--receipt-worker"
+MODO_FROZEN_DISPATCHER = "--print-dispatcher"
 
 # Endpoint liviano ya usado por script_factura.py para comprobar conexion;
 # reutilizarlo evita inventar un segundo mecanismo de "ping" a NekoPOS.

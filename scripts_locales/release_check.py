@@ -32,6 +32,7 @@ _PATRONES_PROHIBIDOS = [
     re.compile(r"(^|/)config\.json$"),
     re.compile(r"(^|/)comandas_impresas\.txt$"),
     re.compile(r"(^|/)facturas_impresas\.txt$"),
+    re.compile(r"(^|/)pendientes_ack\.txt$"),
     re.compile(r"(^|/)tasa_cache\.txt$"),
     re.compile(r"(^|/)\.credentials?(/|$)"),
     re.compile(r"secret"),
