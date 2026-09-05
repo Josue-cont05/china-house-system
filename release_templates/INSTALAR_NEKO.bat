@@ -34,6 +34,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$s = $shell.CreateShortcut($nuevo); " ^
     "$s.TargetPath = $destino; " ^
     "$s.WorkingDirectory = '%DEST%'; " ^
+    "$s.IconLocation = \"$destino,0\"; " ^
     "$s.Description = 'Iniciar Neko Local (cocina + recibos)'; " ^
     "$s.Save()"
 

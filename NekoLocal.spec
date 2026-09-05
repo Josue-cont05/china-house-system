@@ -90,6 +90,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="NekoLocal",
+    icon=str(SCRIPTS_LOCALES / "neko_local.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
