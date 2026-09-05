@@ -62,6 +62,8 @@ from app.domain.sales.order_totals import (
     calcular_totales_visuales_delivery,
     calcular_totales_visuales_orden,
 )
+from app.infrastructure.database.sales.orders import SqlSalesOrderRepository
+from app.infrastructure.database.sales.catalog import SqlSalesCatalogRepository
 from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
 from app.application.self_ordering.links import (
     MesaSelfOrderingOcupada,
@@ -7017,56 +7019,20 @@ def crear_orden():
 
 @app.route("/orden/<int:orden_id>")
 def orden(orden_id):
-    conn = get_connection()
-    cursor = conn.cursor()
+    sales_order_repo = SqlSalesOrderRepository(get_connection)
+    sales_catalog_repo = SqlSalesCatalogRepository(get_connection)
 
-    cursor.execute(
-        """
-        SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
-               o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id,
-               o.delivery_usd, o.delivery_repartidor_id
-        FROM ordenes o
-        LEFT JOIN usuarios u ON o.usuario_id = u.id
-        WHERE o.id=?
-        """,
-        (orden_id,),
-    )
-    o = cursor.fetchone()
+    o = sales_order_repo.obtener_cabecera(orden_id)
     if not o:
-        conn.close()
         return "Orden no encontrada"
 
     estado = o[6]
 
-    cursor.execute(
-        """
-        SELECT p.id, p.nombre, p.precio, c.nombre
-        FROM productos p
-        LEFT JOIN categorias c ON p.categoria_id = c.id
-        WHERE COALESCE(p.activo, 1) = 1
-          AND COALESCE(c.activo, 1) = 1
-        """
-    )
-    productos = cursor.fetchall()
+    productos = sales_catalog_repo.listar_catalogo_activo()
+    items = sales_order_repo.obtener_items(orden_id)
 
-    cursor.execute(
-        """
-        SELECT oi.producto, oi.precio, oi.id, COALESCE(oi.indicacion, ''),
-               (
-                   SELECT c.nombre
-                   FROM productos p
-                   LEFT JOIN categorias c ON p.categoria_id = c.id
-                   WHERE LOWER(p.nombre)=LOWER(oi.producto)
-                   ORDER BY COALESCE(p.activo, 1) DESC, p.id
-                   LIMIT 1
-               ) AS categoria
-        FROM orden_items oi
-        WHERE oi.orden_id=?
-        """,
-        (orden_id,),
-    )
-    items = cursor.fetchall()
-
+    conn = get_connection()
+    cursor = conn.cursor()
     repartidores_activos = listar_repartidores(cursor, solo_activos=True)
     repartidor_delivery_actual = obtener_repartidor(cursor, o[12]) if o[12] else None
     tasa = obtener_tasa_actual(cursor)
