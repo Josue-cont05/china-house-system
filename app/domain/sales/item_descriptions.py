@@ -2,6 +2,18 @@ import json
 import re
 
 
+def _a_float(valor, default=0.0):
+    try:
+        if valor is None:
+            return default
+        texto = str(valor).strip().replace(",", ".")
+        if texto == "":
+            return default
+        return float(texto)
+    except Exception:
+        return default
+
+
 COMBOS_JSON = {
     "Neko Combo 1": "combo1",
     "Neko Combo 2": "combo2",
@@ -217,3 +229,32 @@ def texto_item_con_indicacion(producto, indicacion):
 def nombre_producto_cocina(producto):
     producto = producto_sin_prefijo_cantidad(producto)
     return NOMBRES_COCINA_SIMPLIFICADOS.get(producto, producto)
+
+
+def agrupar_items_recibo(items):
+    """Agrupa items para el recibo del cliente: SOLO cantidad, nombre y
+    total por producto. A diferencia de agrupar_items_factura, agrupa por
+    nombre de producto unicamente (ignora la indicacion al agrupar, ya que
+    el recibo nunca la muestra) y nunca agrega descripciones de combo o
+    promocion, indicaciones ni observaciones - esas son informacion de
+    preparacion propia de la comanda de cocina, no del recibo del cliente.
+    """
+    grupos = []
+    indices = {}
+
+    for producto, precio, *_resto in items:
+        cantidad_producto, nombre = _separar_prefijo_cantidad(producto)
+        precio = _a_float(precio)
+
+        if nombre not in indices:
+            indices[nombre] = len(grupos)
+            grupos.append({"cantidad": 0, "nombre": nombre, "total": 0.0})
+
+        grupo = grupos[indices[nombre]]
+        grupo["cantidad"] += cantidad_producto
+        grupo["total"] += precio
+
+    for grupo in grupos:
+        grupo["total"] = round(grupo["total"], 2)
+
+    return grupos

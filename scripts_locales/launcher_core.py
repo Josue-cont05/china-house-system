@@ -24,6 +24,7 @@ import port_detection
 
 SCRIPTS_LOCALES_DIR = Path(__file__).resolve().parent
 WORKER_COCINA_PATH = SCRIPTS_LOCALES_DIR / "script_comanda_cocina.py"
+WORKER_FACTURA_PATH = SCRIPTS_LOCALES_DIR / "script_factura.py"
 
 # Endpoint liviano ya usado por script_factura.py para comprobar conexion;
 # reutilizarlo evita inventar un segundo mecanismo de "ping" a NekoPOS.
@@ -59,9 +60,14 @@ def _python_actual():
     return sys.executable
 
 
-class GestorWorkerCocina:
-    """Arranca/detiene el worker de cocina como proceso hijo y solo puede
-    detener el que el mismo arranco (nunca mata procesos ajenos)."""
+class GestorWorkerProceso:
+    """Arranca/detiene UN worker local (cocina o recibos) como proceso
+    hijo, y solo puede detener el que el mismo arranco (nunca mata
+    procesos ajenos). Generico a proposito: Neko Local crea una instancia
+    por worker (cocina, recibos), cada una con su propio `worker_path` -
+    ambos scripts ya tienen su propio mutex de instancia unica
+    (single_instance.py) con nombres distintos, asi que no se bloquean
+    entre si pero cada uno impide un segundo de si mismo."""
 
     def __init__(self, worker_path=WORKER_COCINA_PATH, python_exe=None):
         self.worker_path = Path(worker_path)
@@ -102,3 +108,8 @@ class GestorWorkerCocina:
         finally:
             self._proceso = None
         return True
+
+
+# Alias retrocompatible: el nombre original antes de generalizar esta
+# clase para tambien arrancar el worker de recibos.
+GestorWorkerCocina = GestorWorkerProceso

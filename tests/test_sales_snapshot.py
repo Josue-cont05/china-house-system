@@ -881,7 +881,7 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertNotIn(b"TOTAL: $26", response.data)
         self.assertNotIn(b"Producto prueba - $20.0", response.data)
 
-    def test_facturas_pendientes_payload_uses_explicit_delivery_breakdown_for_printer(self):
+    def test_facturas_pendientes_payload_uses_structured_items_and_snapshot_for_printer(self):
         orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
         self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
         conn = self._conn()
@@ -894,8 +894,172 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         factura = next(item for item in payload if item["id"] == orden_id)
-        self.assertEqual(factura["items"], ["Consumo Neko Wok - $20.0", "Delivery - $3.0"])
+        self.assertTrue(factura["cobrada"])
+        self.assertEqual(factura["items"], [{"cantidad": 1, "nombre": "Producto prueba", "total": 20.0}])
+        self.assertEqual(factura["subtotal"], 20.0)
+        self.assertEqual(factura["descuento"], 0.0)
+        self.assertEqual(factura["delivery"], 3.0)
         self.assertEqual(factura["total"], 23.0)
+        self.assertEqual(factura["total_bs"], 4600.0)
+
+    def test_facturas_pendientes_provisional_account_before_charging(self):
+        orden_id = self._create_order(price=16.0)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        payload = self.client.get("/facturas_pendientes").get_json()
+        factura = next(item for item in payload if item["id"] == orden_id)
+
+        self.assertFalse(factura["cobrada"])
+        self.assertEqual(factura["items"], [{"cantidad": 1, "nombre": "Producto prueba", "total": 16.0}])
+        self.assertEqual(factura["total"], 16.0)
+        self.assertEqual(factura["total_bs"], 3200.0)  # tasa=200 (setUp)
+
+    def test_facturas_pendientes_provisional_uses_live_rate_not_frozen(self):
+        orden_id = self._create_order(price=16.0)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        primera = self.client.get("/facturas_pendientes").get_json()
+        factura_1 = next(item for item in primera if item["id"] == orden_id)
+        self.assertEqual(factura_1["total_bs"], 3200.0)
+
+        self._set_tasa(300)
+        segunda = self.client.get("/facturas_pendientes").get_json()
+        factura_2 = next(item for item in segunda if item["id"] == orden_id)
+        self.assertEqual(factura_2["total_bs"], 4800.0)  # cambio de tasa aceptado en cuenta provisional
+
+    def test_cobrar_persists_total_cliente_bs_snapshot(self):
+        orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT tasa_cobro, total_cliente_usd, total_cliente_bs FROM ordenes WHERE id=?",
+            (orden_id,),
+        )
+        tasa_cobro, total_cliente_usd, total_cliente_bs = cursor.fetchone()
+        conn.close()
+
+        self.assertEqual(tasa_cobro, 200.0)
+        self.assertEqual(total_cliente_usd, 23.0)
+        self.assertEqual(total_cliente_bs, 4600.0)
+
+    def test_facturas_pendientes_reprint_after_charge_ignores_current_rate_change(self):
+        orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        self.assertEqual(self.client.get(f"/reimprimir_factura/{orden_id}").status_code, 302)
+
+        self._set_tasa(999)  # la tasa actual cambia DESPUES del cobro
+        payload = self.client.get("/facturas_pendientes").get_json()
+        factura = next(item for item in payload if item["id"] == orden_id)
+
+        self.assertTrue(factura["cobrada"])
+        self.assertEqual(factura["total_bs"], 4600.0)  # sigue usando la tasa_cobro historica (200)
+
+    def test_facturas_pendientes_reprint_generates_new_evento_impresion(self):
+        orden_id = self._create_order(price=16.0)
+        self.assertEqual(self._charge(orden_id, "usd", 16).status_code, 302)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        evento_base = self.client.get("/facturas_pendientes").get_json()[0]["evento_impresion"]
+
+        self.assertEqual(self.client.get(f"/reimprimir_factura/{orden_id}").status_code, 302)
+        evento_reimpresion = self.client.get("/facturas_pendientes").get_json()[0]["evento_impresion"]
+
+        self.assertNotEqual(evento_base, evento_reimpresion)
+        self.assertEqual(evento_base, f"{orden_id}-base")
+
+    def test_facturas_pendientes_legacy_delivery_item_uses_historical_total_bs(self):
+        orden_id = self._create_order(price=20.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (orden_id, "Delivery 3", 3.0),
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        payload = self.client.get("/facturas_pendientes").get_json()
+        factura = next(item for item in payload if item["id"] == orden_id)
+
+        self.assertTrue(factura["cobrada"])
+        self.assertEqual(factura["delivery"], 0.0)
+        nombres = [item["nombre"] for item in factura["items"]]
+        self.assertIn("Delivery 3", nombres)
+        self.assertEqual(factura["total"], 23.0)
+        self.assertEqual(factura["total_bs"], 4600.0)
+
+    def test_facturas_pendientes_historical_order_without_total_cliente_bs_falls_back(self):
+        orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET total_cliente_bs=NULL WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        payload = self.client.get("/facturas_pendientes").get_json()
+        factura = next(item for item in payload if item["id"] == orden_id)
+
+        self.assertEqual(factura["total"], 23.0)
+        self.assertEqual(factura["total_bs"], 4600.0)  # 23.0 * 200 (tasa_cobro), reconstruido
+
+    def test_facturas_pendientes_mesa_contract_shape(self):
+        orden_id = self._create_order(price=16.0)
+        self.assertEqual(self._charge(orden_id, "usd", 16).status_code, 302)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        factura = self.client.get("/facturas_pendientes").get_json()[0]
+
+        for clave in (
+            "id", "numero", "cliente", "tipo", "referencia", "fecha_hora",
+            "cobrada", "items", "subtotal", "descuento", "delivery",
+            "total", "total_bs", "evento_impresion",
+        ):
+            self.assertIn(clave, factura)
+        self.assertEqual(factura["tipo"], "mesa")
+
+    def test_facturas_pendientes_delivery_contract_shape(self):
+        orden_id, _ = self._create_order_with_delivery(price=20.0, delivery=3.0)
+        self.assertEqual(self._charge(orden_id, "usd", 23).status_code, 302)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        factura = self.client.get("/facturas_pendientes").get_json()[0]
+
+        self.assertEqual(factura["delivery"], 3.0)
+        self.assertEqual(factura["total"], 23.0)
+
+    def test_facturas_pendientes_pickup_contract_shape(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO ordenes (
+                numero_orden, fecha_hora, fecha, tipo, referencia, cliente, estado, usuario_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "2026-08-20 12:00:00", "2026-08-20", "Para llevar", "", "Cliente PickUp", "abierta", self._master_user_id()),
+        )
+        orden_id = web_app.obtener_ultimo_id(cursor, "ordenes")
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, ?)",
+            (orden_id, "Producto prueba", 10.0, ""),
+        )
+        conn.commit()
+        conn.close()
+        self.assertEqual(self._charge(orden_id, "usd", 10).status_code, 302)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        factura = self.client.get("/facturas_pendientes").get_json()[0]
+
+        self.assertEqual(factura["tipo"], "Para llevar")
+        self.assertEqual(factura["delivery"], 0.0)
+        self.assertEqual(factura["total"], 10.0)
 
     def test_factura_legacy_delivery_item_keeps_legacy_behavior(self):
         orden_id = self._create_order(price=20.0)

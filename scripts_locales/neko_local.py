@@ -28,10 +28,11 @@ para esta fase; nada impide fusionarlos despues si conviniera. Este mismo
 como NekoLocal.exe (PyInstaller) sin reescritura: `python neko_local.py`
 hoy, `NekoLocal.exe` manana, mismo `main()`.
 
-Recibos (Bloque B, todavia no implementado): la ventana ya deja hueco
-visual para una fila "Recibos" con su propio estado, y `launcher_core`
-esta pensado para poder sostener un segundo `GestorWorkerCocina`-like para
-script_factura.py sin rediseño.
+Recibos: INICIAR NEKO arranca cocina Y recibos (dos procesos hijos
+independientes, cada uno con su propio mutex de instancia unica, asi que
+no se bloquean entre si pero cada uno impide un segundo de si mismo -
+ver single_instance.py). DETENER detiene ambos. `GestorWorkerProceso`
+(launcher_core.py) es generico: una instancia por worker.
 """
 
 import subprocess
@@ -44,7 +45,12 @@ from tkinter import messagebox, ttk
 
 import neko_config
 import port_detection
-from launcher_core import GestorWorkerCocina, nekopos_accesible, resolver_y_persistir_puerto
+from launcher_core import (
+    GestorWorkerProceso,
+    WORKER_FACTURA_PATH,
+    nekopos_accesible,
+    resolver_y_persistir_puerto,
+)
 
 POLL_INTERVAL_MS = 8000
 
@@ -193,7 +199,8 @@ class NekoLocalApp:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._al_cerrar)
 
-        self.gestor_cocina = GestorWorkerCocina()
+        self.gestor_cocina = GestorWorkerProceso()
+        self.gestor_recibos = GestorWorkerProceso(worker_path=WORKER_FACTURA_PATH)
 
         self._construir_ui()
         self._actualizar_estados()
@@ -208,12 +215,14 @@ class NekoLocalApp:
         self._var_impresora = tk.StringVar(value="Verificando...")
         self._var_puerto = tk.StringVar(value="-")
         self._var_cocina = tk.StringVar(value="Detenida")
+        self._var_recibos = tk.StringVar(value="Detenidos")
 
         for etiqueta, var in (
             ("NekoPOS", self._var_nekopos),
             ("Impresora", self._var_impresora),
             ("Puerto", self._var_puerto),
             ("Cocina", self._var_cocina),
+            ("Recibos", self._var_recibos),
         ):
             fila = ttk.Frame(marco)
             fila.pack(fill="x", pady=2)
@@ -261,12 +270,15 @@ class NekoLocalApp:
 
         if not self.gestor_cocina.activo:
             self.gestor_cocina.iniciar(resultado.port)
+        if not self.gestor_recibos.activo:
+            self.gestor_recibos.iniciar(resultado.port)
 
         self._abrir_nekopos()
         self._actualizar_estados()
 
     def _detener(self):
         self.gestor_cocina.detener()
+        self.gestor_recibos.detener()
         self._actualizar_estados()
 
     # ------------------------------------------------------------------
@@ -289,6 +301,7 @@ class NekoLocalApp:
             self._var_puerto.set("-")
 
         self._var_cocina.set("activa" if self.gestor_cocina.activo else "detenida")
+        self._var_recibos.set("activos" if self.gestor_recibos.activo else "detenidos")
 
         self._var_nekopos.set("verificando...")
         self.root.after(0, self._verificar_nekopos_async)
@@ -306,20 +319,21 @@ class NekoLocalApp:
 
     # ------------------------------------------------------------------
     def _al_cerrar(self):
-        if not self.gestor_cocina.activo:
+        if not self.gestor_cocina.activo and not self.gestor_recibos.activo:
             self.root.destroy()
             return
 
         respuesta = messagebox.askyesnocancel(
             "Neko Local",
-            "La cocina esta activa. ¿Quieres mantenerla imprimiendo y solo cerrar "
-            "esta ventana?\n\nSi - mantener cocina activa\nNo - detener cocina y cerrar\n"
-            "Cancelar - no cerrar",
+            "Cocina y/o recibos siguen activos. ¿Quieres mantenerlos imprimiendo y "
+            "solo cerrar esta ventana?\n\nSi - mantener activos\n"
+            "No - detener todo y cerrar\nCancelar - no cerrar",
         )
         if respuesta is None:
             return
         if not respuesta:
             self.gestor_cocina.detener()
+            self.gestor_recibos.detener()
         self.root.destroy()
 
     def run(self):

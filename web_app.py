@@ -62,6 +62,10 @@ from app.domain.sales.order_totals import (
     calcular_totales_visuales_delivery,
     calcular_totales_visuales_orden,
 )
+from app.domain.sales.receipts import (
+    construir_recibo_cobrado,
+    construir_recibo_provisional,
+)
 from app.infrastructure.database.sales.orders import SqlSalesOrderRepository
 from app.infrastructure.database.sales.catalog import SqlSalesCatalogRepository
 from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
@@ -1465,6 +1469,7 @@ def crear_tablas_delivery():
     asegurar_columna("ordenes", "venta_restaurante_usd", "REAL")
     asegurar_columna("ordenes", "delivery_usd", "REAL")
     asegurar_columna("ordenes", "total_cliente_usd", "REAL")
+    asegurar_columna("ordenes", "total_cliente_bs", "REAL")
     asegurar_columna("ordenes", "delivery_repartidor_id", "INTEGER")
 
 
@@ -8855,6 +8860,7 @@ def cobrar(orden_id):
                             venta_restaurante_usd=?,
                             delivery_usd=?,
                             total_cliente_usd=?,
+                            total_cliente_bs=?,
                             cliente_id=?,
                             cliente=?
                         WHERE id=?
@@ -8873,6 +8879,7 @@ def cobrar(orden_id):
                             totales_cobro["snapshot_venta_restaurante_usd"],
                             totales_cobro["snapshot_delivery_usd"],
                             totales_cobro["snapshot_total_cliente_usd"],
+                            totales_cobro["total_cliente_bs"],
                             cliente_id_orden,
                             cliente_nombre_orden,
                             orden_id,
@@ -10857,8 +10864,11 @@ def facturas_pendientes():
         cursor.execute(
             """
             SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
-                   o.factura_reimpresion_token,
-                   o.venta_restaurante_usd, o.delivery_usd, o.total_cliente_usd
+                   o.factura_reimpresion_token, o.fecha_hora, o.fecha_cobro,
+                   o.tasa_cobro, o.subtotal_usd, o.descuento_bs_snapshot,
+                   o.total_usd, o.total_bs, o.venta_restaurante_usd,
+                   o.delivery_usd, o.total_cliente_usd, o.total_cliente_bs,
+                   o.descuento
             FROM ordenes o
             LEFT JOIN usuarios u ON o.usuario_id = u.id
             WHERE o.facturar = 1
@@ -10888,9 +10898,34 @@ def facturas_pendientes():
         for orden_id, producto, precio, indicacion in cursor.fetchall():
             items_por_orden[orden_id].append((producto, precio, indicacion))
 
+        tasa_actual = None
+        if any(o[9] is None for o in ordenes):
+            tasa_actual = obtener_tasa_actual(cursor)
+
         for o in ordenes:
             items = items_por_orden[o[0]]
-            items_agrupados, total_factura = preparar_lineas_factura(items, o[7], o[8], o[9])
+            tasa_cobro = o[9]
+
+            if tasa_cobro is None:
+                recibo = construir_recibo_provisional(
+                    items,
+                    delivery_usd=o[15],
+                    descuento_bs=o[18],
+                    tasa_actual=tasa_actual,
+                )
+            else:
+                recibo = construir_recibo_cobrado(
+                    items,
+                    tasa_cobro=tasa_cobro,
+                    subtotal_usd=o[10],
+                    descuento_bs=o[11],
+                    total_usd=o[12],
+                    total_bs=o[13],
+                    venta_restaurante_usd=o[14],
+                    delivery_usd=o[15],
+                    total_cliente_usd=o[16],
+                    total_cliente_bs=o[17],
+                )
 
             resultado.append(
                 {
@@ -10900,12 +10935,9 @@ def facturas_pendientes():
                     "cliente": o[3],
                     "referencia": o[4],
                     "usuario": o[5] if o[5] else "N/A",
+                    "fecha_hora": o[8] if o[8] else o[7],
                     "evento_impresion": f"{o[0]}-{o[6] if o[6] else 'base'}",
-                    "items": [
-                        f"{quitar_prefijo_cantidad_visual(item['texto'])} - ${round(item['precio_total'], 2)}"
-                        for item in items_agrupados
-                    ],
-                    "total": total_factura,
+                    **recibo,
                 }
             )
 

@@ -1,24 +1,62 @@
-import sys
+"""
+script_factura.py
+
+Worker local de impresion de recibos de cliente de Neko Wok. Es el UNICO
+proceso responsable de:
+
+- hacer polling de /facturas_pendientes;
+- decidir, por `evento_impresion`, que recibo ya fue impreso;
+- persistir esa deduplicacion en disco (facturas_impresas.txt) para que
+  reiniciar el script o Windows no reimprima recibos ya impresos;
+- confirmar la impresion via /desactivar_factura despues de imprimir con
+  exito (nunca antes);
+- decidir el puerto serie a usar (config local de Neko Local, o --port de
+  diagnostico), igual que script_comanda_cocina.py.
+
+Esta worker NO calcula dinero: no consulta /api/tasa, no convierte
+USD->Bs, no reconstruye precios ni descuentos. El contrato de
+/facturas_pendientes (ver app/domain/sales/receipts.py, la unica
+autoridad financiera) ya trae todo resuelto: subtotal, descuento,
+delivery, total y total_bs. Esta worker solo lo pasa tal cual a
+factura_presentacion.py.
+
+Ubicacion de facturas_impresas.txt: se mantiene junto al script
+(scripts_locales/facturas_impresas.txt), igual que antes de esta
+migracion, para no ampliar el alcance de este bloque. Al empaquetar Neko
+Local se evaluara moverla a %LOCALAPPDATA%\\NekoWok\\ junto a config.json.
+
+PUERTO:
+- Uso normal (via Neko Local, o manual sin argumentos): lee la
+  configuracion local guardada por Neko Local y localiza el puerto
+  vigente, incluso si cambio de numero de COM.
+- Override de diagnostico: `python script_factura.py --port COM6`.
+
+INSTANCIA UNICA: mutex de Windows con nombre propio (distinto del de
+cocina), para que cocina y recibos puedan correr a la vez sin bloquearse
+entre si, pero nunca dos workers de recibos simultaneos.
+
+Ejecutar como servicio: python script_factura.py
+"""
+
+import argparse
 import time
 from pathlib import Path
 
 import requests
-import win32print
 
+import neko_config
+import port_detection
+from bluetooth_printer import PrinterError
+from factura_presentacion import imprimir_factura
+from single_instance import SingleInstanceLock
 
-BASE_URL = "https://neko-wok-system.onrender.com"
-URL_FACTURAS = f"{BASE_URL}/facturas_pendientes"
-URL_TASA = f"{BASE_URL}/api/tasa"
-URL_DESACTIVAR = f"{BASE_URL}/desactivar_factura"
-TASA_FALLBACK = 515
+URL_FACTURAS = f"{neko_config.NEKOPOS_BASE_URL}/facturas_pendientes"
+URL_DESACTIVAR = f"{neko_config.NEKOPOS_BASE_URL}/desactivar_factura"
+
+NOMBRE_MUTEX_FACTURAS = "NekoWok_FacturaWorker"
 
 BASE_DIR = Path(__file__).resolve().parent
 ARCHIVO_IMPRESAS = BASE_DIR / "facturas_impresas.txt"
-ARCHIVO_TASA_CACHE = BASE_DIR / "tasa_cache.txt"
-
-ESC_POS_INICIALIZAR = b"\x1b\x40"
-ESC_POS_AVANCE = b"\n\n\n\n"
-ESC_POS_CORTE = b"\x1d\x56\x00"
 
 session_http = requests.Session()
 impresos = set()
@@ -53,47 +91,6 @@ def guardar_impreso(evento_impresion):
         return False
 
 
-def cargar_tasa_cache():
-    try:
-        if not ARCHIVO_TASA_CACHE.exists():
-            return None
-        tasa = a_float(ARCHIVO_TASA_CACHE.read_text(encoding="utf-8").strip(), None)
-        if tasa and tasa > 0:
-            return tasa
-    except Exception as e:
-        print(f"ADVERTENCIA: No se pudo leer tasa cacheada: {e}")
-    return None
-
-
-def guardar_tasa_cache(tasa):
-    try:
-        ARCHIVO_TASA_CACHE.write_text(str(tasa), encoding="utf-8")
-    except Exception as e:
-        print(f"ADVERTENCIA: No se pudo guardar tasa cacheada: {e}")
-
-
-def tasa_de_emergencia():
-    tasa_cache = cargar_tasa_cache()
-    if tasa_cache:
-        print(f"ADVERTENCIA: Usando tasa cacheada: {tasa_cache:g}")
-        return tasa_cache
-
-    print(f"ADVERTENCIA: Usando tasa fallback SOLO como emergencia: {TASA_FALLBACK}")
-    return TASA_FALLBACK
-
-
-def a_float(valor, default=0.0):
-    try:
-        if valor is None:
-            return default
-        texto = str(valor).strip().replace(",", ".")
-        if texto == "":
-            return default
-        return float(texto)
-    except Exception:
-        return default
-
-
 def texto_parcial_respuesta(respuesta, limite=220):
     try:
         texto = respuesta.text or ""
@@ -101,49 +98,6 @@ def texto_parcial_respuesta(respuesta, limite=220):
         return ""
     texto = texto.replace("\n", " ").replace("\r", " ").strip()
     return texto[:limite]
-
-
-def obtener_tasa():
-    inicio = time.perf_counter()
-
-    try:
-        respuesta = session_http.get(URL_TASA, timeout=2)
-        duracion = time.perf_counter() - inicio
-
-        if respuesta.status_code != 200:
-            print(
-                f"ADVERTENCIA: Error obteniendo tasa desde API: HTTP {respuesta.status_code} "
-                f"en {duracion:.2f}s. Respuesta: {texto_parcial_respuesta(respuesta)}"
-            )
-            return tasa_de_emergencia()
-
-        try:
-            datos = respuesta.json()
-        except Exception as e:
-            print(f"ADVERTENCIA: /api/tasa no devolvio JSON valido en {duracion:.2f}s: {e}")
-            print(f"ADVERTENCIA: Respuesta: {texto_parcial_respuesta(respuesta)}")
-            return tasa_de_emergencia()
-
-        if not datos.get("ok"):
-            print(f"ADVERTENCIA: /api/tasa respondio error en {duracion:.2f}s: {datos}")
-            return tasa_de_emergencia()
-
-        tasa = a_float(datos.get("tasa"))
-        if tasa <= 0:
-            print(f"ADVERTENCIA: /api/tasa devolvio tasa invalida en {duracion:.2f}s: {datos}")
-            return tasa_de_emergencia()
-
-        guardar_tasa_cache(tasa)
-        return tasa
-
-    except requests.exceptions.Timeout as e:
-        duracion = time.perf_counter() - inicio
-        print(f"ADVERTENCIA: Render lento consultando /api/tasa en {duracion:.2f}s: {e}")
-        return tasa_de_emergencia()
-    except Exception as e:
-        duracion = time.perf_counter() - inicio
-        print(f"ADVERTENCIA: Error consultando /api/tasa en {duracion:.2f}s: {e}")
-        return tasa_de_emergencia()
 
 
 def obtener_facturas():
@@ -185,92 +139,6 @@ def obtener_facturas():
         return []
 
 
-def preparar_bytes_impresion(texto):
-    contenido = texto.encode("cp850", errors="replace")
-    return ESC_POS_INICIALIZAR + contenido + ESC_POS_AVANCE + ESC_POS_CORTE
-
-
-def imprimir(texto):
-    inicio = time.perf_counter()
-    hprinter = None
-    doc_iniciado = False
-    pagina_iniciada = False
-
-    try:
-        try:
-            printer_name = win32print.GetDefaultPrinter()
-            print(f"Usando impresora: {printer_name}")
-        except Exception as e:
-            print(f"ERROR GetDefaultPrinter: {e}")
-            return False
-
-        datos = preparar_bytes_impresion(texto)
-        print(f"Bytes enviados a impresora: {len(datos)}")
-
-        try:
-            hprinter = win32print.OpenPrinter(printer_name)
-        except Exception as e:
-            print(f"ERROR OpenPrinter para '{printer_name}': {e}")
-            return False
-
-        try:
-            win32print.StartDocPrinter(hprinter, 1, ("Factura", None, "RAW"))
-            doc_iniciado = True
-        except Exception as e:
-            print(f"ERROR StartDocPrinter: {e}")
-            return False
-
-        try:
-            win32print.StartPagePrinter(hprinter)
-            pagina_iniciada = True
-        except Exception as e:
-            print(f"ERROR StartPagePrinter: {e}")
-            return False
-
-        try:
-            escritos = win32print.WritePrinter(hprinter, datos)
-            if escritos is not None:
-                print(f"WritePrinter reporto bytes escritos: {escritos}")
-        except Exception as e:
-            print(f"ERROR WritePrinter: {e}")
-            return False
-
-        try:
-            win32print.EndPagePrinter(hprinter)
-            pagina_iniciada = False
-        except Exception as e:
-            print(f"ERROR EndPagePrinter: {e}")
-            return False
-
-        try:
-            win32print.EndDocPrinter(hprinter)
-            doc_iniciado = False
-        except Exception as e:
-            print(f"ERROR EndDocPrinter: {e}")
-            return False
-
-        duracion = time.perf_counter() - inicio
-        print(f"Impresion enviada en {duracion:.2f}s")
-        return True
-
-    finally:
-        if hprinter is not None:
-            if pagina_iniciada:
-                try:
-                    win32print.EndPagePrinter(hprinter)
-                except Exception as e:
-                    print(f"ADVERTENCIA cerrando pagina de impresion: {e}")
-            if doc_iniciado:
-                try:
-                    win32print.EndDocPrinter(hprinter)
-                except Exception as e:
-                    print(f"ADVERTENCIA cerrando documento de impresion: {e}")
-            try:
-                win32print.ClosePrinter(hprinter)
-            except Exception as e:
-                print(f"ADVERTENCIA ClosePrinter: {e}")
-
-
 def desactivar_factura(factura_id):
     inicio = time.perf_counter()
 
@@ -309,91 +177,7 @@ def desactivar_factura(factura_id):
         return False
 
 
-def parsear_item_factura(item):
-    item = str(item or "").strip()
-
-    if " - $" not in item:
-        print(f"ADVERTENCIA: Item sin precio reconocible: {item}")
-        return item, None
-
-    nombre, precio_texto = item.rsplit(" - $", 1)
-    nombre = nombre.strip()
-    precio = a_float(precio_texto, None)
-
-    if precio is None:
-        print(f"ADVERTENCIA: Precio no reconocido en item: {item}")
-        return item, None
-
-    return nombre, precio
-
-
-def construir_texto_factura(orden, tasa):
-    total_usd = a_float(orden.get("total"))
-    total_bs = round(total_usd * tasa, 2)
-    usuario = orden.get("usuario") or "N/A"
-    numero = orden.get("numero") or orden.get("id") or "-"
-    tipo = orden.get("tipo") or "-"
-    cliente = orden.get("cliente") or "-"
-    items = orden.get("items") or []
-
-    texto = (
-        "\n"
-        "            /\\_/\\\n"
-        "           ( o.o )\n"
-        "            > ^ <\n"
-        "          NEKO WOK\n"
-        "========================\n\n"
-        f"FACTURA - ORDEN #{numero}\n"
-        f"SERVICIO: {str(usuario).upper()}\n\n"
-        f"TIPO: {tipo}\n"
-        f"CLIENTE: {cliente}\n"
-        "------------------------\n\n"
-    )
-
-    if not items:
-        print(f"ADVERTENCIA: Factura {orden.get('id')} viene sin items")
-        texto += "Sin items\n"
-    else:
-        for item in items:
-            nombre, precio_usd = parsear_item_factura(item)
-            if precio_usd is None:
-                texto += f"{nombre}\n"
-                continue
-
-            precio_bs = round(precio_usd * tasa, 2)
-            texto += f"{nombre} - Bs {precio_bs}\n"
-
-    texto += "\n------------------------\n"
-    texto += f"TOTAL: Bs {total_bs}\n"
-    texto += "------------------------\n\n\n"
-
-    return texto
-
-
-def construir_ticket_prueba():
-    return (
-        "\n"
-        "            /\\_/\\\n"
-        "           ( o.o )\n"
-        "            > ^ <\n"
-        "           NEKO WOK\n"
-        "========================\n"
-        "PRUEBA DE IMPRESION\n"
-        "Si puedes leer esto, la impresora funciona.\n"
-        "========================\n"
-    )
-
-
-def imprimir_factura(orden):
-    factura_id = orden.get("id")
-    print(f"IMPRIMIENDO FACTURA: {factura_id}")
-
-    tasa = obtener_tasa()
-    texto = construir_texto_factura(orden, tasa)
-    return imprimir(texto)
-
-
-def procesar_factura(factura):
+def procesar_factura(factura, puerto, baudrate=9600):
     factura_id = factura.get("id")
     if factura_id is None:
         print(f"ADVERTENCIA: Factura sin id, se omite: {factura}")
@@ -403,47 +187,107 @@ def procesar_factura(factura):
 
     if evento_impresion in impresos:
         if evento_impresion not in eventos_duplicados_reportados:
-            print(f"Evento {evento_impresion} ya impreso, desactivando pendiente")
+            print(f"[FACTURA] evento ya impreso, desactivando pendiente: {evento_impresion}")
             eventos_duplicados_reportados.add(evento_impresion)
+        # El evento ya se imprimio fisicamente antes; si seguimos viendolo
+        # es porque /desactivar_factura fallo en su momento. Reintentamos
+        # SOLO la desactivacion, nunca la impresion.
         desactivar_factura(factura_id)
         return
 
-    impresa_correctamente = imprimir_factura(factura)
+    print(f"[FACTURA] evento recibido: evento={evento_impresion} factura_id={factura_id}")
+    print(f"[FACTURA] enviando a impresora: {evento_impresion}")
 
-    if impresa_correctamente:
-        impresos.add(evento_impresion)
-        guardar_impreso(evento_impresion)
-        print(f"Factura {factura_id} impresa")
-        desactivar_factura(factura_id)
-    else:
+    try:
+        imprimir_factura(
+            numero=factura.get("numero"),
+            cliente=factura.get("cliente"),
+            tipo=factura.get("tipo"),
+            referencia=factura.get("referencia"),
+            fecha_hora=factura.get("fecha_hora"),
+            items=factura.get("items") or [],
+            subtotal=factura.get("subtotal"),
+            descuento=factura.get("descuento"),
+            delivery=factura.get("delivery"),
+            total=factura.get("total"),
+            total_bs=factura.get("total_bs"),
+            cobrada=factura.get("cobrada"),
+            port=puerto,
+            baudrate=baudrate,
+        )
+    except PrinterError as e:
+        print(f"ERROR imprimiendo factura (evento {evento_impresion}): {e}")
+        return
+    except Exception as e:
+        print(f"ERROR inesperado imprimiendo factura (evento {evento_impresion}): {e}")
+        return
+
+    print(f"[FACTURA] impresion OK: {evento_impresion}")
+    impresos.add(evento_impresion)
+    guardar_impreso(evento_impresion)
+
+    if not desactivar_factura(factura_id):
         print(
-            f"ADVERTENCIA: Evento {evento_impresion} no se marco como impreso "
-            "porque fallo la impresion"
+            f"ADVERTENCIA: factura {factura_id} ya se imprimio pero no se pudo desactivar "
+            "todavia; se reintentara la desactivacion en el proximo poll (no se reimprimira)."
         )
 
 
-def ejecutar_modo_prueba():
-    print("Ejecutando prueba de impresion RAW...")
-    ok = imprimir(construir_ticket_prueba())
-    if ok:
-        print("Prueba enviada correctamente al spooler de Windows.")
-        return 0
-    print("La prueba de impresion fallo. Revisa cola, driver, puerto o impresora.")
-    return 1
+def resolver_puerto_worker(override_port):
+    """Decide el puerto a usar al arrancar. Si `override_port` viene dado
+    (--port), se usa directamente sin tocar la configuracion. Si no,
+    resuelve contra la configuracion local, actualizandola si la huella
+    encontro la impresora en un nuevo COM. Devuelve (puerto, baudrate) o
+    (None, None) si no se puede resolver (y ya imprimio por que)."""
+    if override_port:
+        print(f"[FACTURA] Puerto forzado por --port: {override_port}")
+        return override_port, neko_config.DEFAULT_BAUDRATE
+
+    config = neko_config.cargar_config()
+    resultado = port_detection.resolver_puerto(config)
+
+    if resultado.status == "ok":
+        return resultado.port, config.get("baudrate", neko_config.DEFAULT_BAUDRATE)
+
+    if resultado.status == "rematched":
+        neko_config.guardar_config(resultado.config)
+        print(f"[FACTURA] La impresora cambio de puerto; ahora en {resultado.port}.")
+        return resultado.port, resultado.config.get("baudrate", neko_config.DEFAULT_BAUDRATE)
+
+    if resultado.status == "sin_configurar":
+        print(
+            "[FACTURA] No hay impresora configurada todavia. "
+            "Abre Neko Local y usa 'Configurar impresora'."
+        )
+        return None, None
+
+    if resultado.status == "ambiguous":
+        print(
+            "[FACTURA] Varios puertos coinciden con la impresora guardada; "
+            "no se puede elegir automaticamente. Reconfigura desde Neko Local."
+        )
+        return None, None
+
+    print(
+        "[FACTURA] No se encontro la impresora configurada (puerto guardado "
+        "ausente y ninguna coincidencia por huella). Reconfigura desde Neko Local."
+    )
+    return None, None
 
 
-def ejecutar_loop_facturas():
+def ejecutar_polling(puerto, baudrate=9600):
     global impresos
 
     impresos = cargar_impresos()
-    print("Script de facturas iniciado. Esperando facturas...")
+    print(f"Script de facturas iniciado. {len(impresos)} eventos previos cargados.")
+    print(f"[FACTURA] usando puerto={puerto} baudrate={baudrate}")
 
     while True:
         try:
             facturas = obtener_facturas()
 
             for factura in facturas:
-                procesar_factura(factura)
+                procesar_factura(factura, puerto, baudrate=baudrate)
 
             if facturas:
                 continue
@@ -456,11 +300,25 @@ def ejecutar_loop_facturas():
         time.sleep(2)
 
 
-def main():
-    if "--test-print" in sys.argv:
-        return ejecutar_modo_prueba()
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Worker de impresion de recibos de cliente.")
+    parser.add_argument("--port", default=None, help="Override manual de puerto (ej. COM6)")
+    args = parser.parse_args(argv)
 
-    ejecutar_loop_facturas()
+    puerto, baudrate = resolver_puerto_worker(args.port)
+    if puerto is None:
+        return 1
+
+    lock = SingleInstanceLock(NOMBRE_MUTEX_FACTURAS)
+    if not lock.acquire():
+        print("[FACTURA] Ya hay un worker de recibos en ejecucion en esta computadora. Cerrando.")
+        return 0
+
+    try:
+        ejecutar_polling(puerto, baudrate=baudrate)
+    finally:
+        lock.release()
+
     return 0
 
 

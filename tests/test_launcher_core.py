@@ -150,5 +150,43 @@ class GestorWorkerCocinaTest(unittest.TestCase):
         self.assertFalse(self.gestor.activo)
 
 
+class GestorWorkerCocinaAliasTest(unittest.TestCase):
+    """GestorWorkerCocina es un alias retrocompatible de GestorWorkerProceso
+    tras generalizar la clase para tambien arrancar el worker de recibos."""
+
+    def test_alias_apunta_a_la_misma_clase(self):
+        self.assertIs(launcher_core.GestorWorkerCocina, launcher_core.GestorWorkerProceso)
+
+
+class DosWorkersIndependientesTest(unittest.TestCase):
+    """Cocina y recibos son instancias independientes de GestorWorkerProceso:
+    arrancar/detener una no afecta el estado de la otra."""
+
+    def test_cada_worker_gestiona_su_propio_proceso_por_separado(self):
+        gestor_cocina = launcher_core.GestorWorkerProceso(worker_path=launcher_core.WORKER_COCINA_PATH)
+        gestor_recibos = launcher_core.GestorWorkerProceso(worker_path=launcher_core.WORKER_FACTURA_PATH)
+
+        proceso_cocina = mock.Mock()
+        proceso_cocina.poll.return_value = None
+        proceso_recibos = mock.Mock()
+        proceso_recibos.poll.return_value = None
+
+        with mock.patch.object(launcher_core.subprocess, "Popen", side_effect=[proceso_cocina, proceso_recibos]):
+            gestor_cocina.iniciar("COM7")
+            gestor_recibos.iniciar("COM7")
+
+        self.assertTrue(gestor_cocina.activo)
+        self.assertTrue(gestor_recibos.activo)
+
+        gestor_cocina.detener()
+
+        self.assertFalse(gestor_cocina.activo)
+        self.assertTrue(gestor_recibos.activo)
+        proceso_recibos.terminate.assert_not_called()
+
+    def test_worker_factura_path_apunta_a_script_factura(self):
+        self.assertEqual(launcher_core.WORKER_FACTURA_PATH.name, "script_factura.py")
+
+
 if __name__ == "__main__":
     unittest.main()
