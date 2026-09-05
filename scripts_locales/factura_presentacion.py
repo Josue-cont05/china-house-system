@@ -61,6 +61,22 @@ from bluetooth_printer import BluetoothPrinter
 LOGO_GRANDE_PATH = resource_paths.recurso("logo_neko_thermal.png")
 LOGO_MAX_WIDTH_PX = 272  # 340 px - 20%
 
+# Footer "PIDE DE NUEVO" (QR de WhatsApp): generado una sola vez con
+# build_qr.py (raiz del repo) a partir de https://wa.me/584222121392 -
+# asset local versionado, la impresion nunca depende de internet para
+# generarlo. Solo se imprime en Mesa y Pick Up (nunca Delivery).
+QR_WHATSAPP_PATH = resource_paths.recurso("qr_whatsapp_pedidos.png")
+QR_WHATSAPP_MAX_WIDTH_PX = 180  # dentro del rango pedido: ~170-190 px
+WHATSAPP_TEXTO = "WhatsApp: 0422-212-1392"
+INSTAGRAM_TEXTO = "Instagram: @nekowok.mgta"
+
+# Tipos de orden que llevan el footer (mismo criterio que el backend
+# para enrutar el recibo: ver app/domain/sales/print_queue.py,
+# rol_recibo_por_tipo_orden). OJO: el valor REAL guardado para Pick Up
+# es "Para llevar" (el <option> visible dice "Pick Up", su value no).
+# DELIVERY queda deliberadamente fuera.
+_TIPOS_CON_FOOTER_PIDE_DE_NUEVO = frozenset({"MESA", "PARA LLEVAR"})
+
 # Ancho imprimible real de una POS58 de 58 mm. El logo se centra
 # matematicamente dentro de este ancho fisico (canvas_width de
 # print_image()), no con "espacios" de texto ni offsets manuales.
@@ -248,6 +264,27 @@ def _imprimir_item(printer, item):
     printer.set_bold(False)
 
 
+def _imprimir_footer_pide_de_nuevo(printer, tipo_norm):
+    """Footer compacto de reorden por WhatsApp: SOLO Mesa y Pick Up
+    (nunca Delivery). QR negro sobre blanco, centrado, con margen
+    blanco alrededor (print_image ya recorta/centra sin deformar - ver
+    bluetooth_printer.py); sin ningun otro mensaje promocional."""
+    if tipo_norm not in _TIPOS_CON_FOOTER_PIDE_DE_NUEVO:
+        return
+
+    printer.feed(1)
+    printer.align("center")
+    _destacado(printer, "PIDE DE NUEVO")
+    printer.feed(1)
+    printer.print_image(
+        str(QR_WHATSAPP_PATH),
+        max_width=QR_WHATSAPP_MAX_WIDTH_PX,
+        canvas_width=PAPEL_IMPRIMIBLE_PX,
+    )
+    printer.print_line(WHATSAPP_TEXTO)
+    printer.print_line(INSTAGRAM_TEXTO)
+
+
 def imprimir_factura(
     numero,
     cliente,
@@ -382,5 +419,7 @@ def imprimir_factura(
 
         printer.print_line("    Neko Wok")
         printer.print_wrapped("Hecho con wok y cariño.")
+
+        _imprimir_footer_pide_de_nuevo(printer, tipo_norm)
 
         printer.feed(4)

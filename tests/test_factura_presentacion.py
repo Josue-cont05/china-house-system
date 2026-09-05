@@ -131,7 +131,10 @@ class ImprimirFacturaTest(unittest.TestCase):
 
     # --- logo ------------------------------------------------------------
     def test_logo_grande_se_imprime_centrado_en_ancho_fisico(self):
-        stub, _ = self._imprimir()
+        # tipo=Delivery: sin footer/QR, para aislar especificamente el
+        # logo (el footer "PIDE DE NUEVO" de Mesa/Pick Up tambien llama
+        # print_image, ver FooterPideDeNuevoTest para esos casos).
+        stub, _ = self._imprimir(tipo="Delivery", referencia="Los Robles", delivery=3.0, total=19.0)
         self.assertEqual(len(stub.imagenes), 1)
         path, kwargs = stub.imagenes[0]
         self.assertTrue(str(path).endswith("logo_neko_thermal.png"))
@@ -208,6 +211,94 @@ class ImprimirFacturaTest(unittest.TestCase):
         stub_provisional, _ = self._imprimir(cobrada=False)
         stub_cobrada, _ = self._imprimir(cobrada=True)
         self.assertEqual(stub_provisional.lineas, stub_cobrada.lineas)
+
+
+class FooterPideDeNuevoTest(unittest.TestCase):
+    """Footer compacto "PIDE DE NUEVO" (QR de WhatsApp): solo Mesa y
+    Pick Up, nunca Delivery. No hereda de ImprimirFacturaTest a proposito
+    (heredar de un TestCase con muchos test_* repetiria todos esos tests
+    bajo este nombre tambien); duplica sus dos helpers pequenos."""
+
+    def _items(self):
+        return [{"cantidad": 2, "nombre": "Neko Combo 2", "total": 16.0}]
+
+    def _imprimir(self, **overrides):
+        base = dict(
+            numero=42,
+            cliente="Ana",
+            tipo="Mesa",
+            referencia="Mesa 3",
+            fecha_hora="2026-09-05 12:00:00",
+            items=self._items(),
+            subtotal=16.0,
+            descuento=0,
+            delivery=0,
+            total=16.0,
+            total_bs=3200.0,
+            port="COM6",
+        )
+        base.update(overrides)
+        stub = _PrinterStub()
+        with mock.patch.object(presentacion, "BluetoothPrinter", return_value=stub) as cls:
+            presentacion.imprimir_factura(**base)
+        return stub, cls
+
+    def test_mesa_incluye_el_footer(self):
+        stub, _ = self._imprimir(tipo="Mesa")
+        self.assertIn("PIDE DE NUEVO", stub.lineas)
+        self.assertIn(presentacion.WHATSAPP_TEXTO, stub.lineas)
+        self.assertIn(presentacion.INSTAGRAM_TEXTO, stub.lineas)
+        self.assertEqual(len(stub.imagenes), 2)  # logo + QR
+
+    def test_pick_up_incluye_el_footer(self):
+        # El valor REAL guardado para Pick Up es "Para llevar" (el
+        # <option> visible dice "Pick Up", su value no) -- ver
+        # app/domain/sales/print_queue.py, rol_recibo_por_tipo_orden.
+        stub, _ = self._imprimir(tipo="Para llevar", referencia="")
+        self.assertIn("PIDE DE NUEVO", stub.lineas)
+        self.assertEqual(len(stub.imagenes), 2)
+
+    def test_delivery_no_incluye_el_footer(self):
+        stub, _ = self._imprimir(tipo="Delivery", referencia="Los Robles", delivery=3.0, total=19.0)
+        self.assertNotIn("PIDE DE NUEVO", stub.lineas)
+        self.assertNotIn(presentacion.WHATSAPP_TEXTO, stub.lineas)
+        self.assertNotIn(presentacion.INSTAGRAM_TEXTO, stub.lineas)
+        self.assertEqual(len(stub.imagenes), 1)  # solo el logo
+
+    def test_mesa_no_agrega_ningun_otro_texto_promocional_ademas_del_footer(self):
+        # El footer aporta exactamente 3 lineas de texto nuevas (titulo +
+        # whatsapp + instagram) y ninguna otra: nada mas se agrego.
+        stub, _ = self._imprimir(tipo="Mesa")
+        texto_footer = {"PIDE DE NUEVO", presentacion.WHATSAPP_TEXTO, presentacion.INSTAGRAM_TEXTO}
+        lineas_tras_cierre = stub.lineas[stub.lineas.index("Hecho con wok y cariño.") + 1:]
+        self.assertEqual(set(lineas_tras_cierre), texto_footer)
+
+    def test_qr_usa_el_asset_local_versionado_no_una_url_externa(self):
+        stub, _ = self._imprimir(tipo="Mesa")
+        ruta_qr, kwargs = stub.imagenes[-1]
+        self.assertEqual(Path(ruta_qr).name, "qr_whatsapp_pedidos.png")
+        self.assertNotIn("http", ruta_qr)
+
+    def test_qr_ancho_dentro_del_rango_pedido(self):
+        stub, _ = self._imprimir(tipo="Mesa")
+        _, kwargs = stub.imagenes[-1]
+        self.assertGreaterEqual(kwargs["max_width"], 170)
+        self.assertLessEqual(kwargs["max_width"], 190)
+
+    def test_qr_se_centra_en_el_ancho_fisico_del_papel(self):
+        stub, _ = self._imprimir(tipo="Mesa")
+        _, kwargs = stub.imagenes[-1]
+        self.assertEqual(kwargs["canvas_width"], presentacion.PAPEL_IMPRIMIBLE_PX)
+
+    def test_asset_qr_existe_y_es_negro_sobre_blanco(self):
+        from PIL import Image
+
+        self.assertTrue(presentacion.QR_WHATSAPP_PATH.exists())
+        imagen = Image.open(presentacion.QR_WHATSAPP_PATH).convert("RGB")
+        colores = set(imagen.getdata())
+        # Negro sobre blanco: solo deberian aparecer (aprox.) esos dos
+        # colores (permitiendo un poco de antialiasing/compresion).
+        self.assertTrue(all(c in ((0, 0, 0), (255, 255, 255)) for c in colores))
 
 
 if __name__ == "__main__":

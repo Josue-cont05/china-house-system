@@ -31,12 +31,14 @@ block_cipher = None
 REPO_ROOT = Path(SPECPATH)
 SCRIPTS_LOCALES = REPO_ROOT / "scripts_locales"
 
-# Los dos logos ESC/POS (ver scripts_locales/resource_paths.py): se
-# colocan en la RAIZ del onedir, junto al .exe, no en una subcarpeta -
-# es justo donde resource_paths.recurso() los busca cuando esta frozen.
+# Los logos ESC/POS y el QR de WhatsApp (ver
+# scripts_locales/resource_paths.py): se colocan en la RAIZ del onedir,
+# junto al .exe, no en una subcarpeta - es justo donde
+# resource_paths.recurso() los busca cuando esta frozen.
 datas = [
     (str(SCRIPTS_LOCALES / "mini_logo_neko_thermal_01.png"), "."),
     (str(SCRIPTS_LOCALES / "logo_neko_thermal.png"), "."),
+    (str(SCRIPTS_LOCALES / "qr_whatsapp_pedidos.png"), "."),
 ]
 
 # print_dispatcher/script_comanda_cocina/script_factura se importan de
