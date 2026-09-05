@@ -7,27 +7,51 @@ proceso responsable de:
 - hacer polling de /ordenes_cocina cada 3 segundos;
 - decidir, por `evento_impresion`, que comanda ya fue impresa;
 - persistir esa deduplicacion en disco (comandas_impresas.txt) para que
-  reiniciar el script o Windows no reimprima comandas ya impresas.
+  reiniciar el script o Windows no reimprima comandas ya impresas;
+- decidir el puerto serie a usar (COM6 en una PC puede ser COM8 en otra, o
+  cambiar tras un reemparejamiento Bluetooth) y pasarselo explicito a la
+  capa de presentacion - ver PUERTO mas abajo.
 
-La impresion en si (formato, ESC/POS, BluetoothPrinter COM6/9600) vive en
+La impresion en si (formato, ESC/POS, BluetoothPrinter) vive en
 comanda_presentacion.py, migrada tal cual desde el diseno fisicamente
 aprobado en NekoPrinterTest. Este worker NO decide que items son nuevos:
 cada evento de /ordenes_cocina ya es un lote (una orden_comanda) que trae
 unicamente los items de ese envio - eso lo resuelve el backend de NekoPOS,
 no este script.
 
+PUERTO:
+- Uso normal (via Neko Local, o manual sin argumentos): se lee la
+  configuracion local guardada por Neko Local (neko_config.py) y se
+  localiza el puerto vigente, incluso si cambio de numero de COM
+  (port_detection.py). Si no hay impresora configurada, o hay ambiguedad,
+  el worker lo indica claramente y no arranca el polling.
+- Override de diagnostico: `python script_comanda_cocina.py --port COM6`
+  fuerza ese puerto sin consultar la configuracion, util para probar en
+  desarrollo sin pasar por el asistente de Neko Local.
+
+INSTANCIA UNICA: antes de empezar a hacer polling, este worker toma un
+mutex de Windows con nombre fijo (single_instance.py). Si ya hay un worker
+corriendo (lanzado por Neko Local o manualmente), este segundo proceso lo
+detecta, muestra un mensaje y termina limpiamente sin tocar el primero.
+
 Ejecutar como servicio: python script_comanda_cocina.py
 """
 
+import argparse
 import time
 from pathlib import Path
 
 import requests
 
+import neko_config
+import port_detection
 from bluetooth_printer import PrinterError
 from comanda_presentacion import imprimir_comanda
+from single_instance import SingleInstanceLock
 
-URL_COCINA = "https://neko-wok-system.onrender.com/ordenes_cocina"
+URL_COCINA = f"{neko_config.NEKOPOS_BASE_URL}/ordenes_cocina"
+
+NOMBRE_MUTEX_COCINA = "NekoWok_ComandaCocinaWorker"
 
 # Resuelto desde la ubicacion de este archivo, no desde el working directory,
 # para que funcione sin importar desde donde se ejecute el servicio.
@@ -92,7 +116,7 @@ def obtener_comandas():
     return ordenes
 
 
-def procesar_comanda(orden):
+def procesar_comanda(orden, puerto, baudrate=9600):
     evento_impresion = orden.get("evento_impresion") or f"cocina_{orden.get('id')}"
     es_reimpresion = bool(orden.get("reimpresion_token"))
 
@@ -108,7 +132,7 @@ def procesar_comanda(orden):
     print(f"[COCINA] enviando a impresora: {evento_impresion}")
 
     try:
-        imprimir_comanda(orden)
+        imprimir_comanda(orden, puerto, baudrate=baudrate)
     except PrinterError as e:
         print(f"ERROR imprimiendo comanda (evento {evento_impresion}): {e}")
         return
@@ -121,11 +145,12 @@ def procesar_comanda(orden):
     guardar_impreso(evento_impresion)
 
 
-def ejecutar_polling():
+def ejecutar_polling(puerto, baudrate=9600):
     global impresos
 
     impresos = cargar_impresos()
     print(f"Script de comandas iniciado. {len(impresos)} eventos previos cargados.")
+    print(f"[COCINA] usando puerto={puerto} baudrate={baudrate}")
 
     while True:
         try:
@@ -133,7 +158,7 @@ def ejecutar_polling():
             ordenes = obtener_comandas()
 
             for orden in ordenes:
-                procesar_comanda(orden)
+                procesar_comanda(orden, puerto, baudrate=baudrate)
 
         except Exception as e:
             print(f"ERROR general: {e}")
@@ -141,5 +166,69 @@ def ejecutar_polling():
         time.sleep(3)
 
 
+def resolver_puerto_worker(override_port):
+    """Decide el puerto a usar al arrancar. Si `override_port` viene dado
+    (--port), se usa directamente sin tocar la configuracion. Si no,
+    resuelve contra la configuracion local, actualizandola si la huella
+    encontro la impresora en un nuevo COM. Devuelve (puerto, baudrate) o
+    (None, None) si no se puede resolver (y ya imprimio por que)."""
+    if override_port:
+        print(f"[COCINA] Puerto forzado por --port: {override_port}")
+        return override_port, neko_config.DEFAULT_BAUDRATE
+
+    config = neko_config.cargar_config()
+    resultado = port_detection.resolver_puerto(config)
+
+    if resultado.status == "ok":
+        return resultado.port, config.get("baudrate", neko_config.DEFAULT_BAUDRATE)
+
+    if resultado.status == "rematched":
+        neko_config.guardar_config(resultado.config)
+        print(f"[COCINA] La impresora cambio de puerto; ahora en {resultado.port}.")
+        return resultado.port, resultado.config.get("baudrate", neko_config.DEFAULT_BAUDRATE)
+
+    if resultado.status == "sin_configurar":
+        print(
+            "[COCINA] No hay impresora configurada todavia. "
+            "Abre Neko Local y usa 'Configurar impresora'."
+        )
+        return None, None
+
+    if resultado.status == "ambiguous":
+        print(
+            "[COCINA] Varios puertos coinciden con la impresora guardada; "
+            "no se puede elegir automaticamente. Reconfigura desde Neko Local."
+        )
+        return None, None
+
+    print(
+        "[COCINA] No se encontro la impresora configurada (puerto guardado "
+        "ausente y ninguna coincidencia por huella). Reconfigura desde Neko Local."
+    )
+    return None, None
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Worker de impresion de comandas de cocina.")
+    parser.add_argument("--port", default=None, help="Override manual de puerto (ej. COM6)")
+    args = parser.parse_args(argv)
+
+    puerto, baudrate = resolver_puerto_worker(args.port)
+    if puerto is None:
+        return 1
+
+    lock = SingleInstanceLock(NOMBRE_MUTEX_COCINA)
+    if not lock.acquire():
+        print("[COCINA] Ya hay un worker de comandas en ejecucion en esta computadora. Cerrando.")
+        return 0
+
+    try:
+        ejecutar_polling(puerto, baudrate=baudrate)
+    finally:
+        lock.release()
+
+    return 0
+
+
 if __name__ == "__main__":
-    ejecutar_polling()
+    raise SystemExit(main())

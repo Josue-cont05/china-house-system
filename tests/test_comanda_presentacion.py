@@ -121,12 +121,27 @@ class ImprimirComandaHeaderTest(unittest.TestCase):
         base.update(overrides)
         return base
 
-    def _imprimir_y_capturar(self, orden):
+    def _imprimir_y_capturar(self, orden, port="COM6"):
         stub = _PrinterStub()
-        with mock.patch.object(presentacion, "BluetoothPrinter", return_value=stub):
+        with mock.patch.object(presentacion, "BluetoothPrinter", return_value=stub) as mock_printer_cls:
             with mock.patch.object(presentacion.winsound, "Beep"):
-                presentacion.imprimir_comanda(orden)
+                presentacion.imprimir_comanda(orden, port)
+        self._ultima_llamada_bluetooth_printer = mock_printer_cls
         return stub.lineas
+
+    def test_puerto_recibido_llega_tal_cual_a_bluetooth_printer(self):
+        """La plantilla NO decide hardware: el puerto que se le pasa debe
+        llegar exactamente igual a BluetoothPrinter, sin ningun default
+        propio como "COM6" fijo."""
+        self._imprimir_y_capturar(self._orden(numero=38, secuencia=0), port="COM7")
+        self._ultima_llamada_bluetooth_printer.assert_called_once_with(port="COM7", baudrate=9600)
+
+    def test_baudrate_explicito_llega_a_bluetooth_printer(self):
+        stub = _PrinterStub()
+        with mock.patch.object(presentacion, "BluetoothPrinter", return_value=stub) as mock_printer_cls:
+            with mock.patch.object(presentacion.winsound, "Beep"):
+                presentacion.imprimir_comanda(self._orden(numero=38, secuencia=0), "COM7", baudrate=19200)
+        mock_printer_cls.assert_called_once_with(port="COM7", baudrate=19200)
 
     def test_primer_envio_muestra_comanda_numero_sin_sufijo(self):
         lineas = self._imprimir_y_capturar(self._orden(numero=38, secuencia=0))

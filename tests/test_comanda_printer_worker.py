@@ -52,9 +52,9 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         orden = self._orden("comanda-1-base", ["1x Neko Combo 2"])
 
         with mock.patch.object(worker, "imprimir_comanda") as mock_print:
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
 
-        mock_print.assert_called_once_with(orden)
+        mock_print.assert_called_once_with(orden, "COM6", baudrate=9600)
         self.assertIn("comanda-1-base", worker.impresos)
         self.assertEqual(
             worker.ARCHIVO_IMPRESAS.read_text(encoding="utf-8").splitlines(),
@@ -66,23 +66,23 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         orden = self._orden("comanda-1-base", ["1x Neko Combo 2"])
 
         with mock.patch.object(worker, "imprimir_comanda") as mock_print:
-            worker.procesar_comanda(orden)
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
+            worker.procesar_comanda(orden, "COM6")
 
-        mock_print.assert_called_once_with(orden)
+        mock_print.assert_called_once_with(orden, "COM6", baudrate=9600)
 
     # 3. nueva instancia/reinicio -> carga persistencia y no repite
     def test_restart_loads_persisted_events_and_does_not_repeat(self):
         orden = self._orden("comanda-1-base", ["1x Neko Combo 2"])
         with mock.patch.object(worker, "imprimir_comanda") as mock_print:
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
 
         # Simula un reinicio del proceso: nueva instancia de `impresos`,
         # reconstruida solo desde el archivo persistido en disco.
         worker.impresos = worker.cargar_impresos()
 
         with mock.patch.object(worker, "imprimir_comanda") as mock_print_after_restart:
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
 
         mock_print_after_restart.assert_not_called()
 
@@ -92,12 +92,12 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         incremental = self._orden("comanda-2-base", ["1x Frescolita"], id=2)
 
         with mock.patch.object(worker, "imprimir_comanda") as mock_print:
-            worker.procesar_comanda(inicial)
-            worker.procesar_comanda(incremental)
+            worker.procesar_comanda(inicial, "COM6")
+            worker.procesar_comanda(incremental, "COM6")
 
         self.assertEqual(mock_print.call_count, 2)
-        mock_print.assert_any_call(inicial)
-        mock_print.assert_any_call(incremental)
+        mock_print.assert_any_call(inicial, "COM6", baudrate=9600)
+        mock_print.assert_any_call(incremental, "COM6", baudrate=9600)
 
     # 5. reimpresion con evento diferente -> imprime aunque la comanda base
     #    ya haya sido impresa (mismo comanda_id, evento_impresion distinto
@@ -112,8 +112,8 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         )
 
         with mock.patch.object(worker, "imprimir_comanda") as mock_print:
-            worker.procesar_comanda(original)
-            worker.procesar_comanda(reimpresion)
+            worker.procesar_comanda(original, "COM6")
+            worker.procesar_comanda(reimpresion, "COM6")
 
         self.assertEqual(mock_print.call_count, 2)
         self.assertIn("comanda-1-base", worker.impresos)
@@ -126,16 +126,16 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         with mock.patch.object(
             worker, "imprimir_comanda", side_effect=worker.PrinterError("sin papel")
         ):
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
 
         self.assertNotIn("comanda-1-base", worker.impresos)
         self.assertFalse(worker.ARCHIVO_IMPRESAS.exists())
 
         # Debe poder reintentarse en el siguiente ciclo sin quedar bloqueado.
         with mock.patch.object(worker, "imprimir_comanda") as mock_print_retry:
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
 
-        mock_print_retry.assert_called_once_with(orden)
+        mock_print_retry.assert_called_once_with(orden, "COM6", baudrate=9600)
         self.assertIn("comanda-1-base", worker.impresos)
 
     # 6b. una excepcion inesperada (no PrinterError) tampoco debe persistir
@@ -146,7 +146,7 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         with mock.patch.object(
             worker, "imprimir_comanda", side_effect=RuntimeError("puerto ocupado")
         ):
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
 
         self.assertNotIn("comanda-1-base", worker.impresos)
 
@@ -155,7 +155,7 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         orden = self._orden("comanda-1-base", ["1x Neko Combo 2", "2x Frescolita"])
 
         with mock.patch.object(worker, "imprimir_comanda") as mock_print:
-            worker.procesar_comanda(orden)
+            worker.procesar_comanda(orden, "COM6")
 
         items_recibidos = mock_print.call_args.args[0]["items"]
         self.assertEqual(items_recibidos, ["1x Neko Combo 2", "2x Frescolita"])
@@ -166,8 +166,8 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         incremental = self._orden("comanda-2-base", ["1x Frescolita"], id=1)
 
         with mock.patch.object(worker, "imprimir_comanda") as mock_print:
-            worker.procesar_comanda(inicial)
-            worker.procesar_comanda(incremental)
+            worker.procesar_comanda(inicial, "COM6")
+            worker.procesar_comanda(incremental, "COM6")
 
         primeros_items = mock_print.call_args_list[0].args[0]["items"]
         segundos_items = mock_print.call_args_list[1].args[0]["items"]
@@ -220,17 +220,131 @@ class ComandaPrinterWorkerTest(unittest.TestCase):
         mala = self._orden("comanda-2-base", ["1x Frescolita"], id=2)
         buena_2 = self._orden("comanda-3-base", ["1x Familiar"], id=3)
 
-        def falla_solo_la_mala(orden):
+        def falla_solo_la_mala(orden, puerto, baudrate=9600):
             if orden["id"] == 2:
                 raise worker.PrinterError("bluetooth desconectado")
 
         with mock.patch.object(worker, "imprimir_comanda", side_effect=falla_solo_la_mala):
             for orden in (buena_1, mala, buena_2):
-                worker.procesar_comanda(orden)
+                worker.procesar_comanda(orden, "COM6")
 
         self.assertIn("comanda-1-base", worker.impresos)
         self.assertNotIn("comanda-2-base", worker.impresos)
         self.assertIn("comanda-3-base", worker.impresos)
+
+
+class WorkerPortResolutionTest(unittest.TestCase):
+    """resolver_puerto_worker: decide el puerto sin abrir nada, delegando
+    en neko_config/port_detection (que se mockean aqui)."""
+
+    def test_override_port_skips_config_lookup(self):
+        with mock.patch.object(worker.neko_config, "cargar_config") as mock_cargar:
+            puerto, baudrate = worker.resolver_puerto_worker("COM9")
+
+        mock_cargar.assert_not_called()
+        self.assertEqual(puerto, "COM9")
+
+    def test_config_ok_uses_saved_port(self):
+        config = {"printer_port": "COM6", "baudrate": 9600, "printer_fingerprint": {}}
+        resultado = worker.port_detection.ResultadoResolucion("ok", "COM6", config, [])
+
+        with mock.patch.object(worker.neko_config, "cargar_config", return_value=config):
+            with mock.patch.object(worker.port_detection, "resolver_puerto", return_value=resultado):
+                puerto, baudrate = worker.resolver_puerto_worker(None)
+
+        self.assertEqual((puerto, baudrate), ("COM6", 9600))
+
+    def test_rematched_persists_new_config(self):
+        config_vieja = {"printer_port": "COM6", "baudrate": 9600, "printer_fingerprint": {}}
+        config_nueva = {"printer_port": "COM8", "baudrate": 9600, "printer_fingerprint": {}}
+        resultado = worker.port_detection.ResultadoResolucion("rematched", "COM8", config_nueva, [])
+
+        with mock.patch.object(worker.neko_config, "cargar_config", return_value=config_vieja):
+            with mock.patch.object(worker.port_detection, "resolver_puerto", return_value=resultado):
+                with mock.patch.object(worker.neko_config, "guardar_config") as mock_guardar:
+                    puerto, baudrate = worker.resolver_puerto_worker(None)
+
+        mock_guardar.assert_called_once_with(config_nueva)
+        self.assertEqual(puerto, "COM8")
+
+    def test_sin_configurar_returns_none(self):
+        resultado = worker.port_detection.ResultadoResolucion("sin_configurar", None, None, [])
+        with mock.patch.object(worker.neko_config, "cargar_config", return_value={}):
+            with mock.patch.object(worker.port_detection, "resolver_puerto", return_value=resultado):
+                puerto, baudrate = worker.resolver_puerto_worker(None)
+        self.assertIsNone(puerto)
+
+    def test_ambiguous_does_not_autoselect(self):
+        resultado = worker.port_detection.ResultadoResolucion("ambiguous", None, None, ["a", "b"])
+        with mock.patch.object(worker.neko_config, "cargar_config", return_value={}):
+            with mock.patch.object(worker.port_detection, "resolver_puerto", return_value=resultado):
+                puerto, baudrate = worker.resolver_puerto_worker(None)
+        self.assertIsNone(puerto)
+
+    def test_not_found_returns_none(self):
+        resultado = worker.port_detection.ResultadoResolucion("not_found", None, None, [])
+        with mock.patch.object(worker.neko_config, "cargar_config", return_value={}):
+            with mock.patch.object(worker.port_detection, "resolver_puerto", return_value=resultado):
+                puerto, baudrate = worker.resolver_puerto_worker(None)
+        self.assertIsNone(puerto)
+
+
+class WorkerMainSingleInstanceTest(unittest.TestCase):
+    """main(): resuelve el puerto, toma el lock de instancia unica y solo
+    arranca el polling si lo obtuvo. Todo mockeado: nunca llama
+    ejecutar_polling() de verdad (evitaria terminar por ser un loop
+    infinito) ni abre COM ni mutex real."""
+
+    def test_main_does_not_poll_when_port_unresolved(self):
+        with mock.patch.object(worker, "resolver_puerto_worker", return_value=(None, None)):
+            with mock.patch.object(worker, "ejecutar_polling") as mock_poll:
+                resultado = worker.main([])
+
+        mock_poll.assert_not_called()
+        self.assertEqual(resultado, 1)
+
+    def test_main_does_not_poll_when_lock_not_acquired(self):
+        with mock.patch.object(worker, "resolver_puerto_worker", return_value=("COM6", 9600)):
+            with mock.patch.object(worker, "SingleInstanceLock") as MockLock:
+                MockLock.return_value.acquire.return_value = False
+                with mock.patch.object(worker, "ejecutar_polling") as mock_poll:
+                    resultado = worker.main([])
+
+        mock_poll.assert_not_called()
+        self.assertEqual(resultado, 0)
+
+    def test_main_polls_and_releases_lock_when_acquired(self):
+        with mock.patch.object(worker, "resolver_puerto_worker", return_value=("COM6", 9600)):
+            with mock.patch.object(worker, "SingleInstanceLock") as MockLock:
+                instancia = MockLock.return_value
+                instancia.acquire.return_value = True
+                with mock.patch.object(worker, "ejecutar_polling") as mock_poll:
+                    worker.main([])
+
+        mock_poll.assert_called_once_with("COM6", baudrate=9600)
+        instancia.release.assert_called_once()
+
+    def test_main_forwards_override_port_argument(self):
+        with mock.patch.object(
+            worker, "resolver_puerto_worker", return_value=("COM9", 9600)
+        ) as mock_resolver:
+            with mock.patch.object(worker, "SingleInstanceLock") as MockLock:
+                MockLock.return_value.acquire.return_value = True
+                with mock.patch.object(worker, "ejecutar_polling"):
+                    worker.main(["--port", "COM9"])
+
+        mock_resolver.assert_called_once_with("COM9")
+
+    def test_lock_is_released_even_if_polling_raises(self):
+        with mock.patch.object(worker, "resolver_puerto_worker", return_value=("COM6", 9600)):
+            with mock.patch.object(worker, "SingleInstanceLock") as MockLock:
+                instancia = MockLock.return_value
+                instancia.acquire.return_value = True
+                with mock.patch.object(worker, "ejecutar_polling", side_effect=RuntimeError("boom")):
+                    with self.assertRaises(RuntimeError):
+                        worker.main([])
+
+        instancia.release.assert_called_once()
 
 
 if __name__ == "__main__":

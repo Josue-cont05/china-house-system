@@ -3,15 +3,20 @@ comanda_presentacion.py
 
 Capa de presentacion de comandas de cocina para Neko Wok, migrada tal cual
 desde C:\\NekoPrinterTest\\comandas_cocina.py (commit ea890bf, fisicamente
-aprobado): impresora POS58 por Bluetooth SPP (COM6, 9600 baudios, ESC/POS,
-codepage 16 / cp1252, ~32 columnas), via BluetoothPrinter.
+aprobado): impresora POS58 por Bluetooth SPP, 9600 baudios, ESC/POS,
+codepage 16 / cp1252, ~32 columnas, via BluetoothPrinter.
 
-Este modulo SOLO imprime: no hace polling, no decide deduplicacion ni que
-items son nuevos. Recibe un evento de /ordenes_cocina (una orden_comanda,
-segun el diseno actual de NekoPOS) y aplica el mismo formato ya validado
-fisicamente en NekoPrinterTest. `imprimir_comanda(orden)` imprime
-exactamente `orden["items"]`, sin reconstruir ni comparar contra otras
-comandas: esa separacion en lotes ya la hace el backend.
+Este modulo SOLO imprime: no hace polling, no decide deduplicacion, no
+decide que items son nuevos y NO decide el puerto (COM6 en una PC puede
+ser COM8 en otra, o cambiar tras un reemparejamiento Bluetooth). El
+puerto/baudrate los recibe explicitos en `imprimir_comanda(orden, port,
+baudrate=9600)`, resueltos por quien llama (el worker, a partir de la
+configuracion local de Neko Local en neko_config.py/port_detection.py, o
+un override manual). Recibe un evento de /ordenes_cocina (una
+orden_comanda, segun el diseno actual de NekoPOS) y aplica el mismo
+formato ya validado fisicamente en NekoPrinterTest: imprime exactamente
+`orden["items"]`, sin reconstruir ni comparar contra otras comandas - esa
+separacion en lotes ya la hace el backend.
 
 El worker responsable de polling + deduplicacion persistente es
 script_comanda_cocina.py, en este mismo directorio.
@@ -183,7 +188,11 @@ def _imprimir_item(printer, item):
     printer.feed(1)  # separacion visual entre items, igual que actualmente
 
 
-def imprimir_comanda(orden):
+def imprimir_comanda(orden, port, baudrate=9600):
+    """Imprime una comanda. `port`/`baudrate` los decide quien llama (el
+    worker, a partir de la configuracion local de Neko Local o de un
+    override explicito) - esta plantilla NO decide hardware ni tiene un
+    puerto por defecto propio."""
     print("IMPRIMIENDO COMANDA:", orden)
 
     winsound.Beep(1000, 300)
@@ -213,7 +222,7 @@ def imprimir_comanda(orden):
     # mas abajo); en ese caso no se repite como "REF: ..." en datos normales.
     mostrar_ref_normal = referencia_valida and tipo_norm != "MESA"
 
-    with BluetoothPrinter(port="COM6", baudrate=9600) as printer:
+    with BluetoothPrinter(port=port, baudrate=baudrate) as printer:
         # 1. Logo centrado, desplazado a la derecha LOGO_OFFSET_X_PX px
         # (compensacion de centrado visual reportada en la impresora fisica)
         printer.print_image(

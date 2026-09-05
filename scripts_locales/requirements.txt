@@ -1,0 +1,8 @@
+pyserial==3.5
+Pillow>=10.0
+requests>=2.31
+
+# NOTA: script_factura.py (Bloque B, facturas - todavia no integrado en
+# Neko Local) usa win32print y requiere ademas `pywin32`. No se agrega
+# aqui todavia para no instalar una dependencia que este bloque no usa;
+# se sumara cuando el launcher integre el worker de recibos.
