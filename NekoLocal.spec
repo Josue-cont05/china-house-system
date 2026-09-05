@@ -53,6 +53,8 @@ hiddenimports = [
     "neko_log",
     "neko_version",
     "port_detection",
+    "printer_diagnostics",
+    "windows_bluetooth",
     "resource_paths",
     "single_instance",
     "launcher_core",

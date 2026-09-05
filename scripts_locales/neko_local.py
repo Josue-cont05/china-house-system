@@ -46,8 +46,11 @@ segun resource_paths.es_frozen()).
 
 import argparse
 import os
+import platform
+import queue
 import subprocess
 import sys
+import threading
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -70,7 +73,9 @@ import neko_config
 import neko_log
 import neko_version
 import port_detection
+import printer_diagnostics
 import resource_paths
+import windows_bluetooth
 from launcher_core import (
     GestorWorkerProceso,
     MODO_FROZEN_COCINA,
@@ -112,6 +117,96 @@ def abrir_configuracion_bluetooth():
     except Exception as e:
         messagebox.showerror("Neko Local", f"No se pudo abrir la configuracion de Bluetooth: {e}")
         return False
+
+
+class VentanaProgreso(tk.Toplevel):
+    """Ventana minima "Probando conexión... [barra]" que se muestra
+    mientras `_PuenteHiloGUI` trabaja en segundo plano. Nunca se cierra
+    con la X (evitaria dejar un hilo huerfano sin avisar): se cierra
+    solo desde codigo, cuando el trabajo termina."""
+
+    def __init__(self, master, titulo="Neko Local"):
+        super().__init__(master)
+        self.title(titulo)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        self._var_estado = tk.StringVar(value="Iniciando...")
+        ttk.Label(self, textvariable=self._var_estado, padding=16, wraplength=320).pack()
+        self._barra = ttk.Progressbar(self, mode="indeterminate", length=280)
+        self._barra.pack(padx=16, pady=(0, 16))
+        self._barra.start(12)
+
+    def actualizar(self, texto):
+        self._var_estado.set(texto)
+
+    def cerrar(self):
+        self._barra.stop()
+        self.destroy()
+
+
+class _PuenteHiloGUI:
+    """Corre `funcion(progreso, preguntar)` en un hilo aparte para que la
+    GUI de Tkinter NUNCA se bloquee (el fallo real que motivo este
+    modulo: abrir un COM Bluetooth a medio crear puede colgarse
+    indefinidamente).
+
+    `funcion` recibe dos callbacks que puede llamar desde el hilo de
+    trabajo con seguridad:
+    - progreso(texto): informa un mensaje de estado (no bloquea).
+    - preguntar(texto): pide una confirmacion SI/NO. BLOQUEA el hilo de
+      TRABAJO (nunca el de Tkinter) hasta que el hilo principal muestre
+      el messagebox real y responda.
+
+    El resultado final de `funcion` llega a `on_terminado`, ya en el
+    hilo principal (vía root.after), para que pueda tocar widgets con
+    seguridad.
+    """
+
+    def __init__(self, root, funcion, on_progreso, on_terminado):
+        self._root = root
+        self._funcion = funcion
+        self._on_progreso = on_progreso
+        self._on_terminado = on_terminado
+        self._cola = queue.Queue()
+
+    def iniciar(self):
+        threading.Thread(target=self._ejecutar, daemon=True).start()
+        self._root.after(80, self._bombear)
+
+    def _progreso(self, texto):
+        self._cola.put(("progreso", texto))
+
+    def _preguntar(self, texto):
+        evento = threading.Event()
+        caja = {}
+        self._cola.put(("preguntar", texto, evento, caja))
+        evento.wait()
+        return caja.get("respuesta", False)
+
+    def _ejecutar(self):
+        try:
+            resultado = self._funcion(self._progreso, self._preguntar)
+        except Exception as e:
+            resultado = ("error", e)
+        self._cola.put(("fin", resultado))
+
+    def _bombear(self):
+        try:
+            while True:
+                item = self._cola.get_nowait()
+                if item[0] == "progreso":
+                    self._on_progreso(item[1])
+                elif item[0] == "preguntar":
+                    _, texto, evento, caja = item
+                    caja["respuesta"] = messagebox.askyesno("Neko Local", texto)
+                    evento.set()
+                elif item[0] == "fin":
+                    self._on_terminado(item[1])
+                    return
+        except queue.Empty:
+            pass
+        self._root.after(80, self._bombear)
 
 
 class AsistenteImpresora(tk.Toplevel):
@@ -287,6 +382,11 @@ class NekoLocalApp:
             command=self._configurar_automaticamente,
         ).pack(fill="x", pady=2)
         ttk.Button(
+            botones,
+            text="SOLUCIONAR PROBLEMAS DE IMPRESORA",
+            command=self._solucionar_problemas,
+        ).pack(fill="x", pady=2)
+        ttk.Button(
             botones, text="Configuración avanzada", command=self._abrir_asistente
         ).pack(fill="x", pady=2)
         ttk.Button(botones, text="ABRIR NEKOPOS", command=self._abrir_nekopos).pack(
@@ -298,59 +398,93 @@ class NekoLocalApp:
         AsistenteImpresora(self.root, on_guardado=lambda config: self._actualizar_estados())
 
     def _configurar_automaticamente(self):
-        """Flujo prioritario (seccion 12-15 de la mision de empaquetado):
-        el socio NO elige COM. Prueba candidatos uno por uno, ordenados
-        por probabilidad (fingerprint ya conocido primero), y solo
-        pregunta SI/NO por cada uno. Nunca se envian bytes a un puerto
-        que no paso el filtro de candidatos razonables."""
+        """Flujo prioritario: el socio NO elige COM. Comparte el mismo
+        motor de diagnostico que "SOLUCIONAR PROBLEMAS DE IMPRESORA"
+        (seccion 2 de la mision de troubleshooting): ambos botones deben
+        llevar exactamente al mismo lugar."""
+        self._lanzar_diagnostico()
+
+    def _solucionar_problemas(self):
+        self._lanzar_diagnostico()
+
+    def _lanzar_diagnostico(self, titulo="Configurando impresora..."):
+        """Arranca el motor de diagnostico (printer_diagnostics) en un
+        hilo aparte via _PuenteHiloGUI: la ventana de progreso queda
+        respondiendo en todo momento, sin importar que abrir un COM
+        Bluetooth a medio emparejar se cuelgue (el fallo real que motivo
+        este asistente)."""
+        self._ventana_progreso = VentanaProgreso(self.root, titulo=titulo)
+        puente = _PuenteHiloGUI(
+            self.root, self._trabajo_deteccion, self._ventana_progreso.actualizar, self._al_terminar_deteccion
+        )
+        puente.iniciar()
+
+    def _trabajo_deteccion(self, progreso, preguntar):
+        """Corre en el hilo de trabajo (nunca en el de Tkinter). Devuelve
+        un printer_diagnostics.Diagnostico; nunca toca widgets."""
         config = neko_config.cargar_config()
         fingerprint_conocido = config.get("printer_fingerprint")
         baudrate = config.get("baudrate") or neko_config.DEFAULT_BAUDRATE
 
+        progreso("Revisando Bluetooth...")
+        bluetooth_ok, pos58_pareada = windows_bluetooth.evaluar_bluetooth()
+        log.info("Diagnostico: bluetooth=%s pos58_pareada=%s", bluetooth_ok, pos58_pareada)
+
+        progreso("Buscando impresora POS58...")
         puertos = port_detection.listar_puertos()
         candidatos = port_detection.ordenar_candidatos_por_probabilidad(puertos, fingerprint_conocido)
-        log.info("Deteccion automatica: %d puertos, %d candidatos razonables", len(puertos), len(candidatos))
+        log.info("Diagnostico: %d puertos, %d candidatos razonables", len(puertos), len(candidatos))
 
-        if not candidatos:
-            self._mostrar_sin_candidatos()
+        def abridor(puerto):
+            _imprimir_prueba(puerto, baudrate)
+
+        def probador(puerto):
+            return printer_diagnostics.probar_apertura(abridor, puerto)
+
+        asistente = printer_diagnostics.AsistenteDeteccion(
+            candidatos=candidatos,
+            probador=probador,
+            preguntar_si_no=lambda: preguntar("¿Salió la prueba de impresión correctamente?"),
+            en_progreso=progreso,
+            log=log,
+        )
+        estado, puerto_confirmado, resultados = asistente.ejecutar()
+
+        if estado == printer_diagnostics.ESTADO_OK:
+            nueva_config = neko_config.cargar_config()
+            nueva_config["printer_port"] = puerto_confirmado.device
+            nueva_config["printer_fingerprint"] = port_detection.construir_fingerprint(puerto_confirmado)
+            nueva_config["baudrate"] = baudrate
+            neko_config.guardar_config(nueva_config)
+            log.info("Impresora confirmada y guardada: %s", puerto_confirmado.device)
+
+        return printer_diagnostics.construir_diagnostico(
+            candidatos=candidatos,
+            resultados=resultados,
+            estado=estado,
+            puerto_confirmado=puerto_confirmado,
+            bluetooth=bluetooth_ok,
+            pos58_pareada=pos58_pareada,
+        )
+
+    def _al_terminar_deteccion(self, resultado):
+        self._ventana_progreso.cerrar()
+
+        if isinstance(resultado, tuple) and len(resultado) == 2 and resultado[0] == "error":
+            log.info("Diagnostico: error inesperado: %s", resultado[1])
+            messagebox.showerror(
+                "Neko Local", f"Ocurrió un problema inesperado al diagnosticar la impresora: {resultado[1]}"
+            )
             return
 
-        for puerto in candidatos:
-            try:
-                _imprimir_prueba(puerto.device, baudrate)
-            except Exception as e:
-                log.info("Candidato %s no respondio: %s", puerto.device, e)
-                # Este candidato ni siquiera respondio: no tiene sentido
-                # preguntar SI/NO de algo que no llego a imprimir nada;
-                # se sigue con el siguiente candidato en silencio.
-                continue
-
-            log.info("Candidato probado: %s", puerto.device)
-            salio = messagebox.askyesno(
-                "Neko Local", f"¿Salió la prueba de impresión en {puerto.device}?"
-            )
-            log.info("Confirmacion candidato %s: %s", puerto.device, "SI" if salio else "NO")
-            if salio:
-                nueva_config = neko_config.cargar_config()
-                nueva_config["printer_port"] = puerto.device
-                nueva_config["printer_fingerprint"] = port_detection.construir_fingerprint(puerto)
-                nueva_config["baudrate"] = baudrate
-                neko_config.guardar_config(nueva_config)
-                log.info("Impresora confirmada y guardada: %s", puerto.device)
-                messagebox.showinfo("Neko Local", "IMPRESORA CONFIGURADA")
-                self._actualizar_estados()
-                return
-            # NO: este candidato queda descartado solo durante esta
-            # sesion de deteccion (no se persiste el descarte) y se sigue
-            # con el siguiente candidato razonable.
-
-        log.info("Deteccion automatica: ningun candidato confirmado")
-        messagebox.showwarning(
-            "Neko Local",
-            "Ninguno de los candidatos detectados imprimió correctamente.\n\n"
-            "Usa 'Configuración avanzada' para elegir el puerto manualmente,\n"
-            "o confirma que la POS58 esté encendida y emparejada.",
-        )
+        diagnostico = resultado
+        if diagnostico.estado == printer_diagnostics.ESTADO_SIN_CANDIDATOS:
+            self._mostrar_sin_candidatos()
+        elif diagnostico.estado == printer_diagnostics.ESTADO_OK:
+            messagebox.showinfo("Neko Local", "IMPRESORA CONFIGURADA")
+            self._actualizar_estados()
+        else:  # ESTADO_PAREADA_SIN_ENLACE
+            self._mostrar_asistente_reparacion(diagnostico)
 
     def _mostrar_sin_candidatos(self):
         ventana = tk.Toplevel(self.root)
@@ -386,6 +520,124 @@ class NekoLocalApp:
             command=lambda: (ventana.destroy(), self._abrir_asistente()),
         ).pack(fill="x", pady=2)
 
+    def _mostrar_asistente_reparacion(self, diagnostico):
+        """Windows emparejó la POS58, pero ningún candidato pudo
+        abrirse: exactamente el caso real (COM3/COM4 ambos fallan) que
+        motivó este asistente. Nunca se pide elegir COM manualmente."""
+        ventana = tk.Toplevel(self.root)
+        ventana.title("Neko Local — Reparar impresora")
+        ventana.resizable(False, False)
+
+        marco = ttk.Frame(ventana, padding=14)
+        marco.pack()
+        ttk.Label(marco, text="REPARAR IMPRESORA", font=("", 11, "bold")).pack(anchor="w", pady=(0, 6))
+
+        for etiqueta, valor in printer_diagnostics.resumen_humano(diagnostico):
+            signo = "✓" if valor in ("OK", "Emparejada") else ("✕" if valor == "Problema" else "…")
+            ttk.Label(marco, text=f"{signo} {etiqueta}: {valor}").pack(anchor="w")
+
+        ttk.Label(
+            marco,
+            text=(
+                "\nWindows emparejó la impresora, pero todavía no logramos\n"
+                "crear una conexión de impresión que funcione."
+            ),
+            justify="left",
+        ).pack(anchor="w", pady=(8, 8))
+
+        botones = ttk.Frame(marco)
+        botones.pack(fill="x")
+        ttk.Button(
+            botones, text="INTENTAR REPARAR", command=lambda: (ventana.destroy(), self._intentar_reparar())
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones,
+            text="VOLVER A EMPAREJAR POS58",
+            command=lambda: (ventana.destroy(), self._mostrar_guia_reemparejar()),
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones, text="Ver detalles técnicos", command=lambda: self._mostrar_detalles(diagnostico)
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones, text="Copiar diagnóstico", command=lambda: self._copiar_diagnostico(diagnostico)
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones, text="Guardar diagnóstico", command=lambda: self._guardar_diagnostico(diagnostico)
+        ).pack(fill="x", pady=2)
+
+    def _mostrar_guia_reemparejar(self):
+        ventana = tk.Toplevel(self.root)
+        ventana.title("Reemparejar POS58")
+        ventana.resizable(False, False)
+
+        ttk.Label(
+            ventana,
+            text=(
+                "1. Enciende la POS58.\n"
+                "2. En Windows (Bluetooth y dispositivos), quita el\n"
+                "   emparejamiento anterior de la POS58 si aparece,\n"
+                "   y vuelve a emparejarla.\n"
+                "3. Cuando Windows termine, vuelve aquí."
+            ),
+            justify="left",
+            padding=14,
+        ).pack()
+
+        botones = ttk.Frame(ventana, padding=(14, 0, 14, 14))
+        botones.pack(fill="x")
+        ttk.Button(
+            botones, text="Abrir Bluetooth de Windows", command=abrir_configuracion_bluetooth
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            botones,
+            text="YA TERMINÉ — COMPROBAR DE NUEVO",
+            command=lambda: (ventana.destroy(), self._lanzar_diagnostico()),
+        ).pack(fill="x", pady=2)
+
+    def _intentar_reparar(self):
+        """INTENTAR REPARAR (automatico, sin intervencion del usuario mas
+        alla de confirmar SI/NO en la prueba de impresion): refresca la
+        lista de puertos dandole tiempo a un enlace Bluetooth recien
+        creado, y vuelve a correr la deteccion completa."""
+
+        def trabajo(progreso, preguntar):
+            progreso("Actualizando dispositivos...")
+            snapshot_antes = port_detection.listar_puertos()
+            _actuales, nuevos = printer_diagnostics.esperar_puertos_nuevos(
+                port_detection.listar_puertos, snapshot_antes
+            )
+            log.info("Reparar: %d puertos antes, %d nuevos tras esperar", len(snapshot_antes), len(nuevos))
+            return self._trabajo_deteccion(progreso, preguntar)
+
+        self._ventana_progreso = VentanaProgreso(self.root, titulo="Reparando...")
+        puente = _PuenteHiloGUI(
+            self.root, trabajo, self._ventana_progreso.actualizar, self._al_terminar_deteccion
+        )
+        puente.iniciar()
+
+    def _texto_diagnostico(self, diagnostico):
+        return printer_diagnostics.formatear_diagnostico_texto(
+            diagnostico, neko_version.version_texto(), resource_paths.es_frozen(), platform.platform()
+        )
+
+    def _mostrar_detalles(self, diagnostico):
+        ventana = tk.Toplevel(self.root)
+        ventana.title("Detalles técnicos")
+        caja = tk.Text(ventana, width=80, height=22, wrap="word")
+        caja.insert("1.0", self._texto_diagnostico(diagnostico))
+        caja.configure(state="disabled")
+        caja.pack(padx=8, pady=8)
+
+    def _copiar_diagnostico(self, diagnostico):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._texto_diagnostico(diagnostico))
+        messagebox.showinfo("Neko Local", "Diagnóstico copiado. Puedes pegarlo en un mensaje o correo.")
+
+    def _guardar_diagnostico(self, diagnostico):
+        ruta = printer_diagnostics.guardar_diagnostico(self._texto_diagnostico(diagnostico))
+        log.info("Diagnostico guardado: %s", ruta)
+        messagebox.showinfo("Neko Local", f"Diagnóstico guardado en:\n{ruta}")
+
     def _abrir_nekopos(self):
         webbrowser.open(neko_config.NEKOPOS_BASE_URL)
 
@@ -394,19 +646,18 @@ class NekoLocalApp:
         if not neko_config.tiene_impresora_configurada(config):
             messagebox.showinfo(
                 "Neko Local",
-                "Todavia no hay una impresora configurada. Se abrira el asistente.",
+                "Todavía no hay una impresora configurada. Se abrirá la configuración automática.",
             )
-            self._abrir_asistente()
+            self._configurar_automaticamente()
             return
 
         resultado = resolver_y_persistir_puerto(config)
         if resultado.status in ("ambiguous", "not_found"):
             messagebox.showwarning(
                 "Neko Local",
-                "No se pudo localizar la impresora configurada de forma segura. "
-                "Usa 'Configurar impresora' para volver a elegirla.",
+                "La impresora necesita atención: no se pudo localizar de forma segura.",
             )
-            self._abrir_asistente()
+            self._solucionar_problemas()
             return
 
         if not self.gestor_cocina.activo:
@@ -434,10 +685,10 @@ class NekoLocalApp:
                 self._var_impresora.set("configurada")
                 self._var_puerto.set(resultado.port)
             elif resultado.status == "ambiguous":
-                self._var_impresora.set("necesita configuracion (ambiguo)")
+                self._var_impresora.set("necesita atención (varios puertos posibles)")
                 self._var_puerto.set("-")
             else:
-                self._var_impresora.set("no encontrada")
+                self._var_impresora.set("necesita atención")
                 self._var_puerto.set("-")
         else:
             self._var_impresora.set("necesita configuracion")

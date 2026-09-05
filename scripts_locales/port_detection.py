@@ -23,7 +23,10 @@ except ImportError:  # pragma: no cover - pyserial siempre deberia estar instala
 # Palabras clave que suelen aparecer en descripcion/manufacturer/hwid de una
 # POS58 conectada por Bluetooth SPP (clones YICHIP incluidos). Todo en
 # minusculas: la comparacion siempre pasa el texto por .lower() primero.
-_PALABRAS_CLAVE_CANDIDATO = (
+# Publica (sin guion bajo) porque windows_bluetooth.py tambien la usa para
+# buscar el mismo tipo de dispositivo en la lista de Bluetooth de Windows
+# (no solo en los puertos serie): mismo criterio, una sola fuente.
+PALABRAS_CLAVE_CANDIDATO = (
     "pos58",
     "yichip",
     "bluetooth",
@@ -33,6 +36,7 @@ _PALABRAS_CLAVE_CANDIDATO = (
     "hc-05",
     "hc-06",
 )
+_PALABRAS_CLAVE_CANDIDATO = PALABRAS_CLAVE_CANDIDATO  # alias retrocompatible
 
 # Indicadores claros de un dispositivo que NO es la POS58 (placas de
 # desarrollo, modems, lectores, chips serie USB genericos usados por esas
@@ -88,6 +92,15 @@ def _texto_puerto(port_info):
         getattr(port_info, "product", None),
     ]
     return " ".join(str(p) for p in partes if p).lower()
+
+
+def es_nombre_candidato(nombre):
+    """Version de es_candidato_pos58() para un simple string (no un
+    ListPortInfo): usada por windows_bluetooth.py para reconocer una
+    POS58 en el nombre de un dispositivo Bluetooth de Windows, con el
+    mismo criterio que para los puertos serie."""
+    texto = str(nombre or "").lower()
+    return any(palabra in texto for palabra in PALABRAS_CLAVE_CANDIDATO)
 
 
 def es_candidato_pos58(port_info):
