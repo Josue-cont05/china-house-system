@@ -6,7 +6,7 @@ import requests
 import win32print
 
 
-BASE_URL = "https://china-house-system-3be6.onrender.com"
+BASE_URL = "https://neko-wok-system.onrender.com"
 URL_FACTURAS = f"{BASE_URL}/facturas_pendientes"
 URL_TASA = f"{BASE_URL}/api/tasa"
 URL_DESACTIVAR = f"{BASE_URL}/desactivar_factura"

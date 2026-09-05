@@ -6,7 +6,7 @@ import requests
 import win32print
 import winsound
 
-URL_COCINA = "https://china-house-system-3be6.onrender.com/ordenes_cocina"
+URL_COCINA = "https://neko-wok-system.onrender.com/ordenes_cocina"
 
 impresos = set()
 
