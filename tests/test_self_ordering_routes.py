@@ -1967,6 +1967,203 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload, [])
 
+    def test_reprint_accumulates_all_sent_items_across_batches(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self._insert_order_item(orden_id, "Manual B", 2.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._insert_order_item(orden_id, "Manual C", 3.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        ultima_comanda_id = self._comandas(orden_id)[-1][0]
+        self._set_comanda_reimpresion(ultima_comanda_id, "reprint-token-A")
+
+        payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+        reimpresas = [o for o in payload if o["reimpresion_token"]]
+
+        self.assertEqual(len(reimpresas), 1)
+        self.assertEqual(reimpresas[0]["items"], ["1x Manual A", "1x Manual B", "1x Manual C"])
+
+    def test_reprint_excludes_items_not_yet_sent_to_kitchen(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self._insert_order_item(orden_id, "Manual B", 2.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        # C se agrega a la orden pero NO se envia a cocina todavia.
+        self._insert_order_item(orden_id, "Manual C", 3.0)
+
+        comanda_id = self._comandas(orden_id)[0][0]
+        self._set_comanda_reimpresion(comanda_id, "reprint-token-B")
+
+        payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+        reimpresas = [o for o in payload if o["reimpresion_token"]]
+
+        self.assertEqual(len(reimpresas), 1)
+        self.assertEqual(reimpresas[0]["items"], ["1x Manual A", "1x Manual B"])
+        self.assertNotIn("1x Manual C", reimpresas[0]["items"])
+
+    def test_reprint_after_sending_pending_item_includes_it(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self._insert_order_item(orden_id, "Manual B", 2.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._insert_order_item(orden_id, "Manual C", 3.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")  # ahora C tambien esta enviada
+
+        ultima_comanda_id = self._comandas(orden_id)[-1][0]
+        self._set_comanda_reimpresion(ultima_comanda_id, "reprint-token-C")
+
+        payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+        reimpresas = [o for o in payload if o["reimpresion_token"]]
+
+        self.assertEqual(len(reimpresas), 1)
+        self.assertEqual(reimpresas[0]["items"], ["1x Manual A", "1x Manual B", "1x Manual C"])
+
+    def test_reprint_produces_a_new_evento_impresion(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        comanda_id = self._comandas(orden_id)[0][0]
+
+        evento_normal = web_app.app.test_client().get("/ordenes_cocina").get_json()[0][
+            "evento_impresion"
+        ]
+
+        self._set_comanda_reimpresion(comanda_id, "reprint-token-D")
+        payload_reprint = web_app.app.test_client().get("/ordenes_cocina").get_json()
+        evento_reprint = next(
+            o for o in payload_reprint if o["comanda_id"] == comanda_id
+        )["evento_impresion"]
+
+        self.assertNotEqual(evento_normal, evento_reprint)
+        self.assertEqual(evento_normal, f"comanda-{comanda_id}-base")
+        self.assertEqual(evento_reprint, f"comanda-{comanda_id}-reprint-token-D")
+
+    def test_reprint_does_not_change_normal_incremental_listing(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._insert_order_item(orden_id, "Manual B", 2.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+
+        self.assertEqual(len(payload), 2)
+        self.assertEqual(payload[0]["items"], ["1x Manual A"])
+        self.assertEqual(payload[1]["items"], ["1x Manual B"])
+        self.assertFalse(payload[0]["reimpresion_token"])
+        self.assertFalse(payload[1]["reimpresion_token"])
+
+    def test_single_reprint_request_marks_only_one_comanda_not_all(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._insert_order_item(orden_id, "Manual B", 2.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._login(rol="master")
+        response = self.client.get(f"/reimprimir_cocina/{orden_id}")
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT reimpresion_token FROM orden_comandas WHERE orden_id=? ORDER BY secuencia",
+            (orden_id,),
+        )
+        tokens_marcados = [token for (token,) in cursor.fetchall() if token]
+        conn.close()
+        self.assertEqual(len(tokens_marcados), 1)
+
+        payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+        reimpresas = [o for o in payload if o["reimpresion_token"]]
+        self.assertEqual(len(reimpresas), 1)
+        self.assertEqual(reimpresas[0]["items"], ["1x Manual A", "1x Manual B"])
+
+    def test_reprint_endpoint_sets_a_non_empty_token(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        comanda_id = self._comandas(orden_id)[0][0]
+
+        self._login(rol="master")
+        response = self.client.get(f"/reimprimir_cocina/{orden_id}")
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT reimpresion_token FROM orden_comandas WHERE id=?", (comanda_id,))
+        token = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertTrue(token)
+
+    def test_reprint_token_is_not_cleared_by_polling_and_survives_a_dropped_response(self):
+        """Regresion del bug fisico "Reimprimir cocina no imprime nada": antes,
+        /ordenes_cocina borraba el reimpresion_token en la MISMA llamada que lo
+        devolvia. Si esa respuesta se perdia (Render en cold start, timeout,
+        el worker reiniciandose a mitad de ciclo), el token ya habia sido
+        consumido en el backend y la reimpresion desaparecia sin haberse
+        impreso nunca. Ahora el token permanece hasta que una NUEVA
+        reimpresion lo reemplaza, asi que una segunda llamada a
+        /ordenes_cocina (simulando que el worker perdio la primera respuesta
+        o hizo un segundo poll antes de imprimir) debe seguir viendo el mismo
+        evento de reimpresion, no uno vacio."""
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        comanda_id = self._comandas(orden_id)[0][0]
+        self._set_comanda_reimpresion(comanda_id, "reprint-token-survive")
+
+        client = web_app.app.test_client()
+        primera = client.get("/ordenes_cocina").get_json()
+        segunda = client.get("/ordenes_cocina").get_json()
+
+        primer_evento = next(o for o in primera if o["comanda_id"] == comanda_id)
+        segundo_evento = next(o for o in segunda if o["comanda_id"] == comanda_id)
+
+        self.assertEqual(primer_evento["evento_impresion"], "comanda-%s-reprint-token-survive" % comanda_id)
+        self.assertEqual(segundo_evento["evento_impresion"], primer_evento["evento_impresion"])
+        self.assertEqual(segundo_evento["reimpresion_token"], "reprint-token-survive")
+
+    def test_second_reprint_request_overwrites_token_with_a_new_evento_impresion(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        comanda_id = self._comandas(orden_id)[0][0]
+
+        self._login(rol="master")
+        self.assertEqual(self.client.get(f"/reimprimir_cocina/{orden_id}").status_code, 302)
+        primer_payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+        primer_evento = next(o for o in primer_payload if o["comanda_id"] == comanda_id)[
+            "evento_impresion"
+        ]
+
+        self.assertEqual(self.client.get(f"/reimprimir_cocina/{orden_id}").status_code, 302)
+        segundo_payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+        reimpresas = [o for o in segundo_payload if o["reimpresion_token"]]
+        segundo_evento = next(o for o in segundo_payload if o["comanda_id"] == comanda_id)[
+            "evento_impresion"
+        ]
+
+        self.assertNotEqual(primer_evento, segundo_evento)
+        self.assertEqual(len(reimpresas), 1)
+
+    def test_archived_order_reprint_token_does_not_linger_in_feed(self):
+        orden_id = self._create_order()
+        self._insert_order_item(orden_id, "Manual A", 1.0)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        comanda_id = self._comandas(orden_id)[0][0]
+        self._set_comanda_reimpresion(comanda_id, "reprint-token-archived")
+        self._update_order(orden_id, cierre_id=999)
+
+        payload = web_app.app.test_client().get("/ordenes_cocina").get_json()
+
+        self.assertEqual([o for o in payload if o["comanda_id"] == comanda_id], [])
+
     def test_public_submit_rolls_back_everything_if_comanda_creation_fails(self):
         orden_id = self._create_order()
         token = self._link_token_for_order(orden_id)

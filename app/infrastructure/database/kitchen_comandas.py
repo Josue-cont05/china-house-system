@@ -167,7 +167,11 @@ class SqlKitchenComandaRepository:
                     AND o.cierre_id IS NULL
                     AND o.estado IN ('en cocina', 'listo')
                 )
-                   OR (c.reimpresion_token IS NOT NULL AND o.estado IN ('en cocina', 'listo', 'cerrada'))
+                   OR (
+                    c.reimpresion_token IS NOT NULL
+                    AND o.cierre_id IS NULL
+                    AND o.estado IN ('en cocina', 'listo', 'cerrada')
+                   )
                 ORDER BY o.numero_orden ASC, c.secuencia ASC, c.id ASC
                 """,
                 (ESTADO_COMANDA_EN_COCINA,),
@@ -188,7 +192,11 @@ class SqlKitchenComandaRepository:
                 LEFT JOIN usuarios u ON o.usuario_id = u.id
                 WHERE (
                     o.estado = 'en cocina'
-                    OR (o.reimpresion_token IS NOT NULL AND o.estado IN ('en cocina', 'listo', 'cerrada'))
+                    OR (
+                        o.reimpresion_token IS NOT NULL
+                        AND o.cierre_id IS NULL
+                        AND o.estado IN ('en cocina', 'listo', 'cerrada')
+                    )
                 )
                   AND NOT EXISTS (
                     SELECT 1 FROM orden_comandas c WHERE c.orden_id = o.id
@@ -213,6 +221,25 @@ class SqlKitchenComandaRepository:
                 ORDER BY ci.id ASC
                 """,
                 (comanda_id,),
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def obtener_items_enviados_de_orden(self, orden_id):
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT oi.producto, COALESCE(oi.indicacion, '')
+                FROM orden_comanda_items ci
+                JOIN orden_comandas c ON c.id = ci.comanda_id
+                JOIN orden_items oi ON oi.id = ci.orden_item_id
+                WHERE c.orden_id=?
+                ORDER BY c.secuencia ASC, ci.id ASC
+                """,
+                (orden_id,),
             )
             return cursor.fetchall()
         finally:

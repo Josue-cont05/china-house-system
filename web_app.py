@@ -10679,14 +10679,18 @@ def ordenes_cocina():
     try:
         repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
         ordenes = []
-        reimpresiones_emitidas = []
-        reimpresiones_legacy_emitidas = []
 
         for o in repository.listar_comandas_cocina():
+            es_reimpresion = bool(o[10])
+            items_crudos = (
+                repository.obtener_items_enviados_de_orden(o[1])
+                if es_reimpresion
+                else repository.obtener_items_comanda(o[0])
+            )
             items = [
                 quitar_prefijo_cantidad_visual(item)
                 for item in agrupar_items_comanda(
-                    repository.obtener_items_comanda(o[0]),
+                    items_crudos,
                     observacion=o[8],
                 )
             ]
@@ -10712,12 +10716,6 @@ def ordenes_cocina():
                     "evento_impresion": evento_impresion,
                 }
             )
-
-            if o[10]:
-                reimpresiones_emitidas.append(o[0])
-
-        if reimpresiones_emitidas:
-            repository.limpiar_tokens_reimpresion(reimpresiones_emitidas)
 
         for o in repository.listar_ordenes_legacy_cocina_sin_comanda():
             items = [
@@ -10747,11 +10745,7 @@ def ordenes_cocina():
                     "evento_impresion": evento_impresion,
                 }
             )
-            if o[7]:
-                reimpresiones_legacy_emitidas.append(o[0])
 
-        if reimpresiones_legacy_emitidas:
-            repository.limpiar_tokens_reimpresion_legacy(reimpresiones_legacy_emitidas)
         return jsonify(ordenes)
 
     except Exception as e:
