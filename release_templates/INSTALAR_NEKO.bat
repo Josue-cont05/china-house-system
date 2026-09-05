@@ -23,10 +23,16 @@ if %errorlevel% GEQ 8 (
     exit /b 1
 )
 
-echo Creando acceso directo "INICIAR NEKO" en el Escritorio...
+echo Creando acceso directo "NekoWok Printer" en el Escritorio...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$s = (New-Object -ComObject WScript.Shell).CreateShortcut(\"$([Environment]::GetFolderPath('Desktop'))\INICIAR NEKO.lnk\"); " ^
-    "$s.TargetPath = '%DEST%\NekoLocal.exe'; " ^
+    "$shell = New-Object -ComObject WScript.Shell; " ^
+    "$escritorio = [Environment]::GetFolderPath('Desktop'); " ^
+    "$destino = '%DEST%\NekoLocal.exe'; " ^
+    "$viejo = Join-Path $escritorio 'INICIAR NEKO.lnk'; " ^
+    "if (Test-Path $viejo) { try { $atajoViejo = $shell.CreateShortcut($viejo); if ($atajoViejo.TargetPath -eq $destino) { Remove-Item $viejo -Force } } catch {} }; " ^
+    "$nuevo = Join-Path $escritorio 'NekoWok Printer.lnk'; " ^
+    "$s = $shell.CreateShortcut($nuevo); " ^
+    "$s.TargetPath = $destino; " ^
     "$s.WorkingDirectory = '%DEST%'; " ^
     "$s.Description = 'Iniciar Neko Local (cocina + recibos)'; " ^
     "$s.Save()"
@@ -44,7 +50,7 @@ echo ==================================================
 echo  Instalacion terminada.
 echo ==================================================
 echo Ya puedes cerrar esta ventana y usar el acceso directo
-echo "INICIAR NEKO" del Escritorio.
+echo "NekoWok Printer" del Escritorio.
 echo.
 echo Si la POS58 nunca se emparejo con esta computadora, hazlo
 echo desde Windows (Configuracion - Bluetooth y dispositivos)

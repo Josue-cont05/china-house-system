@@ -2,7 +2,7 @@
 setlocal
 
 set "APP_DIR=%LOCALAPPDATA%\NekoWok\App"
-set "ACCESO=%USERPROFILE%\Desktop\INICIAR NEKO.lnk"
+set "ACCESO=%USERPROFILE%\Desktop\NekoWok Printer.lnk"
 
 echo ==================================================
 echo  Desinstalar Neko Local

@@ -3,7 +3,7 @@ NEKO LOCAL — PRIMERA INSTALACIÓN
 
 1. Enciende la POS58.
 2. Ejecuta INSTALAR_NEKO.bat (doble clic).
-3. Abre "INICIAR NEKO" desde el Escritorio.
+3. Abre "NekoWok Printer" desde el Escritorio.
 4. Si la impresora nunca estuvo conectada a esta PC, pulsa
    "EMPAREJAR IMPRESORA BLUETOOTH" y sigue lo que pida Windows.
 5. Regresa a Neko Local.
