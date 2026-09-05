@@ -1,0 +1,51 @@
+NEKO LOCAL — PRIMERA INSTALACIÓN
+=================================
+
+1. Enciende la POS58.
+2. Ejecuta INSTALAR_NEKO.bat (doble clic).
+3. Abre "INICIAR NEKO" desde el Escritorio.
+4. Si la impresora nunca estuvo conectada a esta PC, pulsa
+   "EMPAREJAR IMPRESORA BLUETOOTH" y sigue lo que pida Windows.
+5. Regresa a Neko Local.
+6. Pulsa "CONFIGURAR IMPRESORA AUTOMÁTICAMENTE".
+7. Cuando salga el ticket de prueba, responde SI o NO.
+8. Pulsa "INICIAR NEKO".
+
+Listo: Cocina y Recibos quedan activos, y NekoPOS se abre en tu
+navegador.
+
+No necesitas saber nada de programación, ni de "puertos COM", ni
+instalar ningún driver: solo la impresora encendida y conexión a
+Internet.
+
+
+SI ALGO NO FUNCIONA
+--------------------
+
+No aparece ninguna impresora:
+  - Confirma que la POS58 esté encendida.
+  - Ve a Configuración de Windows > Bluetooth y dispositivos y
+    confirma que esté emparejada.
+  - Vuelve a Neko Local y pulsa "CONFIGURAR IMPRESORA
+    AUTOMÁTICAMENTE" de nuevo (botón "Buscar de nuevo" si aparece).
+
+No salió el ticket de prueba:
+  - Responde NO cuando Neko pregunte; probará el siguiente
+    candidato automáticamente.
+  - Si ninguno funciona, revisa que la impresora tenga papel,
+    esté encendida y cerca de la PC, y vuelve a intentar.
+
+Windows muestra una advertencia azul (SmartScreen):
+  - Es normal en programas nuevos que todavía no tienen firma
+    digital. Pulsa "Más información" y luego "Ejecutar de
+    todas formas". No hace falta desactivar nada de Windows.
+
+Sin conexión a Internet:
+  - Neko Local necesita Internet para hablar con NekoPOS
+    (que vive en la nube, no en esta computadora). Revisa tu
+    conexión Wi-Fi o de red.
+
+Cambiaste de PC, o reinstalaste Windows/Neko Local:
+  - Vuelve a emparejar la POS58 y usa "CONFIGURAR IMPRESORA
+    AUTOMÁTICAMENTE" otra vez; es normal tener que hacerlo una
+    vez por computadora nueva.

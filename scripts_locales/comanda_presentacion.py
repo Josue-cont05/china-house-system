@@ -24,16 +24,15 @@ script_comanda_cocina.py, en este mismo directorio.
 
 import re
 from collections import defaultdict
-from pathlib import Path
 
 import winsound
 
+import resource_paths
 from bluetooth_printer import BluetoothPrinter, PrinterError, PrinterConnectionError
 
-# Resuelto desde la ubicacion de este archivo, no desde el working directory,
-# para que funcione sin importar desde donde se ejecute el servicio.
-BASE_DIR = Path(__file__).resolve().parent
-LOGO_MINI_PATH = BASE_DIR / "mini_logo_neko_thermal_01.png"
+# Resuelto via resource_paths (source: junto a este archivo; frozen:
+# junto a NekoLocal.exe) - ver resource_paths.py para el porque.
+LOGO_MINI_PATH = resource_paths.recurso("mini_logo_neko_thermal_01.png")
 
 # Ancho maximo del logo en px. Ajustable aqui sin tocar BluetoothPrinter.
 LOGO_MAX_WIDTH_PX = 200

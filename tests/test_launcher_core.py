@@ -188,5 +188,79 @@ class DosWorkersIndependientesTest(unittest.TestCase):
         self.assertEqual(launcher_core.WORKER_FACTURA_PATH.name, "script_factura.py")
 
 
+class ComandoFrozenTest(unittest.TestCase):
+    """El comando construido para lanzar cada worker cambia segun
+    resource_paths.es_frozen(), sin que el resto de GestorWorkerProceso
+    (single-instance, deteccion, etc.) necesite saberlo."""
+
+    def setUp(self):
+        self.gestor_cocina = launcher_core.GestorWorkerProceso(
+            worker_path=launcher_core.WORKER_COCINA_PATH,
+            modo_frozen=launcher_core.MODO_FROZEN_COCINA,
+            python_exe="python",
+        )
+        self.gestor_recibos = launcher_core.GestorWorkerProceso(
+            worker_path=launcher_core.WORKER_FACTURA_PATH,
+            modo_frozen=launcher_core.MODO_FROZEN_FACTURA,
+            python_exe="python",
+        )
+
+    def test_source_construye_python_y_ruta_del_script(self):
+        with mock.patch.object(launcher_core.resource_paths, "es_frozen", return_value=False):
+            comando = self.gestor_cocina._construir_comando("COM7")
+
+        self.assertEqual(comando[0], "python")
+        self.assertEqual(comando[1], str(launcher_core.WORKER_COCINA_PATH))
+        self.assertIn("--port", comando)
+        self.assertIn("COM7", comando)
+
+    def test_frozen_construye_sys_executable_y_flag_de_modo(self):
+        with mock.patch.object(launcher_core.resource_paths, "es_frozen", return_value=True):
+            with mock.patch.object(launcher_core.sys, "executable", "C:\\NekoLocal\\NekoLocal.exe"):
+                comando_cocina = self.gestor_cocina._construir_comando("COM7")
+                comando_recibos = self.gestor_recibos._construir_comando("COM7")
+
+        self.assertEqual(comando_cocina[0], "C:\\NekoLocal\\NekoLocal.exe")
+        self.assertEqual(comando_cocina[1], launcher_core.MODO_FROZEN_COCINA)
+        self.assertIn("--port", comando_cocina)
+
+        self.assertEqual(comando_recibos[0], "C:\\NekoLocal\\NekoLocal.exe")
+        self.assertEqual(comando_recibos[1], launcher_core.MODO_FROZEN_FACTURA)
+
+    def test_frozen_no_referencia_ningun_archivo_py_del_worker(self):
+        with mock.patch.object(launcher_core.resource_paths, "es_frozen", return_value=True):
+            with mock.patch.object(launcher_core.sys, "executable", "C:\\NekoLocal\\NekoLocal.exe"):
+                comando = self.gestor_cocina._construir_comando("COM7")
+
+        self.assertFalse(any(str(launcher_core.WORKER_COCINA_PATH) in parte for parte in comando))
+
+    def test_iniciar_frozen_usa_sys_executable_como_proceso(self):
+        proceso_falso = mock.Mock()
+        proceso_falso.poll.return_value = None
+
+        with mock.patch.object(launcher_core.resource_paths, "es_frozen", return_value=True):
+            with mock.patch.object(launcher_core.sys, "executable", "C:\\NekoLocal\\NekoLocal.exe"):
+                with mock.patch.object(launcher_core.subprocess, "Popen", return_value=proceso_falso) as mock_popen:
+                    self.gestor_cocina.iniciar("COM7")
+
+        comando = mock_popen.call_args.args[0]
+        self.assertEqual(comando[0], "C:\\NekoLocal\\NekoLocal.exe")
+
+    def test_cwd_frozen_es_la_carpeta_del_exe_no_del_arbol_fuente(self):
+        with mock.patch.object(launcher_core.resource_paths, "es_frozen", return_value=True):
+            with mock.patch.object(
+                launcher_core.sys, "executable", "C:\\NekoLocal\\NekoLocal.exe"
+            ):
+                cwd = self.gestor_cocina._cwd()
+
+        self.assertEqual(cwd, "C:\\NekoLocal")
+
+    def test_cwd_source_es_la_carpeta_del_script(self):
+        with mock.patch.object(launcher_core.resource_paths, "es_frozen", return_value=False):
+            cwd = self.gestor_cocina._cwd()
+
+        self.assertEqual(cwd, str(launcher_core.WORKER_COCINA_PATH.parent))
+
+
 if __name__ == "__main__":
     unittest.main()

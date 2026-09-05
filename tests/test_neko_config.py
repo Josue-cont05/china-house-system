@@ -110,6 +110,108 @@ class NekoConfigTest(unittest.TestCase):
     def test_url_base_nekopos_no_esta_vacia(self):
         self.assertTrue(neko_config.NEKOPOS_BASE_URL.startswith("https://"))
 
+    def test_state_dir_y_logs_dir_son_subcarpetas_de_config_dir(self):
+        self.assertEqual(neko_config.state_dir(), neko_config.config_dir() / "state")
+        self.assertEqual(neko_config.logs_dir(), neko_config.config_dir() / "logs")
+
+
+class MigrarDedupLegacyTest(unittest.TestCase):
+    """Migracion de dedup legacy (comandas_impresas.txt / facturas_impresas.txt
+    junto al script) hacia %LOCALAPPDATA%\\NekoWok\\state\\. Nunca debe
+    perder un evento ya conocido, sin importar el orden ni la combinacion
+    de archivos presentes."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._patch = mock.patch.object(
+            neko_config, "config_dir", return_value=Path(self._tmpdir.name) / "NekoWok"
+        )
+        self._patch.start()
+        self._legacy_dir = Path(self._tmpdir.name) / "legacy_scripts_locales"
+        self._legacy_dir.mkdir()
+        self._ruta_legacy = self._legacy_dir / "comandas_impresas.txt"
+
+    def tearDown(self):
+        self._patch.stop()
+        self._tmpdir.cleanup()
+
+    def _eventos(self, ruta):
+        return set(ruta.read_text(encoding="utf-8").splitlines()) if ruta.exists() else set()
+
+    # 1. archivo nuevo ya existe, sin legacy -> se mantiene
+    def test_solo_nuevo_existente_se_mantiene(self):
+        nuevo = neko_config.state_dir() / "comandas_impresas.txt"
+        neko_config.state_dir().mkdir(parents=True)
+        nuevo.write_text("comanda-1-base\n", encoding="utf-8")
+
+        resultado = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+
+        self.assertEqual(resultado, nuevo)
+        self.assertEqual(self._eventos(nuevo), {"comanda-1-base"})
+
+    # 2. solo legacy -> se copia integro al nuevo
+    def test_solo_legacy_se_copia_al_nuevo(self):
+        self._ruta_legacy.write_text("comanda-1-base\ncomanda-2-base\n", encoding="utf-8")
+
+        resultado = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+
+        self.assertEqual(self._eventos(resultado), {"comanda-1-base", "comanda-2-base"})
+
+    # 3. ambos existen con eventos distintos -> union, nunca reemplazo
+    def test_ambos_existentes_se_unen_sin_perder_eventos(self):
+        neko_config.state_dir().mkdir(parents=True)
+        nuevo = neko_config.state_dir() / "comandas_impresas.txt"
+        nuevo.write_text("comanda-1-base\n", encoding="utf-8")
+        self._ruta_legacy.write_text("comanda-2-base\n", encoding="utf-8")
+
+        resultado = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+
+        self.assertEqual(self._eventos(resultado), {"comanda-1-base", "comanda-2-base"})
+
+    # 4. ninguno existe -> arranque normal, archivo vacio creado
+    def test_ninguno_existe_crea_archivo_vacio(self):
+        resultado = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+
+        self.assertTrue(resultado.exists())
+        self.assertEqual(self._eventos(resultado), set())
+
+    # 5. idempotencia: correrla dos veces da el mismo resultado
+    def test_es_idempotente(self):
+        self._ruta_legacy.write_text("comanda-1-base\n", encoding="utf-8")
+
+        primera = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+        eventos_primera = self._eventos(primera)
+        segunda = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+
+        self.assertEqual(primera, segunda)
+        self.assertEqual(self._eventos(segunda), eventos_primera)
+
+    # 6. legacy inexistente (ruta None) no rompe nada
+    def test_ruta_legacy_none_no_rompe(self):
+        resultado = neko_config.migrar_dedup_legacy("comandas_impresas.txt", None)
+        self.assertTrue(resultado.exists())
+
+    # 7. tras migrar, agregar un nuevo evento y volver a migrar no lo pierde
+    def test_evento_nuevo_tras_migracion_persiste_en_siguiente_migracion(self):
+        self._ruta_legacy.write_text("comanda-1-base\n", encoding="utf-8")
+        nuevo = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+
+        with nuevo.open("a", encoding="utf-8") as f:
+            f.write("comanda-2-base\n")
+
+        resultado = neko_config.migrar_dedup_legacy("comandas_impresas.txt", self._ruta_legacy)
+        self.assertEqual(self._eventos(resultado), {"comanda-1-base", "comanda-2-base"})
+
+    # 8. funciona igual para el archivo de recibos (mismo mecanismo)
+    def test_funciona_igual_para_facturas_impresas(self):
+        ruta_legacy_facturas = self._legacy_dir / "facturas_impresas.txt"
+        ruta_legacy_facturas.write_text("1-base\n", encoding="utf-8")
+
+        resultado = neko_config.migrar_dedup_legacy("facturas_impresas.txt", ruta_legacy_facturas)
+
+        self.assertEqual(resultado.name, "facturas_impresas.txt")
+        self.assertEqual(self._eventos(resultado), {"1-base"})
+
 
 if __name__ == "__main__":
     unittest.main()

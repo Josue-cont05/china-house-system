@@ -52,16 +52,13 @@ Uso basico:
 
 from __future__ import annotations
 
-from pathlib import Path
-
+import resource_paths
 from bluetooth_printer import BluetoothPrinter
 
-# Resuelto desde la ubicacion de este archivo, no desde el working directory,
-# para que funcione sin importar desde donde se ejecute el servicio.
-BASE_DIR = Path(__file__).resolve().parent
-
+# Resuelto via resource_paths (source: junto a este archivo; frozen:
+# junto a NekoLocal.exe) - ver resource_paths.py para el porque.
 # Logo GRANDE ya validado fisicamente (distinto del mini logo de comandas).
-LOGO_GRANDE_PATH = BASE_DIR / "logo_neko_thermal.png"
+LOGO_GRANDE_PATH = resource_paths.recurso("logo_neko_thermal.png")
 LOGO_MAX_WIDTH_PX = 272  # 340 px - 20%
 
 # Ancho imprimible real de una POS58 de 58 mm. El logo se centra

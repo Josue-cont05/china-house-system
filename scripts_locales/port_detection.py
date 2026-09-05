@@ -34,6 +34,28 @@ _PALABRAS_CLAVE_CANDIDATO = (
     "hc-06",
 )
 
+# Indicadores claros de un dispositivo que NO es la POS58 (placas de
+# desarrollo, modems, lectores, chips serie USB genericos usados por esas
+# placas). Si aparecen, el candidato se descarta de la deteccion
+# AUTOMATICA (ver puntuar_candidato) aunque tambien contenga alguna
+# palabra clave positiva por coincidencia.
+_PALABRAS_CLAVE_EXCLUIDAS = (
+    "arduino",
+    "ch340",
+    "ch341",
+    "cp210",
+    "ftdi",
+    "modem",
+    "fax",
+    "esp32",
+    "esp8266",
+    "stm32",
+    "mbed",
+    "gps",
+    "smart card",
+    "lector de tarjetas",
+)
+
 # Campos de un ListPortInfo (o de un stub equivalente en tests) usados tanto
 # para detectar candidatos como para construir la huella.
 _CAMPOS_FINGERPRINT = (
@@ -111,6 +133,54 @@ def _huella_coincide(port_info, fingerprint):
             and actual.get("manufacturer") == fingerprint.get("manufacturer")
         )
     return False
+
+
+def puntuar_candidato(port_info, fingerprint_conocido=None):
+    """Puntuacion determinista de que tan probable es que `port_info` sea
+    la POS58 (mayor = mas probable). Usada SOLO por la deteccion
+    automatica (seccion "CONFIGURAR IMPRESORA AUTOMATICAMENTE"): decide en
+    que orden probar candidatos y cuales ni intentar.
+
+    - Una huella exactamente conocida (fingerprint ya guardado antes)
+      siempre puntua por encima de cualquier otra senal: prioridad maxima.
+    - Cada palabra clave positiva (POS58, YICHIP, Bluetooth, SPP, ...)
+      suma puntos; "pos58"/"yichip" literal suma mas por ser mas
+      especifico que "bluetooth" a secas.
+    - Cualquier palabra clave de exclusion (Arduino, CH340, modem, placas
+      de desarrollo, lectores...) resta fuerte, para que el puntaje final
+      quede en 0 o negativo y el candidato NUNCA se pruebe automaticamente
+      aunque coincida tambien con alguna palabra positiva.
+    """
+    if fingerprint_conocido and _huella_coincide(port_info, fingerprint_conocido):
+        return 1000
+
+    texto = _texto_puerto(port_info)
+    puntaje = 0
+
+    for palabra in _PALABRAS_CLAVE_CANDIDATO:
+        if palabra in texto:
+            puntaje += 10
+    if "pos58" in texto:
+        puntaje += 20
+    if "yichip" in texto:
+        puntaje += 15
+
+    for palabra in _PALABRAS_CLAVE_EXCLUIDAS:
+        if palabra in texto:
+            puntaje -= 100
+
+    return puntaje
+
+
+def ordenar_candidatos_por_probabilidad(puertos, fingerprint_conocido=None):
+    """Candidatos ordenados de mas a menos probable para la deteccion
+    automatica. Excluye los que puntuan <= 0 (demasiado inciertos o
+    claramente un dispositivo ajeno): esos jamas se prueban solos, solo
+    aparecen en "Configuracion avanzada" para seleccion manual."""
+    puntuados = [(puntuar_candidato(p, fingerprint_conocido), p) for p in puertos]
+    razonables = [par for par in puntuados if par[0] > 0]
+    razonables.sort(key=lambda par: par[0], reverse=True)
+    return [p for _, p in razonables]
 
 
 def encontrar_por_fingerprint(fingerprint, puertos=None):

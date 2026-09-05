@@ -309,5 +309,51 @@ class WorkerMainSingleInstanceTest(unittest.TestCase):
         self.assertNotEqual(worker.NOMBRE_MUTEX_FACTURAS, cocina_worker.NOMBRE_MUTEX_COCINA)
 
 
+class ArchivoImpresasMigrationTest(unittest.TestCase):
+    """asegurar_archivo_impresas(): resolucion perezosa (nunca en el mero
+    import) + migracion desde la ubicacion legacy junto al script."""
+
+    def setUp(self):
+        self._archivo_original = worker.ARCHIVO_IMPRESAS
+
+    def tearDown(self):
+        worker.ARCHIVO_IMPRESAS = self._archivo_original
+
+    def test_asegurar_archivo_impresas_migra_una_sola_vez(self):
+        worker.ARCHIVO_IMPRESAS = None
+        ruta_falsa = Path("/tmp/no-existe/facturas_impresas.txt")
+
+        with mock.patch.object(worker.neko_config, "migrar_dedup_legacy", return_value=ruta_falsa) as mock_migrar:
+            primero = worker.asegurar_archivo_impresas()
+            segundo = worker.asegurar_archivo_impresas()
+
+        mock_migrar.assert_called_once_with("facturas_impresas.txt", worker._LEGACY_ARCHIVO_IMPRESAS)
+        self.assertEqual(primero, ruta_falsa)
+        self.assertEqual(segundo, ruta_falsa)
+        self.assertEqual(worker.ARCHIVO_IMPRESAS, ruta_falsa)
+
+    def test_no_migra_de_nuevo_si_ya_estaba_resuelto(self):
+        ruta_ya_fijada = Path("/tmp/ya-fijada/facturas_impresas.txt")
+        worker.ARCHIVO_IMPRESAS = ruta_ya_fijada
+
+        with mock.patch.object(worker.neko_config, "migrar_dedup_legacy") as mock_migrar:
+            resultado = worker.asegurar_archivo_impresas()
+
+        mock_migrar.assert_not_called()
+        self.assertEqual(resultado, ruta_ya_fijada)
+
+    def test_ejecutar_polling_migra_antes_de_cargar_impresos(self):
+        ruta_falsa = Path(tempfile.mkdtemp()) / "facturas_impresas.txt"
+        worker.ARCHIVO_IMPRESAS = None
+
+        with mock.patch.object(worker.neko_config, "migrar_dedup_legacy", return_value=ruta_falsa):
+            with mock.patch.object(worker, "obtener_facturas", return_value=[]):
+                with mock.patch.object(worker.time, "sleep", side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        worker.ejecutar_polling("COM6")
+
+        self.assertEqual(worker.ARCHIVO_IMPRESAS, ruta_falsa)
+
+
 if __name__ == "__main__":
     unittest.main()

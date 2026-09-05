@@ -21,10 +21,17 @@ import requests
 
 import neko_config
 import port_detection
+import resource_paths
 
 SCRIPTS_LOCALES_DIR = Path(__file__).resolve().parent
 WORKER_COCINA_PATH = SCRIPTS_LOCALES_DIR / "script_comanda_cocina.py"
 WORKER_FACTURA_PATH = SCRIPTS_LOCALES_DIR / "script_factura.py"
+
+# Flags internas que NekoLocal.exe (frozen, un solo ejecutable) acepta
+# para arrancar como worker en vez de GUI - ver neko_local.main(). En
+# SOURCE no se usan (se lanza el .py del worker directamente).
+MODO_FROZEN_COCINA = "--kitchen-worker"
+MODO_FROZEN_FACTURA = "--receipt-worker"
 
 # Endpoint liviano ya usado por script_factura.py para comprobar conexion;
 # reutilizarlo evita inventar un segundo mecanismo de "ping" a NekoPOS.
@@ -67,10 +74,18 @@ class GestorWorkerProceso:
     por worker (cocina, recibos), cada una con su propio `worker_path` -
     ambos scripts ya tienen su propio mutex de instancia unica
     (single_instance.py) con nombres distintos, asi que no se bloquean
-    entre si pero cada uno impide un segundo de si mismo."""
+    entre si pero cada uno impide un segundo de si mismo.
 
-    def __init__(self, worker_path=WORKER_COCINA_PATH, python_exe=None):
+    En SOURCE arranca `python <worker_path> --port X`. En FROZEN
+    (NekoLocal.exe empaquetado con PyInstaller) no existe un .py del
+    worker que ejecutar por separado: se relanza el propio
+    `sys.executable` (el mismo .exe) con `modo_frozen`
+    (--kitchen-worker/--receipt-worker), que neko_local.main() interpreta
+    como "actua como ese worker en vez de abrir la GUI"."""
+
+    def __init__(self, worker_path=WORKER_COCINA_PATH, modo_frozen=MODO_FROZEN_COCINA, python_exe=None):
         self.worker_path = Path(worker_path)
+        self.modo_frozen = modo_frozen
         self._python_exe = python_exe
         self._proceso = None
 
@@ -78,18 +93,28 @@ class GestorWorkerProceso:
     def activo(self):
         return self._proceso is not None and self._proceso.poll() is None
 
+    def _construir_comando(self, puerto):
+        if resource_paths.es_frozen():
+            comando = [sys.executable, self.modo_frozen]
+        else:
+            python_exe = self._python_exe or _python_actual()
+            comando = [python_exe, str(self.worker_path)]
+        if puerto:
+            comando += ["--port", puerto]
+        return comando
+
+    def _cwd(self):
+        if resource_paths.es_frozen():
+            return str(Path(sys.executable).resolve().parent)
+        return str(self.worker_path.parent)
+
     def iniciar(self, puerto):
         if self.activo:
             return self._proceso
 
-        python_exe = self._python_exe or _python_actual()
-        comando = [python_exe, str(self.worker_path)]
-        if puerto:
-            comando += ["--port", puerto]
-
         self._proceso = subprocess.Popen(
-            comando,
-            cwd=str(self.worker_path.parent),
+            self._construir_comando(puerto),
+            cwd=self._cwd(),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return self._proceso

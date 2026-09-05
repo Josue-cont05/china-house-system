@@ -44,19 +44,31 @@ from pathlib import Path
 import requests
 
 import neko_config
+import neko_log
+import neko_version
 import port_detection
 from bluetooth_printer import PrinterError
 from comanda_presentacion import imprimir_comanda
 from single_instance import SingleInstanceLock
+
+log = neko_log.obtener_logger("cocina")
 
 URL_COCINA = f"{neko_config.NEKOPOS_BASE_URL}/ordenes_cocina"
 
 NOMBRE_MUTEX_COCINA = "NekoWok_ComandaCocinaWorker"
 
 # Resuelto desde la ubicacion de este archivo, no desde el working directory,
-# para que funcione sin importar desde donde se ejecute el servicio.
+# para que funcione sin importar desde donde se ejecute el servicio. Es la
+# ubicacion LEGACY (anterior a %LOCALAPPDATA%\NekoWok\state\): se conserva
+# solo para migrarla, nunca se le vuelve a escribir.
 BASE_DIR = Path(__file__).resolve().parent
-ARCHIVO_IMPRESAS = BASE_DIR / "comandas_impresas.txt"
+_LEGACY_ARCHIVO_IMPRESAS = BASE_DIR / "comandas_impresas.txt"
+
+# Se resuelve (y migra desde _LEGACY_ARCHIVO_IMPRESAS si hace falta) de
+# forma perezosa, la primera vez que arranca el polling real - ver
+# ejecutar_polling(). Asi, solo importar este modulo (p. ej. en tests) no
+# toca %LOCALAPPDATA% ni el archivo legacy real de esta maquina.
+ARCHIVO_IMPRESAS = None
 
 impresos = set()
 
@@ -135,9 +147,11 @@ def procesar_comanda(orden, puerto, baudrate=9600):
         imprimir_comanda(orden, puerto, baudrate=baudrate)
     except PrinterError as e:
         print(f"ERROR imprimiendo comanda (evento {evento_impresion}): {e}")
+        log.warning("Fallo imprimiendo comanda evento=%s: %s", evento_impresion, e)
         return
     except Exception as e:
         print(f"ERROR inesperado imprimiendo comanda (evento {evento_impresion}): {e}")
+        log.warning("Fallo inesperado imprimiendo comanda evento=%s: %s", evento_impresion, e)
         return
 
     print(f"[COCINA] impresion OK: {evento_impresion}")
@@ -145,12 +159,29 @@ def procesar_comanda(orden, puerto, baudrate=9600):
     guardar_impreso(evento_impresion)
 
 
+def asegurar_archivo_impresas():
+    """Resuelve ARCHIVO_IMPRESAS, migrando eventos legacy la primera vez.
+    Idempotente: si ya se resolvio (o un test ya lo fijo a otra ruta), no
+    hace nada."""
+    global ARCHIVO_IMPRESAS
+    if ARCHIVO_IMPRESAS is None:
+        ARCHIVO_IMPRESAS = neko_config.migrar_dedup_legacy(
+            "comandas_impresas.txt", _LEGACY_ARCHIVO_IMPRESAS
+        )
+    return ARCHIVO_IMPRESAS
+
+
 def ejecutar_polling(puerto, baudrate=9600):
     global impresos
 
+    asegurar_archivo_impresas()
     impresos = cargar_impresos()
     print(f"Script de comandas iniciado. {len(impresos)} eventos previos cargados.")
     print(f"[COCINA] usando puerto={puerto} baudrate={baudrate}")
+    log.info(
+        "%s worker de cocina iniciado: puerto=%s eventos_previos=%d",
+        neko_version.version_texto(), puerto, len(impresos),
+    )
 
     while True:
         try:

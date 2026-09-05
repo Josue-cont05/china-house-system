@@ -45,18 +45,30 @@ from pathlib import Path
 import requests
 
 import neko_config
+import neko_log
+import neko_version
 import port_detection
 from bluetooth_printer import PrinterError
 from factura_presentacion import imprimir_factura
 from single_instance import SingleInstanceLock
+
+log = neko_log.obtener_logger("recibos")
 
 URL_FACTURAS = f"{neko_config.NEKOPOS_BASE_URL}/facturas_pendientes"
 URL_DESACTIVAR = f"{neko_config.NEKOPOS_BASE_URL}/desactivar_factura"
 
 NOMBRE_MUTEX_FACTURAS = "NekoWok_FacturaWorker"
 
+# Ubicacion LEGACY (anterior a %LOCALAPPDATA%\NekoWok\state\): se conserva
+# solo para migrarla, nunca se le vuelve a escribir.
 BASE_DIR = Path(__file__).resolve().parent
-ARCHIVO_IMPRESAS = BASE_DIR / "facturas_impresas.txt"
+_LEGACY_ARCHIVO_IMPRESAS = BASE_DIR / "facturas_impresas.txt"
+
+# Se resuelve (y migra desde _LEGACY_ARCHIVO_IMPRESAS si hace falta) de
+# forma perezosa, la primera vez que arranca el polling real - ver
+# ejecutar_polling(). Asi, solo importar este modulo (p. ej. en tests) no
+# toca %LOCALAPPDATA% ni el archivo legacy real de esta maquina.
+ARCHIVO_IMPRESAS = None
 
 session_http = requests.Session()
 impresos = set()
@@ -217,9 +229,11 @@ def procesar_factura(factura, puerto, baudrate=9600):
         )
     except PrinterError as e:
         print(f"ERROR imprimiendo factura (evento {evento_impresion}): {e}")
+        log.warning("Fallo imprimiendo factura evento=%s: %s", evento_impresion, e)
         return
     except Exception as e:
         print(f"ERROR inesperado imprimiendo factura (evento {evento_impresion}): {e}")
+        log.warning("Fallo inesperado imprimiendo factura evento=%s: %s", evento_impresion, e)
         return
 
     print(f"[FACTURA] impresion OK: {evento_impresion}")
@@ -275,12 +289,29 @@ def resolver_puerto_worker(override_port):
     return None, None
 
 
+def asegurar_archivo_impresas():
+    """Resuelve ARCHIVO_IMPRESAS, migrando eventos legacy la primera vez.
+    Idempotente: si ya se resolvio (o un test ya lo fijo a otra ruta), no
+    hace nada."""
+    global ARCHIVO_IMPRESAS
+    if ARCHIVO_IMPRESAS is None:
+        ARCHIVO_IMPRESAS = neko_config.migrar_dedup_legacy(
+            "facturas_impresas.txt", _LEGACY_ARCHIVO_IMPRESAS
+        )
+    return ARCHIVO_IMPRESAS
+
+
 def ejecutar_polling(puerto, baudrate=9600):
     global impresos
 
+    asegurar_archivo_impresas()
     impresos = cargar_impresos()
     print(f"Script de facturas iniciado. {len(impresos)} eventos previos cargados.")
     print(f"[FACTURA] usando puerto={puerto} baudrate={baudrate}")
+    log.info(
+        "%s worker de recibos iniciado: puerto=%s eventos_previos=%d",
+        neko_version.version_texto(), puerto, len(impresos),
+    )
 
     while True:
         try:

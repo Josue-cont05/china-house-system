@@ -167,5 +167,100 @@ class ResolverPuertoTest(unittest.TestCase):
         self.assertEqual(len(resultado.candidatos), 2)
 
 
+YICHIP_EXPLICITO = _puerto(
+    "COM7", description="YICHIP USB2.0-Serial", manufacturer="YICHIP", hwid="USB\\VID_1A86&PID_5523"
+)
+GENERICO_INCIERTO = _puerto("COM4", description="Puerto de comunicaciones", manufacturer=None, hwid="")
+
+
+class PuntuarCandidatoTest(unittest.TestCase):
+    """Puntuacion determinista usada SOLO por la deteccion automatica
+    (CONFIGURAR IMPRESORA AUTOMATICAMENTE): decide orden de prueba y que
+    puertos ni se prueban."""
+
+    def test_pos58_bluetooth_puntua_positivo(self):
+        self.assertGreater(port_detection.puntuar_candidato(POS58_BT), 0)
+
+    def test_yichip_puntua_positivo(self):
+        self.assertGreater(port_detection.puntuar_candidato(YICHIP_EXPLICITO), 0)
+
+    def test_pos58_puntua_mas_que_bluetooth_generico(self):
+        bluetooth_generico = _puerto("COM8", description="Bluetooth-incoming-port")
+        self.assertGreater(
+            port_detection.puntuar_candidato(POS58_BT),
+            port_detection.puntuar_candidato(bluetooth_generico),
+        )
+
+    def test_arduino_puntua_cero_o_negativo(self):
+        self.assertLessEqual(port_detection.puntuar_candidato(ARDUINO), 0)
+
+    def test_generico_sin_indicadores_puntua_cero_o_negativo(self):
+        self.assertLessEqual(port_detection.puntuar_candidato(GENERICO_INCIERTO), 0)
+
+    def test_dispositivo_ajeno_con_palabra_positiva_incidental_queda_excluido(self):
+        # "Bluetooth" aparece, pero tambien "Arduino": debe primar la
+        # exclusion, nunca probarse automaticamente.
+        mixto = _puerto("COM11", description="Arduino Bluetooth Shield", manufacturer="wch.cn")
+        self.assertLessEqual(port_detection.puntuar_candidato(mixto), 0)
+
+    def test_fingerprint_conocido_puntua_por_encima_de_cualquier_otro(self):
+        huella = port_detection.construir_fingerprint(POS58_BT)
+        # El mismo puerto, ahora en un COM distinto (simula cambio de COM),
+        # sigue puntuando maximo porque la huella coincide.
+        mismo_dispositivo_otro_com = _puerto(
+            "COM9",
+            description=POS58_BT.description,
+            manufacturer=POS58_BT.manufacturer,
+            hwid=POS58_BT.hwid,
+            serial_number=POS58_BT.serial_number,
+        )
+        puntaje_con_huella = port_detection.puntuar_candidato(mismo_dispositivo_otro_com, huella)
+        puntaje_sin_huella = port_detection.puntuar_candidato(YICHIP_EXPLICITO)
+        self.assertGreater(puntaje_con_huella, puntaje_sin_huella)
+
+
+class OrdenarCandidatosTest(unittest.TestCase):
+    def test_ordena_de_mayor_a_menor_probabilidad(self):
+        # YICHIP identifica el chip real de los clones POS58 (mas
+        # especifico que un generico "Standard Serial over Bluetooth
+        # link", que podria ser cualquier dispositivo SPP) - debe quedar
+        # primero; el generico incierto sin ninguna palabra clave, fuera.
+        orden = port_detection.ordenar_candidatos_por_probabilidad(
+            [YICHIP_EXPLICITO, POS58_BT, GENERICO_INCIERTO]
+        )
+        self.assertEqual(orden[0], YICHIP_EXPLICITO)
+        self.assertIn(POS58_BT, orden)
+        self.assertNotIn(GENERICO_INCIERTO, orden)
+
+    def test_excluye_candidatos_con_puntaje_no_positivo(self):
+        orden = port_detection.ordenar_candidatos_por_probabilidad([POS58_BT, ARDUINO, GENERICO_INCIERTO])
+        self.assertNotIn(ARDUINO, orden)
+        self.assertNotIn(GENERICO_INCIERTO, orden)
+
+    def test_ningun_candidato_razonable_da_lista_vacia(self):
+        self.assertEqual(
+            port_detection.ordenar_candidatos_por_probabilidad([ARDUINO, GENERICO_INCIERTO]), []
+        )
+
+    def test_fingerprint_conocido_queda_primero(self):
+        huella = port_detection.construir_fingerprint(POS58_BT)
+        mismo_dispositivo_otro_com = _puerto(
+            "COM9",
+            description=POS58_BT.description,
+            manufacturer=POS58_BT.manufacturer,
+            hwid=POS58_BT.hwid,
+            serial_number=POS58_BT.serial_number,
+        )
+        orden = port_detection.ordenar_candidatos_por_probabilidad(
+            [YICHIP_EXPLICITO, mismo_dispositivo_otro_com], fingerprint_conocido=huella
+        )
+        self.assertEqual(orden[0], mismo_dispositivo_otro_com)
+
+    def test_nunca_abre_hardware_al_puntuar_u_ordenar(self):
+        # Mismo principio que test_modulo_no_importa_capa_de_hardware: la
+        # deteccion (incluida la puntuacion) es pura lectura de metadatos.
+        self.assertFalse(hasattr(port_detection, "serial"))
+
+
 if __name__ == "__main__":
     unittest.main()
