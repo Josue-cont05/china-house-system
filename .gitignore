@@ -27,6 +27,7 @@ china_house.db
 
 scripts_locales/facturas_impresas.txt
 scripts_locales/tasa_cache.txt
+scripts_locales/comandas_impresas.txt
 
 # ===========================
 # VS Code
