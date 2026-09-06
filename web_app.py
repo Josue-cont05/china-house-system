@@ -105,6 +105,8 @@ from app.infrastructure.database.notifications import (
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 from app.infrastructure.database.clientes import (
+    actualizar_cliente,
+    alternar_activo_cliente,
     cliente_json_desde_fila,
     crear_cliente as crear_cliente_en_bd,
     listar_clientes_activos,
@@ -173,6 +175,8 @@ from app.domain.delivery.rules import (
 )
 from app.infrastructure.database.delivery import (
     actualizar_delivery_orden,
+    actualizar_repartidor,
+    alternar_activo_repartidor,
     crear_repartidor,
     crear_tablas_delivery,
     detalle_delivery_repartidor,
@@ -2997,14 +3001,7 @@ def editar_cliente(cliente_id):
         if not nombre:
             conn.close()
             return "El nombre del cliente es obligatorio", 400
-        cursor.execute(
-            """
-            UPDATE clientes
-            SET nombre=?, telefono=?, documento=?, notas=?, activo=?
-            WHERE id=?
-            """,
-            (nombre, telefono, documento, notas, activo, cliente_id),
-        )
+        actualizar_cliente(cursor, cliente_id, nombre, telefono, documento, notas, activo)
         conn.commit()
         conn.close()
         return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}")
@@ -3018,13 +3015,11 @@ def editar_cliente(cliente_id):
 def activar_cliente(cliente_id):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COALESCE(activo, 1) FROM clientes WHERE id=?", (cliente_id,))
-    row = cursor.fetchone()
-    if not row:
+    try:
+        alternar_activo_cliente(cursor, cliente_id)
+    except ValueError as exc:
         conn.close()
-        return "Cliente no encontrado", 404
-    nuevo_activo = 0 if row[0] else 1
-    cursor.execute("UPDATE clientes SET activo=? WHERE id=?", (nuevo_activo, cliente_id))
+        return str(exc), 404
     conn.commit()
     conn.close()
     return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}")
@@ -5562,19 +5557,7 @@ def editar_repartidor(repartidor_id):
         telefono_val = (request.form.get("telefono") or "").strip()
         notas_val = (request.form.get("notas") or "").strip()
         try:
-            cursor.execute(
-                """
-                UPDATE repartidores
-                SET nombre=?, telefono=?, notas=?
-                WHERE id=?
-                """,
-                (
-                    normalizar_nombre_repartidor(nombre_val),
-                    telefono_val[:80],
-                    notas_val[:500],
-                    repartidor_id,
-                ),
-            )
+            actualizar_repartidor(cursor, repartidor_id, nombre_val, telefono_val, notas_val)
             conn.commit()
             conn.close()
             return redirect("/repartidores")
@@ -5635,12 +5618,11 @@ def formulario_repartidor(titulo, action, nombre, telefono, notas, error=""):
 def activar_repartidor(repartidor_id):
     conn = get_connection()
     cursor = conn.cursor()
-    rep = obtener_repartidor(cursor, repartidor_id)
-    if not rep:
+    try:
+        alternar_activo_repartidor(cursor, repartidor_id)
+    except LookupError as exc:
         conn.close()
-        return "Repartidor no encontrado", 404
-    nuevo_estado = 0 if int(rep[4] or 0) == 1 else 1
-    cursor.execute("UPDATE repartidores SET activo=? WHERE id=?", (nuevo_estado, repartidor_id))
+        return str(exc), 404
     conn.commit()
     conn.close()
     return redirect("/repartidores")

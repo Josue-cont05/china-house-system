@@ -115,6 +115,31 @@ def crear_repartidor(cursor, nombre, telefono, notas, activo, ahora_venezuela, o
     return obtener_ultimo_id(cursor, "repartidores")
 
 
+def actualizar_repartidor(cursor, repartidor_id, nombre, telefono, notas):
+    cursor.execute(
+        """
+        UPDATE repartidores
+        SET nombre=?, telefono=?, notas=?
+        WHERE id=?
+        """,
+        (
+            normalizar_nombre_repartidor(nombre),
+            (telefono or "").strip()[:80],
+            (notas or "").strip()[:500],
+            repartidor_id,
+        ),
+    )
+
+
+def alternar_activo_repartidor(cursor, repartidor_id):
+    repartidor = obtener_repartidor(cursor, repartidor_id)
+    if not repartidor:
+        raise LookupError("Repartidor no encontrado")
+    nuevo_estado = 0 if int(repartidor[4] or 0) == 1 else 1
+    cursor.execute("UPDATE repartidores SET activo=? WHERE id=?", (nuevo_estado, repartidor_id))
+    return nuevo_estado
+
+
 def orden_tiene_delivery_legacy(cursor, orden_id):
     cursor.execute(
         """

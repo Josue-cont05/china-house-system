@@ -22,6 +22,27 @@ def crear_cliente(cursor, nombre, telefono, documento, notas, activo, fecha, obt
     return obtener_ultimo_id(cursor, "clientes")
 
 
+def actualizar_cliente(cursor, cliente_id, nombre, telefono, documento, notas, activo):
+    cursor.execute(
+        """
+        UPDATE clientes
+        SET nombre=?, telefono=?, documento=?, notas=?, activo=?
+        WHERE id=?
+        """,
+        (nombre, telefono, documento, notas, activo, cliente_id),
+    )
+
+
+def alternar_activo_cliente(cursor, cliente_id):
+    cursor.execute("SELECT COALESCE(activo, 1) FROM clientes WHERE id=?", (cliente_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError("Cliente no encontrado")
+    nuevo_activo = 0 if row[0] else 1
+    cursor.execute("UPDATE clientes SET activo=? WHERE id=?", (nuevo_activo, cliente_id))
+    return nuevo_activo
+
+
 def obtener_cliente_para_cxc(cursor, cliente_id):
     try:
         cliente_id = int(cliente_id)
