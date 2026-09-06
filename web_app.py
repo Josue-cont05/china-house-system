@@ -1856,14 +1856,14 @@ def proteger_sistema():
         # Pantalla operativa de despacho (mision "DESPACHO para Monica"):
         # mismo permiso que tomar ordenes -- reutiliza el sistema
         # existente, no crea un rol/permiso paralelo.
-        "despacho",
+        "pantalla_despacho",
         "api_despacho_estado",
         "despacho_entregar",
         "despacho_atender_alerta",
     }
 
     # Pantalla operativa de cocina.
-    acceso_cocina = {"cocina", "pantalla_cocina", "marcar_listo", "marcar_comanda_listo"}
+    acceso_cocina = {"pantalla_cocina", "marcar_listo", "marcar_comanda_listo"}
 
     if request.endpoint in {"login", "static"}:
         return
