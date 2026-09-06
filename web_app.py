@@ -1135,9 +1135,9 @@ def registrar_movimiento_inventario(
     stock_nuevo,
     costo_promedio,
     referencia,
+    usuario,
     observacion="",
 ):
-    usuario = usuario_activo() or session.get("usuario", "")
     fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(
         """
@@ -1162,7 +1162,7 @@ def registrar_movimiento_inventario(
     )
 
 
-def descontar_inventario_por_orden(cursor, orden_id):
+def descontar_inventario_por_orden(cursor, orden_id, usuario):
     cursor.execute(
         """
         SELECT inventario_descontado, numero_orden
@@ -1263,7 +1263,8 @@ def descontar_inventario_por_orden(cursor, orden_id):
                 stock_nuevo,
                 costo_promedio,
                 referencia,
-                f"{cantidad_vendida}x {producto_limpio}",
+                usuario,
+                observacion=f"{cantidad_vendida}x {producto_limpio}",
             )
 
     cursor.execute(
@@ -6468,6 +6469,7 @@ def cobrar(orden_id):
                         saldo_cxc_usd=saldo_cxc_usd,
                         cliente_cxc=cliente_cxc,
                         usuario_id=session.get("usuario_id"),
+                        usuario_nombre=usuario_activo(),
                         estado_previo=estado,
                         repartidor_delivery_cobro=repartidor_delivery_cobro,
                         obtener_ultimo_id=obtener_ultimo_id,

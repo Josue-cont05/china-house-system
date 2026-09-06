@@ -2079,6 +2079,46 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(movimientos[0][8], 20.0)
         self.assertEqual(self._inventory_discounted(orden_id), 1)
 
+    def test_inventory_movement_records_logged_in_user_without_reading_session_downstream(self):
+        """Regresion: descontar_inventario_por_orden/registrar_movimiento_inventario
+        leian `session`/`usuario_activo()` directamente (deuda documentada en
+        .claude_continuation.md, mision "sacar session del flujo de
+        inventario"). Ahora la ruta resuelve el usuario ANTES de llamar
+        ejecutar_cobro y lo pasa explicito -- movimientos_inventario.usuario
+        debe reflejar el usuario logueado en la sesion HTTP real (mismo
+        patron ya usado por usuario_id)."""
+        orden_id = self._create_order(price=20.0)
+        cliente_id = self._create_client("Cliente Inventario Usuario")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO recetas (producto_menu, insumo, cantidad, unidad) VALUES (?, ?, ?, ?)",
+            ("Producto prueba", "Insumo Test Usuario", 1, "kg"),
+        )
+        cursor.execute(
+            "INSERT INTO inventario (nombre, stock_actual, unidad, costo_promedio) VALUES (?, ?, ?, ?)",
+            ("Insumo Test Usuario", 100, "kg", 2.0),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self._charge(
+            orden_id,
+            "",
+            0,
+            modo_cobro="credito",
+            cliente_id=cliente_id,
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT usuario FROM movimientos_inventario")
+        usuarios = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        self.assertTrue(usuarios)
+        self.assertTrue(all(u == "Emmanuel" for u in usuarios))
+
     def test_partial_or_credit_requires_existing_client(self):
         for modo in ("parcial", "credito"):
             with self.subTest(modo=modo):

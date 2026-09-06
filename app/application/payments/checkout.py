@@ -34,7 +34,16 @@ tests de atomicidad existentes (tests/test_sales_snapshot.py) hacen
 forzar el rollback -- al recibirla como parametro que la ruta pasa
 desde SU PROPIO namespace, ese patch sigue funcionando sin cambios
 (la ruta evalua el nombre en web_app.__dict__ en el momento de la
-llamada, que es exactamente lo que mock.patch reemplaza)."""
+llamada, que es exactamente lo que mock.patch reemplaza).
+
+`usuario_nombre` (mision "sacar session del flujo de inventario"): la
+ruta resuelve `usuario_activo()` (que lee `session`) ANTES de llamar
+`ejecutar_cobro` y lo pasa como valor plano, exactamente igual que ya
+hacia con `usuario_id=session.get("usuario_id")`. Esta funcion nunca
+toca `session` directamente -- solo reenvia el nombre a
+`descontar_inventario_por_orden`, que lo necesita para el registro de
+`movimientos_inventario` (columna `usuario`, texto libre para reportes,
+no una FK)."""
 
 from app.domain.sales.calculations import TOLERANCIA_COBRO
 from app.infrastructure.database.payments import marcar_items_incluidos_en_snapshot
@@ -64,6 +73,7 @@ def ejecutar_cobro(
     saldo_cxc_usd,
     cliente_cxc,
     usuario_id,
+    usuario_nombre,
     estado_previo,
     repartidor_delivery_cobro,
     obtener_ultimo_id,
@@ -172,4 +182,4 @@ def ejecutar_cobro(
             "Pagos reemplazados durante edicion de emergencia",
         )
 
-    descontar_inventario_por_orden(cursor, orden_id)
+    descontar_inventario_por_orden(cursor, orden_id, usuario_nombre)
