@@ -11,6 +11,17 @@ Blueprint propio de CxC/clientes).
 from app.domain.sales.calculations import _a_float as a_float
 
 
+def crear_cliente(cursor, nombre, telefono, documento, notas, activo, fecha, obtener_ultimo_id):
+    cursor.execute(
+        """
+        INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (nombre, telefono, documento, notas, activo, fecha),
+    )
+    return obtener_ultimo_id(cursor, "clientes")
+
+
 def obtener_cliente_para_cxc(cursor, cliente_id):
     try:
         cliente_id = int(cliente_id)

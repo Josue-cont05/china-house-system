@@ -106,6 +106,7 @@ from app.presentation.web.self_ordering_routes import crear_self_ordering_bluepr
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 from app.infrastructure.database.clientes import (
     cliente_json_desde_fila,
+    crear_cliente as crear_cliente_en_bd,
     listar_clientes_activos,
     listar_clientes_admin,
     listar_cuentas_cliente,
@@ -2844,14 +2845,16 @@ def crear_cliente():
             return "El nombre del cliente es obligatorio", 400
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (nombre, telefono, documento, notas, activo, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")),
+        cliente_id = crear_cliente_en_bd(
+            cursor,
+            nombre,
+            telefono,
+            documento,
+            notas,
+            activo,
+            ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
+            obtener_ultimo_id,
         )
-        cliente_id = obtener_ultimo_id(cursor, "clientes")
         conn.commit()
         conn.close()
         return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}")
@@ -7209,14 +7212,7 @@ def api_clientes():
             return jsonify({"ok": False, "error": "El nombre del cliente es obligatorio"}), 400
 
         fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute(
-            """
-            INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
-            VALUES (?, ?, ?, ?, 1, ?)
-            """,
-            (nombre, telefono, documento, notas, fecha),
-        )
-        cliente_id = obtener_ultimo_id(cursor, "clientes")
+        cliente_id = crear_cliente_en_bd(cursor, nombre, telefono, documento, notas, 1, fecha, obtener_ultimo_id)
         conn.commit()
 
         cursor.execute(
