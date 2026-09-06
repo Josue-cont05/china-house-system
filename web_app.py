@@ -4609,31 +4609,16 @@ def index():
 
 @app.route("/menu", methods=["GET", "POST"])
 def menu():
-    conn = get_connection()
-    cursor = conn.cursor()
+    catalog_repo = SqlSalesCatalogRepository(get_connection)
 
     if request.method == "POST":
         nombre = request.form["nombre"]
         precio = float(request.form["precio"])
         categoria_id = request.form["categoria"]
-        cursor.execute(
-            "INSERT INTO productos (nombre, precio, categoria_id) VALUES (?, ?, ?)",
-            (nombre, precio, categoria_id),
-        )
-        conn.commit()
+        catalog_repo.crear_producto(nombre, precio, categoria_id)
 
-    cursor.execute("SELECT id, nombre FROM categorias")
-    categorias = cursor.fetchall()
-
-    cursor.execute(
-        """
-        SELECT p.id, p.nombre, p.precio, c.nombre
-        FROM productos p
-        LEFT JOIN categorias c ON p.categoria_id = c.id
-        """
-    )
-    productos = cursor.fetchall()
-    conn.close()
+    categorias = catalog_repo.listar_categorias()
+    productos = catalog_repo.listar_productos_admin()
 
     html = """
     <html>
@@ -5862,36 +5847,20 @@ def agregar_producto():
     if nombre == "":
         return "Nombre requerido"
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO productos (nombre, precio, categoria_id)
-        VALUES (?, ?, ?)
-        """,
-        (nombre, precio, categoria_id),
-    )
-    conn.commit()
-    conn.close()
+    SqlSalesCatalogRepository(get_connection).crear_producto(nombre, precio, categoria_id)
     return redirect("/menu")
 
 
 @app.route("/eliminar_producto/<int:id>")
 def eliminar_producto(id):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM productos WHERE id=?", (id,))
-    conn.commit()
-    conn.close()
+    SqlSalesCatalogRepository(get_connection).eliminar_producto(id)
     return redirect("/menu")
 
 
 @app.route("/editar_producto/<int:id>", methods=["GET", "POST"])
 def editar_producto(id):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, nombre FROM categorias")
-    categorias = cursor.fetchall()
+    catalog_repo = SqlSalesCatalogRepository(get_connection)
+    categorias = catalog_repo.listar_categorias()
 
     if request.method == "POST":
         nombre = request.form.get("nombre", "").strip()
@@ -5899,31 +5868,12 @@ def editar_producto(id):
             precio = float(request.form["precio"])
             categoria_id = int(request.form["categoria_id"])
         except Exception:
-            conn.close()
             return "Datos invalidos"
 
-        cursor.execute(
-            """
-            UPDATE productos
-            SET nombre=?, precio=?, categoria_id=?
-            WHERE id=?
-            """,
-            (nombre, precio, categoria_id, id),
-        )
-        conn.commit()
-        conn.close()
+        catalog_repo.actualizar_producto(id, nombre, precio, categoria_id)
         return redirect("/menu")
 
-    cursor.execute(
-        """
-        SELECT nombre, precio, categoria_id
-        FROM productos
-        WHERE id=?
-        """,
-        (id,),
-    )
-    p = cursor.fetchone()
-    conn.close()
+    p = catalog_repo.obtener_producto(id)
 
     if not p:
         return "Producto no encontrado"
