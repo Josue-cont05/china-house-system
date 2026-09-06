@@ -1087,7 +1087,7 @@ class SalesSnapshotTest(unittest.TestCase):
 
         conn = self._conn()
         cursor = conn.cursor()
-        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20")
+        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20", web_app.obtener_tasa_actual)
         conn.close()
 
         self.assertEqual(reporte["total_vendido_usd"], 20.0)
@@ -1153,7 +1153,7 @@ class SalesSnapshotTest(unittest.TestCase):
 
         conn = self._conn()
         cursor = conn.cursor()
-        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20")
+        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20", web_app.obtener_tasa_actual)
         resumen = web_app.construir_resumen_cierre(cursor)
         conn.close()
 
@@ -1177,7 +1177,7 @@ class SalesSnapshotTest(unittest.TestCase):
             (legacy, "Delivery 3", 3.0),
         )
         conn.commit()
-        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20")
+        reporte = web_app.construir_reporte_rango(cursor, "2026-08-20", "2026-08-20", web_app.obtener_tasa_actual)
         conn.close()
 
         self.assertEqual(reporte["total_vendido_usd"], 35.0)

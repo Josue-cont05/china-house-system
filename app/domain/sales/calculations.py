@@ -1,5 +1,7 @@
 import re
 
+from app.shared.constants.system import ETIQUETAS_METODO_PAGO
+
 
 DELIVERY_MONTO_MAXIMO = 100.0
 TOLERANCIA_COBRO = 0.0001
@@ -22,6 +24,10 @@ def normalizar_metodo_pago(metodo):
     if metodo == "pago_movil":
         return "bs_pago_movil"
     return metodo
+
+
+def etiqueta_metodo_pago(metodo):
+    return ETIQUETAS_METODO_PAGO.get(normalizar_metodo_pago(metodo), metodo or "-")
 
 
 MODOS_COBRO_VALIDOS = {"pagado", "parcial", "credito"}
