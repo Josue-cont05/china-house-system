@@ -65,16 +65,8 @@ from app.domain.sales.order_totals import (
 from app.infrastructure.database.sales.orders import SqlSalesOrderRepository
 from app.infrastructure.database.sales.catalog import SqlSalesCatalogRepository
 from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
-from app.application.self_ordering.links import (
-    MesaSelfOrderingOcupada,
-    activar_link_permanente_para_nueva_orden_mesa,
-)
-from app.application.self_ordering.mesas import (
-    MesaSelfOrderingInvalida,
-    etiqueta_mesa,
-    normalizar_mesa_clave,
-    opciones_mesa_html,
-)
+from app.application.self_ordering.links import MesaSelfOrderingOcupada
+from app.application.self_ordering.mesas import MesaSelfOrderingInvalida, opciones_mesa_html
 from app.application.kitchen.comandas import (
     OrdenComandaNoExiste,
     OrdenComandaSinItems,
@@ -109,7 +101,6 @@ from app.infrastructure.database.notifications import (
     crear_notificacion,
     crear_tabla_notifications,
 )
-from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 from app.infrastructure.database.clientes import (
@@ -143,6 +134,7 @@ from app.application.orders.items import (
     eliminar_item_de_orden,
 )
 from app.application.orders.lifecycle import eliminar_orden_completa
+from app.application.orders.create import OrdenYaAbiertaError, crear_orden_nueva
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -6854,87 +6846,27 @@ def nueva_orden():
 
 @app.route("/crear_orden", methods=["POST"])
 def crear_orden():
-    tipo = request.form.get("tipo")
-    referencia = request.form.get("referencia", "")
-    cliente = request.form.get("cliente", "")
-    fecha_hora = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
-    fecha = ahora_venezuela().strftime("%Y-%m-%d")
-    usuario_id = session.get("usuario_id")
-
-    if (tipo or "").strip().lower() == "mesa":
-        tipo = "Mesa"
-        try:
-            referencia = normalizar_mesa_clave(request.form.get("referencia_mesa"))
-        except MesaSelfOrderingInvalida as exc:
-            return str(exc), 400
-        conn_validacion = get_connection()
-        cursor_validacion = conn_validacion.cursor()
-        cursor_validacion.execute(
-            """
-            SELECT id
-            FROM ordenes
-            WHERE LOWER(tipo)='mesa'
-              AND referencia=?
-              AND estado='abierta'
-              AND cierre_id IS NULL
-            LIMIT 1
-            """,
-            (referencia,),
+    try:
+        orden_id = crear_orden_nueva(
+            get_connection=get_connection,
+            obtener_ultimo_id=obtener_ultimo_id,
+            ahora_venezuela=ahora_venezuela,
+            obtener_conductor_delivery_por_defecto=obtener_conductor_delivery_por_defecto,
+            notificar_delivery_asignado=notificar_delivery_asignado,
+            notificar_delivery_necesita_conductor=notificar_delivery_necesita_conductor,
+            tipo=request.form.get("tipo"),
+            referencia=request.form.get("referencia", ""),
+            referencia_mesa=request.form.get("referencia_mesa"),
+            cliente=request.form.get("cliente", ""),
+            usuario_id=session.get("usuario_id"),
+            delivery_driver_choice=request.form.get("delivery_driver_choice"),
         )
-        orden_abierta = cursor_validacion.fetchone()
-        conn_validacion.close()
-        if orden_abierta is not None:
-            return f"{etiqueta_mesa(referencia)} ya tiene una orden abierta.", 409
-
-    es_delivery = (tipo or "").strip().lower() == "delivery"
-    delivery_driver_user_id = None
-    delivery_driver_status = None
-    if es_delivery:
-        eleccion = (request.form.get("delivery_driver_choice") or "").strip()
-        conn_conductor = get_connection()
-        cursor_conductor = conn_conductor.cursor()
-        conductor_default = obtener_conductor_delivery_por_defecto(cursor_conductor)
-        conn_conductor.close()
-        if eleccion == "default" and conductor_default:
-            delivery_driver_user_id = conductor_default[0]
-            delivery_driver_status = ESTADO_DELIVERY_ASIGNADO_INTERNO
-        else:
-            delivery_driver_status = ESTADO_DELIVERY_NECESITA_CONDUCTOR
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO ordenes (
-            numero_orden, fecha_hora, fecha, tipo, referencia, cliente, estado, usuario_id,
-            delivery_driver_user_id, delivery_driver_status
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            None, fecha_hora, fecha, tipo, referencia, cliente, "abierta", usuario_id,
-            delivery_driver_user_id, delivery_driver_status,
-        ),
-    )
-    orden_id = obtener_ultimo_id(cursor, "ordenes")
-    conn.commit()
-    conn.close()
-    if (tipo or "").strip().lower() == "mesa":
-        try:
-            activar_link_permanente_para_nueva_orden_mesa(
-                SqlSelfOrderLinkRepository(get_connection, obtener_ultimo_id),
-                orden_id,
-            )
-        except MesaSelfOrderingOcupada as exc:
-            return str(exc), 409
-    if es_delivery:
-        if delivery_driver_status == ESTADO_DELIVERY_ASIGNADO_INTERNO:
-            notificar_delivery_asignado(orden_id, delivery_driver_user_id, None, cliente, referencia)
-        elif delivery_driver_status == ESTADO_DELIVERY_NECESITA_CONDUCTOR:
-            conn_notif = get_connection()
-            cursor_notif = conn_notif.cursor()
-            notificar_delivery_necesita_conductor(cursor_notif, orden_id, None, cliente, referencia)
-            conn_notif.close()
+    except MesaSelfOrderingInvalida as exc:
+        return str(exc), 400
+    except OrdenYaAbiertaError as exc:
+        return str(exc), 409
+    except MesaSelfOrderingOcupada as exc:
+        return str(exc), 409
     return redirect(f"/orden/{orden_id}")
 
 
