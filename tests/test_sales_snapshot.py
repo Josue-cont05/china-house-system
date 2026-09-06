@@ -3535,6 +3535,115 @@ class PostCobroIncrementalTest(unittest.TestCase):
 
         self.assertEqual(self._pendiente_pagina(orden_id).status_code, 302)
 
+    # --- Mision seccion 52, Caso 6: autorevision del flujo COMPLETO ---
+    # incrementales de cocina + service_alert + cobro incremental, todo
+    # junto, usando las rutas REALES (/agregar, /enviar_cocina, /cobrar,
+    # /cobrar_pendiente) en vez de atajos SQL.
+
+    def _crear_producto_real(self, nombre, categoria, precio):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM categorias WHERE nombre=? ORDER BY id LIMIT 1", (categoria,))
+        row = cursor.fetchone()
+        categoria_id = row[0] if row else None
+        if categoria_id is None:
+            cursor.execute("INSERT INTO categorias (nombre, activo) VALUES (?, 1)", (categoria,))
+            categoria_id = web_app.obtener_ultimo_id(cursor, "categorias")
+        cursor.execute(
+            "INSERT INTO productos (nombre, precio, categoria_id, activo) VALUES (?, ?, ?, 1)",
+            (nombre, precio, categoria_id),
+        )
+        producto_id = web_app.obtener_ultimo_id(cursor, "productos")
+        conn.commit()
+        conn.close()
+        return producto_id
+
+    def _service_alerts_pendientes(self):
+        repo = web_app.SqlServiceAlertsRepository(web_app.get_connection)
+        return repo.listar_pendientes()
+
+    def test_caso_6_incrementales_mas_service_alert_mas_cobro_incremental(self):
+        chop_suey_id = self._crear_producto_real("Chop Suey de Pollo", "Platos adicionales", 6.0)
+        neko_clan_id = self._crear_producto_real("Neko Clan Triple", "Platos adicionales", 2.0)
+        coca_cola_id = self._crear_producto_real("Coca-Cola", "Bebidas", 1.0)
+
+        orden_id = self._create_empty_order()
+
+        # 1) Chop Suey -> #0 -> cobrar ($6, pagado completo).
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{chop_suey_id}").status_code, 302)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+
+        # 2) Neko Clan Triple agregado DESPUES de cobrar -> permitido -> #1.
+        respuesta_agregar = self.client.get(f"/agregar/{orden_id}/{neko_clan_id}")
+        self.assertEqual(respuesta_agregar.status_code, 302)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        # 3) 2x Coca-Cola agregadas -> #2 -> genera UNA service_alert (bebida incremental).
+        self.client.get(f"/agregar/{orden_id}/{coca_cola_id}")
+        self.client.get(f"/agregar/{orden_id}/{coca_cola_id}")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        alertas = self._service_alerts_pendientes()
+        self.assertEqual(len(alertas), 1)
+
+        comandas = self._comandas_de(orden_id)
+        self.assertEqual([c[1] for c in comandas], [0, 1, 2])
+
+        # 4) El saldo pendiente nuevo es EXACTAMENTE Neko Clan + 2 Coca-Cola = $4, nunca $10 de nuevo.
+        conn = self._conn()
+        cursor = conn.cursor()
+        pendiente = web_app.calcular_pendiente_post_cobro(cursor, orden_id)
+        conn.close()
+        self.assertIsNotNone(pendiente)
+        self.assertEqual(pendiente["pendiente_usd"], 4.0)
+
+        # 5) Atender la alerta de servicio no toca nada financiero ni de cocina.
+        alerta_id = alertas[0]["id"]
+        self.client.post(f"/despacho/alertas/{alerta_id}/atendido")
+        self.assertEqual(self._service_alerts_pendientes(), [])
+        comandas_despues = self._comandas_de(orden_id)
+        self.assertEqual([c[1] for c in comandas_despues], [0, 1, 2])
+
+        # 6) Cobrar SOLAMENTE el pendiente ($4) -- el pago original de $6 sigue intacto.
+        _snapshot_original, pagos_antes = self._snapshot(orden_id)
+        self.assertEqual(len(pagos_antes), 1)
+        respuesta_pendiente = self._pagar_ahora(orden_id, metodo="usd", monto=4.0)
+        self.assertEqual(respuesta_pendiente.status_code, 302)
+
+        _snapshot_final, pagos_despues = self._snapshot(orden_id)
+        self.assertEqual(pagos_despues[0], pagos_antes[0])
+        self.assertEqual(len(pagos_despues), 2)
+        self.assertEqual(pagos_despues[1][0:2], ("usd", 4.0))
+        self.assertIsNone(self._cuenta_por_orden(orden_id))  # nunca se creo CxC
+
+        financial = self._financial_snapshot(orden_id)
+        self.assertEqual(financial[10], 10.0)  # total_cliente_usd = TOTAL CONSUMIDO = 6+2+1+1
+
+        # 7) Ya no queda pendiente nuevo -> la pagina de cobro incremental redirige.
+        self.assertEqual(self._pendiente_pagina(orden_id).status_code, 302)
+
+        # 8) Despacho sigue mostrando la orden completa (LISTO PARA RETIRAR todavia no se pulso).
+        despacho_html = self.client.get("/despacho").get_data(as_text=True)
+        self.assertIn(f'data-orden-id="{orden_id}"', despacho_html)
+
+        # 9) Marcar LISTO PARA RETIRAR -- idempotente, no financiero.
+        respuesta_listo = self.client.post(f"/despacho/{orden_id}/entregado")
+        self.assertEqual(respuesta_listo.get_json(), {"ok": True})
+        despacho_html_final = self.client.get("/despacho").get_data(as_text=True)
+        self.assertNotIn(f'data-orden-id="{orden_id}"', despacho_html_final)
+
+    def _comandas_de(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, secuencia FROM orden_comandas WHERE orden_id=? ORDER BY secuencia",
+            (orden_id,),
+        )
+        filas = cursor.fetchall()
+        conn.close()
+        return filas
+
 
 if __name__ == "__main__":
     unittest.main()
