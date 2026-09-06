@@ -139,6 +139,16 @@ from app.application.delivery.assignment import (
     asignar_conductor_interno,
     marcar_conductor_externo,
 )
+from app.infrastructure.database.usuarios import (
+    actualizar_usuario,
+    alternar_activo_usuario,
+    alternar_flag_delivery_usuario as alternar_flag_delivery_usuario_en_bd,
+    crear_usuario as crear_usuario_en_bd,
+    listar_usuarios_activos_login,
+    listar_usuarios_admin,
+    obtener_usuario_para_editar,
+    verificar_credenciales,
+)
 from app.application.notifications.events import (
     notificar_delivery_asignado as _notificar_delivery_asignado,
     notificar_delivery_conductor_asignado_posteriormente as _notificar_delivery_conductor_asignado_posteriormente,
@@ -3112,8 +3122,7 @@ def siguiente_numero():
 def login():
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, nombre FROM usuarios WHERE COALESCE(activo, 1) = 1 ORDER BY nombre")
-    usuarios = cursor.fetchall()
+    usuarios = listar_usuarios_activos_login(cursor)
 
     error = ""
 
@@ -3121,15 +3130,7 @@ def login():
         usuario_id = request.form.get("usuario_id")
         pin = request.form.get("pin", "").strip()
 
-        cursor.execute(
-            """
-            SELECT id, nombre, COALESCE(rol, 'mesonera')
-            FROM usuarios
-            WHERE id=? AND pin=? AND COALESCE(activo, 1) = 1
-            """,
-            (usuario_id, pin),
-        )
-        usuario = cursor.fetchone()
+        usuario = verificar_credenciales(cursor, usuario_id, pin)
 
         if usuario:
             session["usuario_id"] = usuario[0]
@@ -3974,16 +3975,7 @@ def usuarios():
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin, COALESCE(activo, 1),
-               COALESCE(es_conductor_delivery, 0), COALESCE(es_conductor_delivery_default, 0),
-               COALESCE(es_coordinador_delivery, 0)
-        FROM usuarios
-        ORDER BY COALESCE(activo, 1) DESC, rol ASC, nombre ASC
-        """
-    )
-    filas_usuarios = cursor.fetchall()
+    filas_usuarios = listar_usuarios_admin(cursor)
     conn.close()
 
     def _boton_flag(usuario_id, flag, activo_flag, etiqueta):
@@ -4125,13 +4117,7 @@ def crear_usuario():
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO usuarios (nombre, pin, rol, activo)
-        VALUES (?, ?, ?, ?)
-        """,
-        (nombre, pin, rol, activo),
-    )
+    crear_usuario_en_bd(cursor, nombre, pin, rol, activo)
     conn.commit()
     conn.close()
     return redirect("/usuarios")
@@ -4147,29 +4133,16 @@ def alternar_flag_delivery_usuario(usuario_id):
     if not usuario_es_master():
         return "Acceso denegado", 403
 
-    flag = (request.form.get("flag") or "").strip()
-    columnas = {
-        "conductor": "es_conductor_delivery",
-        "conductor_default": "es_conductor_delivery_default",
-        "coordinador": "es_coordinador_delivery",
-    }
-    columna = columnas.get(flag)
-    if not columna:
-        return "Flag invalido", 400
-
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(f"SELECT COALESCE({columna}, 0) FROM usuarios WHERE id=?", (usuario_id,))
-    row = cursor.fetchone()
-    if not row:
+    try:
+        alternar_flag_delivery_usuario_en_bd(cursor, usuario_id, request.form.get("flag"))
+    except ValueError as exc:
         conn.close()
-        return "Usuario no encontrado", 404
-
-    nuevo_valor = 0 if row[0] else 1
-    if flag == "conductor_default" and nuevo_valor == 1:
-        # Un unico conductor por defecto a la vez.
-        cursor.execute("UPDATE usuarios SET es_conductor_delivery_default=0")
-    cursor.execute(f"UPDATE usuarios SET {columna}=? WHERE id=?", (nuevo_valor, usuario_id))
+        return str(exc), 400
+    except LookupError as exc:
+        conn.close()
+        return str(exc), 404
     conn.commit()
     conn.close()
     return redirect("/usuarios")
@@ -4192,38 +4165,13 @@ def editar_usuario(usuario_id):
             conn.close()
             return "Datos invalidos", 400
 
-        if pin:
-            cursor.execute(
-                """
-                UPDATE usuarios
-                SET nombre=?, pin=?, rol=?
-                WHERE id=?
-                """,
-                (nombre, pin, rol, usuario_id),
-            )
-        else:
-            cursor.execute(
-                """
-                UPDATE usuarios
-                SET nombre=?, rol=?
-                WHERE id=?
-                """,
-                (nombre, rol, usuario_id),
-            )
+        actualizar_usuario(cursor, usuario_id, nombre, rol, pin)
 
         conn.commit()
         conn.close()
         return redirect("/usuarios")
 
-    cursor.execute(
-        """
-        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin
-        FROM usuarios
-        WHERE id=?
-        """,
-        (usuario_id,),
-    )
-    usuario = cursor.fetchone()
+    usuario = obtener_usuario_para_editar(cursor, usuario_id)
     conn.close()
 
     if not usuario:
@@ -4273,14 +4221,11 @@ def activar_usuario(usuario_id):
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COALESCE(activo, 1) FROM usuarios WHERE id=?", (usuario_id,))
-    row = cursor.fetchone()
-    if not row:
+    try:
+        alternar_activo_usuario(cursor, usuario_id)
+    except ValueError as exc:
         conn.close()
-        return "Usuario no encontrado", 404
-
-    nuevo_activo = 0 if row[0] else 1
-    cursor.execute("UPDATE usuarios SET activo=? WHERE id=?", (nuevo_activo, usuario_id))
+        return str(exc), 404
     conn.commit()
     conn.close()
     return redirect("/usuarios")
