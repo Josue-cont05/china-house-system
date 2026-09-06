@@ -448,6 +448,24 @@ def obtener_conductor_delivery_por_defecto(cursor):
     return cursor.fetchone()
 
 
+def obtener_conductor_delivery_actual(cursor, orden_id):
+    """Conductor asignado HOY a una orden Delivery (id/status/nombre), o
+    None de driver_id/nombre si todavia no se asigno ninguno. Usado por
+    la pantalla de detalle de orden para mostrar el estado del
+    delivery."""
+    cursor.execute(
+        "SELECT delivery_driver_user_id, delivery_driver_status FROM ordenes WHERE id=?",
+        (orden_id,),
+    )
+    driver_id, driver_status = cursor.fetchone()
+    driver_nombre = None
+    if driver_id:
+        cursor.execute("SELECT nombre FROM usuarios WHERE id=?", (driver_id,))
+        fila_driver = cursor.fetchone()
+        driver_nombre = fila_driver[0] if fila_driver else None
+    return driver_id, driver_status, driver_nombre
+
+
 def listar_conductores_delivery_activos(cursor):
     cursor.execute(
         """
