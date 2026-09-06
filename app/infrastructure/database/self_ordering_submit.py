@@ -93,7 +93,7 @@ class SqlSelfOrderingSubmitRepository:
                 conn.rollback()
                 return existente
 
-            self._revalidar_destino(cursor, token, link_id, orden_id)
+            estado_orden = self._revalidar_destino(cursor, token, link_id, orden_id)
             numero_orden_reserva = self._numero_si_hace_falta(cursor, orden_id)
             cursor.execute(
                 """
@@ -137,14 +137,18 @@ class SqlSelfOrderingSubmitRepository:
                     ),
                 )
 
+            # Mismo criterio que /agregar en web_app.py: un item enviado a
+            # una mesa YA cobrada (estado='cerrada') es consumo post-cobro
+            # todavia no liquidado.
+            incluido_en_snapshot = 0 if estado_orden == "cerrada" else 1
             orden_item_ids = []
             for item in orden_items:
                 cursor.execute(
                     """
-                    INSERT INTO orden_items (orden_id, producto, precio, indicacion)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (orden_id, item.producto, item.precio, item.indicacion),
+                    (orden_id, item.producto, item.precio, item.indicacion, incluido_en_snapshot),
                 )
                 orden_item_ids.append(self._last_id_getter(cursor, "orden_items"))
 
@@ -263,6 +267,7 @@ class SqlSelfOrderingSubmitRepository:
         # orden esta archivada o ya fue entregada.
         if orden is None or not puede_agregar_item_orden(orden[1], orden[2]):
             raise SubmitSelfOrderingAtomicoError("Mesa no habilitada.")
+        return orden[0]
 
     def _numero_si_hace_falta(self, cursor, orden_id):
         cursor.execute(

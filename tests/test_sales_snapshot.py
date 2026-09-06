@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest import mock
 
@@ -3643,6 +3644,155 @@ class PostCobroIncrementalTest(unittest.TestCase):
         filas = cursor.fetchall()
         conn.close()
         return filas
+
+    # --- Mision "recibos post-cobro": un agregado DESPUES de cobrar y
+    # TODAVIA no liquidado (via /orden/<id>/cobrar_pendiente) nunca debe
+    # aparecer en el recibo OFICIAL -- ni en /facturas_pendientes, ni en
+    # el print_job congelado por /activar_factura, ni en /factura/<id> --
+    # hasta que se liquide. Usa las rutas REALES /agregar y /cobrar en
+    # vez de insertar via SQL, para ejercitar tambien el flag de
+    # escritura (orden_items.incluido_en_snapshot).
+
+    def _facturar_y_leer(self, orden_id):
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+        respuesta = self.client.get("/facturas_pendientes").get_json()
+        return next(o for o in respuesta if o["id"] == orden_id)
+
+    def _job_recibo_payload(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT payload FROM print_jobs WHERE required_role LIKE 'RECIBO_%' ORDER BY id DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return json.loads(row[0])
+
+    def test_recibo_caso_a_cobro_simple_items_y_total_coherentes(self):
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+
+        recibo = self._facturar_y_leer(orden_id)
+        self.assertEqual(recibo["total"], 6.0)
+        self.assertEqual(sum(i["total"] for i in recibo["items"]), 6.0)
+
+        payload = self._job_recibo_payload(orden_id)
+        self.assertEqual(payload["total"], 6.0)
+        self.assertEqual(sum(i["total"] for i in payload["items"]), 6.0)
+
+    def test_recibo_caso_b_agregado_post_cobro_no_liquidado_no_aparece(self):
+        producto_id = self._crear_producto_real("Item Extra Recibo", "Platos adicionales", 2.0)
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+
+        # Agregado post-cobro REAL via /agregar, SIN liquidar el pendiente.
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{producto_id}").status_code, 302)
+
+        recibo = self._facturar_y_leer(orden_id)
+        # BUG que esta prueba reproduce: antes del fix, "items" incluia el
+        # agregado (sumando $8) pero "total" seguia congelado en $6 --
+        # incoherencia items-vs-total prohibida por la mision.
+        self.assertEqual(recibo["total"], 6.0)
+        self.assertEqual(sum(i["total"] for i in recibo["items"]), 6.0)
+        self.assertNotIn("Item Extra Recibo", [i["nombre"] for i in recibo["items"]])
+
+        payload = self._job_recibo_payload(orden_id)
+        self.assertEqual(payload["total"], 6.0)
+        self.assertNotIn("Item Extra Recibo", [i["nombre"] for i in payload["items"]])
+
+        html = self.client.get(f"/factura/{orden_id}").get_data(as_text=True)
+        self.assertNotIn("Item Extra Recibo", html)
+        self.assertIn("TOTAL: $6.0", html)
+
+    def test_recibo_caso_c_agregado_liquidado_aparece_en_recibo(self):
+        producto_id = self._crear_producto_real("Item Extra Liquidado", "Platos adicionales", 2.0)
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{producto_id}").status_code, 302)
+        self.assertEqual(self._pagar_ahora(orden_id, metodo="usd", monto=2.0).status_code, 302)
+
+        recibo = self._facturar_y_leer(orden_id)
+        self.assertEqual(recibo["total"], 8.0)
+        self.assertEqual(sum(i["total"] for i in recibo["items"]), 8.0)
+        self.assertIn("Item Extra Liquidado", [i["nombre"] for i in recibo["items"]])
+
+        html = self.client.get(f"/factura/{orden_id}").get_data(as_text=True)
+        self.assertIn("Item Extra Liquidado", html)
+        self.assertIn("TOTAL: $8.0", html)
+
+    def test_recibo_caso_d_varios_ciclos_cobro_agregar_liquidar(self):
+        item_a = self._crear_producto_real("Ciclo A", "Platos adicionales", 2.0)
+        item_b = self._crear_producto_real("Ciclo B", "Platos adicionales", 3.0)
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+
+        # Ciclo 1: agrega A, liquida A.
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{item_a}").status_code, 302)
+        self.assertEqual(self._pagar_ahora(orden_id, metodo="usd", monto=2.0).status_code, 302)
+
+        # Ciclo 2: agrega B, TODAVIA no liquida.
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{item_b}").status_code, 302)
+
+        recibo = self._facturar_y_leer(orden_id)
+        # Oficial: 6 (original) + 2 (A, ya liquidado) = 8. B ($3) todavia no.
+        self.assertEqual(recibo["total"], 8.0)
+        self.assertEqual(sum(i["total"] for i in recibo["items"]), 8.0)
+        nombres = [i["nombre"] for i in recibo["items"]]
+        self.assertIn("Ciclo A", nombres)
+        self.assertNotIn("Ciclo B", nombres)
+
+        # Liquidar B tambien -> ahora los tres son oficiales.
+        self.assertEqual(self._pagar_ahora(orden_id, metodo="usd", monto=3.0).status_code, 302)
+        recibo_final = self._facturar_y_leer(orden_id)
+        self.assertEqual(recibo_final["total"], 11.0)
+        self.assertIn("Ciclo B", [i["nombre"] for i in recibo_final["items"]])
+
+    def test_recibo_caso_e_parcial_mas_agregado_no_liquidado_no_aparece(self):
+        cliente_id = self._create_client("Cliente Recibo Parcial")
+        producto_id = self._crear_producto_real("Item Parcial Extra", "Platos adicionales", 2.0)
+        orden_id = self._create_order(price=10.0)
+        self.assertEqual(
+            self._charge(orden_id, "usd", 6, modo_cobro="parcial", cliente_id=cliente_id).status_code,
+            302,
+        )
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{producto_id}").status_code, 302)
+
+        recibo = self._facturar_y_leer(orden_id)
+        # El cobro parcial original ya cubria $10 de CONSUMO (aunque solo
+        # $6 se pagaron en efectivo y $4 quedaron en CxC) -- el recibo
+        # oficial sigue siendo $10; el agregado de $2 aun no es oficial.
+        self.assertEqual(recibo["total"], 10.0)
+        self.assertNotIn("Item Parcial Extra", [i["nombre"] for i in recibo["items"]])
+
+    def test_recibo_caso_f_delivery_snapshot_no_se_contamina_con_agregado_no_liquidado(self):
+        producto_id = self._crear_producto_real("Item Delivery Extra", "Platos adicionales", 1.5)
+        orden_id = self._create_empty_order(estado="cerrada")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, incluido_en_snapshot) VALUES (?, ?, ?, 1)",
+            (orden_id, "Consumo Delivery", 6.0),
+        )
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET tasa_cobro=200, subtotal_usd=6.0, total_usd=6.0, total_bs=1600.0,
+                venta_restaurante_usd=6.0, delivery_usd=2.0,
+                total_cliente_usd=8.0, total_cliente_bs=1600.0,
+                fecha_cobro='2026-08-20 12:05:00'
+            WHERE id=?
+            """,
+            (orden_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{producto_id}").status_code, 302)
+
+        recibo = self._facturar_y_leer(orden_id)
+        self.assertEqual(recibo["delivery"], 2.0)
+        self.assertEqual(recibo["total"], 8.0)
+        self.assertNotIn("Item Delivery Extra", [i["nombre"] for i in recibo["items"]])
 
 
 if __name__ == "__main__":

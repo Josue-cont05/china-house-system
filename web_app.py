@@ -1477,6 +1477,23 @@ def _aplicar_totales_post_cobro(cursor, orden_id, totales, cliente_id=None, clie
     return cursor.rowcount > 0
 
 
+def marcar_items_incluidos_en_snapshot(cursor, orden_id):
+    """Mision "recibos post-cobro": llamar SIEMPRE que una orden termine
+    de cobrarse (cobro inicial o liquidacion de un pendiente
+    incremental): TODOS los orden_items presentes en ese instante pasan
+    a formar parte oficial del snapshot/recibo (incluido_en_snapshot=1).
+    Cualquier item agregado DESPUES de este punto empieza en 0 (ver
+    /agregar) hasta que se liquide con un cobro/cobro-pendiente
+    posterior. Este flag responde "esta oficialmente incluido en el
+    total vigente ahora mismo", no "a que cobro numero pertenece" -- por
+    eso sigue siendo correcto sin importar cuantos ciclos
+    cobrar->agregar->cobrar_pendiente se repitan."""
+    cursor.execute(
+        "UPDATE orden_items SET incluido_en_snapshot=1 WHERE orden_id=?",
+        (orden_id,),
+    )
+
+
 def asegurar_columna(tabla, columna, definicion):
     conn = get_connection()
     cursor = conn.cursor()
@@ -4123,6 +4140,17 @@ def init_db():
     asegurar_columna("ordenes", "total_usd", "REAL")
     asegurar_columna("ordenes", "total_bs", "REAL")
     asegurar_columna("orden_items", "indicacion", "TEXT")
+    # Mision "recibos post-cobro": distingue un item que YA formaba
+    # parte del ultimo cobro/liquidacion oficial (=1) de un agregado
+    # post-cobro todavia pendiente de liquidar (=0). DEFAULT 1 para que
+    # TODO lo historico/existente siga comportandose exactamente igual
+    # que hoy. Ver marcar_items_incluidos_en_snapshot() mas abajo:
+    # cada vez que una orden se cobra (o se liquida su pendiente), TODOS
+    # sus items presentes en ese momento pasan a 1 -- por eso el flag
+    # sigue siendo correcto sin importar cuantos ciclos
+    # cobro->agregar->cobrar se repitan (nunca es un "batch id" fijo,
+    # es "esta oficialmente incluido en el total vigente ahora mismo").
+    asegurar_columna("orden_items", "incluido_en_snapshot", "INTEGER DEFAULT 1")
     asegurar_columna("usuarios", "rol", "TEXT")
     asegurar_columna("usuarios", "activo", "INTEGER DEFAULT 1")
     asegurar_columna_facturar()
@@ -8963,25 +8991,32 @@ def agregar(orden_id, producto_id):
         conn.close()
         return exc.mensaje, exc.status_code
 
+    # Un agregado a una orden YA cobrada (estado='cerrada') es consumo
+    # post-cobro todavia no liquidado: arranca fuera del snapshot oficial
+    # (incluido_en_snapshot=0) hasta que se cobre/liquide (ver
+    # marcar_items_incluidos_en_snapshot). Si la orden sigue abierta, es
+    # consumo normal que sera parte del proximo cobro de todos modos.
+    incluido_en_snapshot = 0 if row[0] == "cerrada" else 1
     cursor.execute(
         """
-        INSERT INTO orden_items (orden_id, producto, precio, indicacion)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             orden_id,
             items_construidos.item_principal.producto,
             items_construidos.item_principal.precio,
             items_construidos.item_principal.indicacion,
+            incluido_en_snapshot,
         ),
     )
     for item_extra in items_construidos.items_extra:
         cursor.execute(
             """
-            INSERT INTO orden_items (orden_id, producto, precio, indicacion)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (orden_id, item_extra.producto, item_extra.precio, item_extra.indicacion),
+            (orden_id, item_extra.producto, item_extra.precio, item_extra.indicacion, incluido_en_snapshot),
         )
     if row[0] == "cerrada" and edicion_emergencia_activa:
         registrar_auditoria_emergencia(
@@ -9688,6 +9723,8 @@ def cobrar(orden_id):
                         conn.close()
                         return "Esta orden ya fue cerrada o pertenece a un cierre de jornada"
 
+                    marcar_items_incluidos_en_snapshot(cursor, orden_id)
+
                     if saldo_cxc_usd > TOLERANCIA_COBRO:
                         crear_cuenta_por_cobrar_inicial(
                             cursor,
@@ -10352,6 +10389,7 @@ def cobrar_pendiente_post_cobro(orden_id):
                     (orden_id, metodo, monto, referencia, fecha),
                 )
                 _aplicar_totales_post_cobro(cursor, orden_id, pendiente["totales_actuales"])
+                marcar_items_incluidos_en_snapshot(cursor, orden_id)
                 conn.commit()
                 conn.close()
                 return redirect(f"/orden/{orden_id}")
@@ -10384,6 +10422,7 @@ def cobrar_pendiente_post_cobro(orden_id):
                     cliente_id=cliente_cxc[0],
                     cliente_nombre=cliente_cxc[1],
                 )
+                marcar_items_incluidos_en_snapshot(cursor, orden_id)
                 conn.commit()
                 conn.close()
                 return redirect(f"/orden/{orden_id}")
@@ -12245,7 +12284,7 @@ def factura(orden_id):
         """
         SELECT producto, precio, COALESCE(indicacion, '')
         FROM orden_items
-        WHERE orden_id=?
+        WHERE orden_id=? AND COALESCE(incluido_en_snapshot, 1)=1
         """,
         (orden_id,),
     )
@@ -12351,6 +12390,7 @@ def facturas_pendientes():
             SELECT orden_id, producto, precio, COALESCE(indicacion, '')
             FROM orden_items
             WHERE orden_id IN ({placeholders})
+              AND COALESCE(incluido_en_snapshot, 1)=1
             ORDER BY id ASC
             """,
             orden_ids,
@@ -12455,7 +12495,7 @@ def _crear_print_job_recibo(cursor, orden_id, token, fecha_evento):
         """
         SELECT producto, precio, COALESCE(indicacion, '')
         FROM orden_items
-        WHERE orden_id=?
+        WHERE orden_id=? AND COALESCE(incluido_en_snapshot, 1)=1
         ORDER BY id ASC
         """,
         (orden_id,),
