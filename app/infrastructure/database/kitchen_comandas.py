@@ -8,7 +8,14 @@ from app.application.kitchen.comandas import (
     ResultadoComanda,
 )
 from app.domain.sales.print_queue import ROL_COCINA, TIPO_JOB_COMANDA
+from app.domain.sales.service_alerts import (
+    TIPO_BEBIDA_ADICIONAL,
+    agrupar_items_alerta,
+    debe_evaluar_alerta,
+    separar_cantidad,
+)
 from app.infrastructure.database.print_queue import crear_job_en_cursor
+from app.infrastructure.database.service_alerts import crear_alerta_en_cursor
 
 
 class SqlKitchenComandaRepository:
@@ -311,6 +318,65 @@ class SqlKitchenComandaRepository:
         finally:
             conn.close()
 
+    def listar_pedidos_despacho(self):
+        """Pedidos que Monica todavia debe atender/despachar: una orden
+        activa (no archivada, no cerrada) que ya entro al flujo
+        operativo de cocina (tiene al menos un lote en orden_comandas,
+        o esta en un estado legacy sin comandas) y que aun no fue
+        marcada despachado_at. Un renglon por ORDEN (no por lote de
+        cocina) -- a diferencia de listar_comandas_cocina(), que es
+        por-comanda. Mas antigua primero, usando SIEMPRE la hora
+        historica de envio a cocina (secuencia 0), nunca 'ahora'."""
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT o.id, o.numero_orden, o.tipo, o.referencia, o.cliente,
+                       o.estado, COALESCE(c0.fecha_creacion, o.fecha_hora) AS hora_envio,
+                       COALESCE(o.observacion, '')
+                FROM ordenes o
+                LEFT JOIN orden_comandas c0 ON c0.orden_id = o.id AND c0.secuencia = 0
+                WHERE o.cierre_id IS NULL
+                  AND o.estado != 'cerrada'
+                  AND o.despachado_at IS NULL
+                  AND (
+                    EXISTS (SELECT 1 FROM orden_comandas c WHERE c.orden_id = o.id)
+                    OR o.estado IN ('en cocina', 'listo')
+                  )
+                ORDER BY hora_envio ASC, o.id ASC
+                """
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def marcar_despachado(self, orden_id, usuario, fecha):
+        """Idempotente: si la orden ya tenia despachado_at, no cambia
+        nada y devuelve False (dos clicks / dos usuarios no producen
+        dos entregas). NO toca facturar/estado/cierre_id -- ENTREGADO
+        es un concepto de despacho, no financiero (ver mision seccion
+        2 y 7: no mezclar con cobrado/cerrado/pagado)."""
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE ordenes
+                SET despachado_at=?, despachado_por=?
+                WHERE id=? AND cierre_id IS NULL AND despachado_at IS NULL
+                """,
+                (fecha, usuario, orden_id),
+            )
+            afectadas = cursor.rowcount
+            conn.commit()
+            return afectadas > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def obtener_items_comanda(self, comanda_id):
         conn = self._connection_factory()
         cursor = conn.cursor()
@@ -524,6 +590,18 @@ def crear_comanda_en_cursor(
         fecha=fecha,
     )
 
+    _evaluar_alerta_servicio(
+        cursor,
+        orden_id=orden_id,
+        numero_orden=int(numero_orden),
+        referencia=referencia,
+        tipo_orden=tipo,
+        secuencia=secuencia,
+        comanda_id=comanda_id,
+        items_crudos=payload["items_crudos"],
+        fecha=fecha,
+    )
+
     return ResultadoComanda(
         comanda_id=comanda_id,
         orden_id=orden_id,
@@ -531,6 +609,78 @@ def crear_comanda_en_cursor(
         secuencia=secuencia,
         estado=ESTADO_COMANDA_EN_COCINA,
     )
+
+
+def _evaluar_alerta_servicio(
+    cursor,
+    *,
+    orden_id,
+    numero_orden,
+    referencia,
+    tipo_orden,
+    secuencia,
+    comanda_id,
+    items_crudos,
+    fecha,
+):
+    """Crea (si corresponde) UNA alerta de servicio para Mesa cuando este
+    lote es incremental (secuencia>0) y trae items clasificados para
+    atencion de despacho (categorias.requiere_atencion_despacho=1). Se
+    llama desde el MISMO hook que ya comparten el flujo manual
+    (/enviar_cocina) y self-ordering, asi ambos caminos producen
+    exactamente la misma clase de alerta sin logica duplicada.
+
+    No es un error si no se genera alerta: la mayoria de los lotes
+    incrementales (comida agregada, o Pick Up/Delivery) simplemente no
+    califican."""
+    if not debe_evaluar_alerta(tipo_orden, secuencia):
+        return
+
+    nombres_alerta = [
+        producto
+        for producto, _indicacion in items_crudos
+        if _categoria_requiere_despacho(cursor, producto)
+    ]
+    if not nombres_alerta:
+        return
+
+    crear_alerta_en_cursor(
+        cursor,
+        event_key=f"alerta-comanda-{comanda_id}",
+        orden_id=orden_id,
+        tipo=TIPO_BEBIDA_ADICIONAL,
+        payload={
+            "numero": numero_orden,
+            "referencia": referencia,
+            "items": agrupar_items_alerta(nombres_alerta),
+        },
+        fecha=fecha,
+    )
+
+
+def _categoria_requiere_despacho(cursor, nombre_producto_crudo):
+    """True si `nombre_producto_crudo` (tal como quedo guardado en
+    orden_items.producto, puede traer prefijo 'Nx ') corresponde HOY a
+    un producto activo cuya categoria esta marcada
+    requiere_atencion_despacho=1. Un producto que ya no existe o que
+    cambio de nombre (p.ej. vino dentro de un combo, cuyo texto no es un
+    nombre de producto exacto) simplemente no clasifica -- no se asume
+    nada por texto/substring."""
+    _cantidad, nombre = separar_cantidad(nombre_producto_crudo)
+    if not nombre:
+        return False
+    cursor.execute(
+        """
+        SELECT COALESCE(c.requiere_atencion_despacho, 0)
+        FROM productos p
+        JOIN categorias c ON c.id = p.categoria_id
+        WHERE p.nombre = ?
+        LIMIT 1
+        """,
+        (nombre,),
+    )
+    row = cursor.fetchone()
+    return bool(row and row[0])
 
 
 def _hora_pedido_de_orden(cursor, orden_id):

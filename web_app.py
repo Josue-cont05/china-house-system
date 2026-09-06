@@ -102,6 +102,17 @@ from app.infrastructure.database.print_queue import (
     crear_job_en_cursor,
     crear_tabla_print_jobs,
 )
+from app.domain.sales.kitchen_ticket_times import formatear_hora_visible
+from app.domain.sales.service_alerts import (
+    TIPO_BEBIDA_ADICIONAL,
+    agrupar_items_alerta,
+    debe_evaluar_alerta,
+)
+from app.infrastructure.database.service_alerts import (
+    SqlServiceAlertsRepository,
+    crear_alerta_en_cursor,
+    crear_tabla_service_alerts,
+)
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
@@ -1332,6 +1343,24 @@ def limpiar_facturas_archivadas():
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE ordenes SET facturar=0 WHERE cierre_id IS NOT NULL")
+    conn.commit()
+    conn.close()
+
+
+def migrar_categoria_bebidas_requiere_despacho():
+    """Marca la categoria 'Bebidas' con requiere_atencion_despacho=1
+    (idempotente: correr esto muchas veces no cambia nada mas alla del
+    primer efecto). Es la unica categoria que hoy clasifica como items
+    de atencion de despacho (ver app/domain/sales/service_alerts.py) --
+    si en el futuro se necesita marcar otra categoria, se hace con un
+    UPDATE explicito igual que este, nunca comparando nombres de
+    producto/categoria dentro de la logica de negocio."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE categorias SET requiere_atencion_despacho=1 "
+        "WHERE LOWER(nombre)=LOWER('Bebidas') AND requiere_atencion_despacho=0"
+    )
     conn.commit()
     conn.close()
 
@@ -3379,6 +3408,13 @@ def proteger_sistema():
         "eliminar_item",
         "self_ordering.crear_o_obtener_link_mesa",
         "self_ordering.revocar_link_mesa",
+        # Pantalla operativa de despacho (mision "DESPACHO para Monica"):
+        # mismo permiso que tomar ordenes -- reutiliza el sistema
+        # existente, no crea un rol/permiso paralelo.
+        "despacho",
+        "api_despacho_estado",
+        "despacho_entregar",
+        "despacho_atender_alerta",
     }
 
     # Pantalla operativa de cocina.
@@ -3630,6 +3666,7 @@ def init_db():
     crear_tablas_delivery()
     crear_tablas_comandas()
     crear_tabla_print_jobs(get_connection, pk_autoincrement_sql)
+    crear_tabla_service_alerts(get_connection, pk_autoincrement_sql)
     crear_tablas_self_ordering()
     crear_tablas_inventario()
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
@@ -3643,6 +3680,10 @@ def init_db():
     crear_datos_base_inventario()
     asegurar_columna("categorias", "activo", "INTEGER DEFAULT 1")
     asegurar_columna("productos", "activo", "INTEGER DEFAULT 1")
+    asegurar_columna("ordenes", "despachado_at", "TEXT")
+    asegurar_columna("ordenes", "despachado_por", "TEXT")
+    asegurar_columna("categorias", "requiere_atencion_despacho", "INTEGER DEFAULT 0")
+    migrar_categoria_bebidas_requiere_despacho()
 
 
 def cargar_productos():
@@ -5019,6 +5060,9 @@ def index():
             '<a href="/dashboard">📈 Dashboard</a>'
         )
 
+    if usuario_puede_tomar_ordenes():
+        menu_links += '<a href="/despacho">🛎️ Despacho</a>'
+
     html += barra_superior(menu_links)
 
     boton_cerrar_jornada = ""
@@ -5053,6 +5097,7 @@ def index():
                 <a href="/movimientos_inventario" class="menu-card"><div class="mc-icon mc-gris">📋</div><span>Movimientos</span></a>
                 <a href="/usuarios" class="menu-card"><div class="mc-icon mc-morado">👥</div><span>Usuarios</span></a>
                 <a href="/cocina" class="menu-card"><div class="mc-icon mc-naranja">🍳</div><span>Cocina</span></a>
+                <a href="/despacho" class="menu-card"><div class="mc-icon mc-verde">🛎️</div><span>Despacho</span></a>
             </div>
         </div>
         """
@@ -10632,6 +10677,318 @@ def marcar_listo(orden_id):
     conn.commit()
     conn.close()
     return redirect("/cocina")
+
+
+def _despacho_repository():
+    return SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+
+
+def _despacho_minutos_transcurridos(fecha_texto, ahora):
+    if not fecha_texto:
+        return 0
+    fecha = parsear_fecha_hora_venezuela(fecha_texto)
+    return max(int((ahora - fecha).total_seconds() / 60), 0)
+
+
+def _despacho_hace_tiempo(fecha_texto, ahora):
+    minutos = _despacho_minutos_transcurridos(fecha_texto, ahora)
+    if minutos <= 0:
+        return "recien"
+    if minutos == 1:
+        return "hace 1 min"
+    return f"hace {minutos} min"
+
+
+def _render_alerta_despacho(alerta, ahora):
+    payload = alerta["payload"] or {}
+    referencia = html_lib.escape(str(payload.get("referencia") or ""))
+    numero = payload.get("numero")
+    encabezado = f"MESA {html_lib.escape(str(numero))}" if numero is not None else referencia
+    items = payload.get("items") or []
+    items_texto = html_lib.escape(" · ".join(items))
+    hace = _despacho_hace_tiempo(alerta["created_at"], ahora)
+    return f"""
+    <div class="alerta-card" data-alerta-id="{alerta['id']}">
+        <div class="alerta-titulo">🔔 NUEVA SOLICITUD — {encabezado}</div>
+        <div class="alerta-detalle">{hace} · {items_texto}</div>
+        <form method="post" action="/despacho/alertas/{alerta['id']}/atendido" class="despacho-form">
+            <button class="btn btn-alerta">ATENDIDO</button>
+        </form>
+    </div>
+    """
+
+
+def _render_pedido_despacho(row, resumen_texto, ahora):
+    (
+        orden_id,
+        numero_orden,
+        tipo,
+        referencia,
+        cliente,
+        estado,
+        hora_envio,
+        observacion,
+    ) = row
+
+    minutos = _despacho_minutos_transcurridos(hora_envio, ahora)
+    hora_visible = formatear_hora_visible(hora_envio) if hora_envio else ""
+
+    if minutos < 5:
+        color_class = "green"
+    elif minutos < 10:
+        color_class = "orange"
+    else:
+        color_class = "red"
+
+    if estado == "listo":
+        estado_badge = '<span class="badge badge-listo">LISTO</span>'
+    else:
+        estado_badge = '<span class="badge badge-cocina">EN COCINA</span>'
+
+    tipo_texto = html_lib.escape(str(tipo or ""))
+    referencia_texto = html_lib.escape(str(referencia or ""))
+    cliente_texto = html_lib.escape(str(cliente or ""))
+    observacion_html = ""
+    if observacion:
+        observacion_html = f'<div class="pedido-obs">⚠️ {html_lib.escape(observacion)}</div>'
+
+    texto_entrega = "DESPACHADO" if str(tipo or "").strip().lower() == "delivery" else "ENTREGADO"
+
+    return f"""
+    <div class="pedido {color_class}" data-orden-id="{orden_id}">
+        <div class="pedido-header">
+            <span class="pedido-numero">{texto_numero_orden(numero_orden)}</span>
+            <span class="pedido-tipo">{tipo_texto}</span>
+            {estado_badge}
+        </div>
+        <div class="pedido-ref">{referencia_texto} {('· ' + cliente_texto) if cliente_texto else ''}</div>
+        <div class="pedido-tiempo">HORA: {hora_visible} · LLEVA: {minutos} min</div>
+        <div class="pedido-resumen">{resumen_texto}</div>
+        {observacion_html}
+        <div class="pedido-acciones">
+            <a class="btn btn-secundario" href="/orden/{orden_id}">VER</a>
+            <a class="btn btn-secundario" href="/activar_factura/{orden_id}">FACTURAR</a>
+            <form method="post" action="/despacho/{orden_id}/entregado" class="despacho-form">
+                <button class="btn btn-entregado">{texto_entrega}</button>
+            </form>
+        </div>
+    </div>
+    """
+
+
+def _despacho_datos_html():
+    """Renderiza los dos fragmentos (alertas, pedidos) que usan tanto la
+    carga inicial de /despacho como cada ciclo de polling de
+    /api/despacho/estado -- una sola fuente de verdad para el HTML de
+    cada tarjeta, para que ambas vistas nunca puedan divergir."""
+    repository = _despacho_repository()
+    alertas_repo = SqlServiceAlertsRepository(get_connection)
+    ahora = ahora_venezuela()
+
+    alertas = alertas_repo.listar_pendientes()
+    pedidos = repository.listar_pedidos_despacho()
+
+    if alertas:
+        alertas_html = "".join(_render_alerta_despacho(a, ahora) for a in alertas)
+    else:
+        alertas_html = '<div class="sin-alertas">Sin solicitudes pendientes.</div>'
+
+    if pedidos:
+        piezas = []
+        for row in pedidos:
+            orden_id = row[0]
+            items = repository.obtener_items_enviados_de_orden(orden_id)
+            lineas = agrupar_items_comanda(items, observacion="") if items else []
+            resumen_texto = html_lib.escape(", ".join(quitar_prefijo_cantidad_visual(l) for l in lineas)) or "Sin productos"
+            piezas.append(_render_pedido_despacho(row, resumen_texto, ahora))
+        pedidos_html = "".join(piezas)
+    else:
+        pedidos_html = '<div class="sin-pedidos">No hay pedidos pendientes de despacho.</div>'
+
+    return {
+        "alertas_html": alertas_html,
+        "pedidos_html": pedidos_html,
+        "alerta_ids": [a["id"] for a in alertas],
+        "contador_alertas": len(alertas),
+    }
+
+
+@app.route("/despacho")
+def pantalla_despacho():
+    datos = _despacho_datos_html()
+    despacho_links = '<a href="/despacho">🛎️ Despacho</a>'
+    if usuario_es_master():
+        despacho_links = '<a href="/">🏠 Inicio</a>' + despacho_links
+    if usuario_puede_ver_cocina():
+        despacho_links += '<a href="/cocina">🍳 Cocina</a>'
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Despacho</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; background:#0F1115; color:#F4F4F4; font-size:18px; margin:0; }}
+        .topbar {{ padding:10px 16px; background:#181B20; display:flex; justify-content:space-between; align-items:center; gap:10px; border-bottom:1px solid #31363F; }}
+        .topbar-brand {{ font-weight:900; font-size:18px; display:flex; align-items:center; gap:8px; }}
+        .topbar-brand span {{ color:#3DDC84; }}
+        .topbar a {{ color:white; text-decoration:none; background:#20242B; border:1px solid #31363F; padding:8px 12px; border-radius:8px; font-size:13px; font-weight:700; }}
+        .contador {{ background:#ef4444; color:white; border-radius:999px; padding:4px 10px; font-weight:800; font-size:13px; }}
+        .seccion-titulo {{ padding:12px 16px 4px; font-size:14px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:#B0B6BE; }}
+        #alertas {{ padding:0 12px; }}
+        #pedidos {{ padding:0 12px 24px; }}
+        .alerta-card {{ border:2px solid #ef4444; background:#1c0000; border-radius:12px; padding:14px 16px; margin:10px 0; }}
+        .alerta-titulo {{ font-weight:800; font-size:16px; }}
+        .alerta-detalle {{ color:#F4A6A6; margin:6px 0 10px; }}
+        .sin-alertas, .sin-pedidos {{ color:#7C828C; padding:14px 4px; }}
+        .pedido {{ border:3px solid #31363F; background:#20242B; border-radius:14px; padding:16px; margin:10px 0; box-shadow:0 10px 22px rgba(0,0,0,0.22); }}
+        .pedido.green {{ border-color:#3DDC84; }}
+        .pedido.orange {{ border-color:#f97316; }}
+        .pedido.red {{ border-color:#ef4444; }}
+        .pedido-header {{ display:flex; align-items:center; gap:10px; font-size:20px; font-weight:800; }}
+        .pedido-tipo {{ color:#B0B6BE; font-size:15px; font-weight:700; }}
+        .badge {{ margin-left:auto; padding:4px 10px; border-radius:999px; font-size:12px; font-weight:800; }}
+        .badge-cocina {{ background:#f97316; color:#1c0a00; }}
+        .badge-listo {{ background:#3DDC84; color:#0F1115; }}
+        .pedido-ref {{ color:#D0D4DA; margin-top:4px; }}
+        .pedido-tiempo {{ color:#8A9099; font-size:13px; margin-top:6px; }}
+        .pedido-resumen {{ margin-top:10px; font-size:15px; }}
+        .pedido-obs {{ margin-top:8px; color:#f97316; font-weight:700; }}
+        .pedido-acciones {{ display:flex; gap:8px; margin-top:14px; }}
+        .despacho-form {{ flex:1; margin:0; }}
+        .btn {{ display:block; text-align:center; padding:12px 10px; border:none; font-size:14px; font-weight:800; border-radius:10px; cursor:pointer; width:100%; box-sizing:border-box; }}
+        .btn-secundario {{ background:#3C4350; color:white; text-decoration:none; }}
+        .btn-entregado {{ background:#3DDC84; color:#0F1115; }}
+        .btn-alerta {{ background:#ef4444; color:white; width:auto; padding:8px 18px; }}
+    </style>
+    </head>
+    <body>
+    <div class="topbar">
+        <div class="topbar-brand">🐱 Neko <span>Wok</span> · 🛎️ Despacho</div>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <span id="contador-alertas" class="contador" style="display:{'inline-block' if datos['contador_alertas'] else 'none'}">🔔 {datos['contador_alertas']}</span>
+            <div style="font-size:14px; opacity:0.8;">👤 {html_lib.escape(usuario_activo())}</div>
+            <div style="display:flex; gap:6px;">{despacho_links}<a href="/logout">🚪 Salir</a></div>
+        </div>
+    </div>
+    <div class="seccion-titulo">🔔 Alertas de servicio</div>
+    <div id="alertas">{datos['alertas_html']}</div>
+    <div class="seccion-titulo">📋 Pedidos activos</div>
+    <div id="pedidos">{datos['pedidos_html']}</div>
+
+    <script>
+    (function() {{
+        var SONIDO_URL = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+        var yaSonadas = new Set();
+        try {{
+            (JSON.parse(sessionStorage.getItem("despacho_alertas_sonadas") || "[]")).forEach(function(id) {{
+                yaSonadas.add(id);
+            }});
+        }} catch (e) {{}}
+
+        function guardarSonadas() {{
+            try {{
+                sessionStorage.setItem("despacho_alertas_sonadas", JSON.stringify(Array.from(yaSonadas)));
+            }} catch (e) {{}}
+        }}
+
+        function reproducirSonido() {{
+            try {{
+                new Audio(SONIDO_URL).play().catch(function() {{}});
+            }} catch (e) {{}}
+        }}
+
+        function actualizar() {{
+            fetch("/api/despacho/estado")
+                .then(function(r) {{ return r.json(); }})
+                .then(function(data) {{
+                    if (!data || !data.ok) return;
+                    document.getElementById("alertas").innerHTML = data.alertas_html;
+                    document.getElementById("pedidos").innerHTML = data.pedidos_html;
+                    var contador = document.getElementById("contador-alertas");
+                    contador.textContent = "🔔 " + data.contador_alertas;
+                    contador.style.display = data.contador_alertas ? "inline-block" : "none";
+
+                    var huboNueva = false;
+                    (data.alerta_ids || []).forEach(function(id) {{
+                        if (!yaSonadas.has(id)) {{
+                            yaSonadas.add(id);
+                            huboNueva = true;
+                        }}
+                    }});
+                    if (huboNueva) {{
+                        reproducirSonido();
+                        guardarSonadas();
+                    }}
+                    asignarAcciones();
+                }})
+                .catch(function() {{}});
+        }}
+
+        function asignarAcciones() {{
+            document.querySelectorAll(".despacho-form").forEach(function(form) {{
+                if (form.dataset.bound) return;
+                form.dataset.bound = "1";
+                form.addEventListener("submit", function(ev) {{
+                    ev.preventDefault();
+                    fetch(form.action, {{ method: "POST" }})
+                        .then(function() {{ actualizar(); }})
+                        .catch(function() {{}});
+                }});
+            }});
+        }}
+
+        asignarAcciones();
+        setInterval(actualizar, 4000);
+    }})();
+    </script>
+    </body>
+    </html>
+    """
+
+
+@app.route("/api/despacho/estado")
+def api_despacho_estado():
+    datos = _despacho_datos_html()
+    return jsonify(
+        {
+            "ok": True,
+            "alertas_html": datos["alertas_html"],
+            "pedidos_html": datos["pedidos_html"],
+            "alerta_ids": datos["alerta_ids"],
+            "contador_alertas": datos["contador_alertas"],
+        }
+    )
+
+
+@app.route("/despacho/<int:orden_id>/entregado", methods=["POST"])
+def despacho_entregar(orden_id):
+    """Idempotente (repository.marcar_despachado no cambia nada si ya
+    estaba despachada). La pantalla /despacho SIEMPRE llama esta ruta
+    via fetch() -- ver script en pantalla_despacho() -- por eso responde
+    JSON directamente en vez de redirigir."""
+    repository = _despacho_repository()
+    repository.marcar_despachado(
+        orden_id,
+        usuario_activo(),
+        ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    return jsonify({"ok": True})
+
+
+@app.route("/despacho/alertas/<int:alerta_id>/atendido", methods=["POST"])
+def despacho_atender_alerta(alerta_id):
+    """Idempotente. Marca SOLO la alerta -- nunca toca el estado de
+    despacho/entrega de la orden (son conceptos distintos, ver mision
+    seccion 14)."""
+    alertas_repo = SqlServiceAlertsRepository(get_connection)
+    alertas_repo.marcar_atendida(
+        alerta_id,
+        usuario_activo(),
+        ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    return jsonify({"ok": True})
 
 
 @app.route("/ordenes_listas")
