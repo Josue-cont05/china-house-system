@@ -33,10 +33,11 @@ from app.application.self_ordering.mesas import (
     etiqueta_mesa,
     normalizar_mesa_clave,
 )
+from app.domain.delivery.rules import (
+    ESTADO_DELIVERY_ASIGNADO_INTERNO,
+    ESTADO_DELIVERY_NECESITA_CONDUCTOR,
+)
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
-
-ESTADO_DELIVERY_ASIGNADO_INTERNO = "ASSIGNED_INTERNAL"
-ESTADO_DELIVERY_NECESITA_CONDUCTOR = "NEEDS_DRIVER"
 
 
 class OrdenYaAbiertaError(RuntimeError):

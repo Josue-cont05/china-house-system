@@ -35,7 +35,6 @@ from app.domain.sales.calculations import (
     es_producto_delivery_legacy,
     normalizar_metodo_pago,
     normalizar_modo_cobro,
-    normalizar_monto_delivery,
 )
 from app.domain.sales.item_descriptions import (
     nombre_producto_cocina,
@@ -135,6 +134,33 @@ from app.application.orders.items import (
 )
 from app.application.orders.lifecycle import eliminar_orden_completa
 from app.application.orders.create import OrdenYaAbiertaError, crear_orden_nueva
+from app.domain.delivery.rules import (
+    ESTADO_DELIVERY_ASIGNADO_INTERNO,
+    ESTADO_DELIVERY_EXTERNO,
+    ESTADO_DELIVERY_NECESITA_CONDUCTOR,
+    normalizar_nombre_repartidor,
+)
+from app.infrastructure.database.delivery import (
+    actualizar_delivery_orden,
+    crear_repartidor,
+    crear_tablas_delivery,
+    detalle_delivery_repartidor,
+    insertar_cargo_delivery,
+    listar_conductores_delivery_activos,
+    listar_coordinadores_delivery,
+    listar_repartidores,
+    obtener_conductor_delivery_por_defecto,
+    obtener_repartidor,
+    orden_tiene_delivery_legacy,
+    orden_tiene_movimientos_delivery,
+    registrar_pago_delivery_repartidor,
+    resumen_delivery_admin,
+    resumen_delivery_movimientos,
+    resumen_delivery_por_repartidor,
+    validar_orden_delivery_modificable,
+    validar_recobro_delivery,
+    validar_repartidor_delivery_cobro,
+)
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -836,51 +862,6 @@ def crear_tablas_cierre_jornada():
     conn.close()
 
 
-def crear_tablas_delivery():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS repartidores (
-            id {pk_autoincrement_sql()},
-            nombre TEXT NOT NULL,
-            telefono TEXT,
-            notas TEXT,
-            activo INTEGER DEFAULT 1,
-            fecha_creacion TEXT
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS delivery_movimientos (
-            id {pk_autoincrement_sql()},
-            orden_id INTEGER,
-            repartidor_id INTEGER NOT NULL,
-            tipo TEXT NOT NULL
-                CHECK (tipo IN ('cargo', 'pago', 'ajuste', 'anulacion')),
-            monto_usd REAL NOT NULL,
-            fecha TEXT,
-            usuario_id INTEGER,
-            referencia TEXT,
-            observacion TEXT,
-            movimiento_revertido_id INTEGER
-        )
-        """
-    )
-
-    conn.commit()
-    conn.close()
-
-    asegurar_columna("ordenes", "venta_restaurante_usd", "REAL")
-    asegurar_columna("ordenes", "delivery_usd", "REAL")
-    asegurar_columna("ordenes", "total_cliente_usd", "REAL")
-    asegurar_columna("ordenes", "total_cliente_bs", "REAL")
-    asegurar_columna("ordenes", "delivery_repartidor_id", "INTEGER")
-
-
 def crear_tablas_self_ordering():
     conn = get_connection()
     cursor = conn.cursor()
@@ -1023,348 +1004,6 @@ def _sincronizar_contador_comandas_existentes():
     )
     conn.commit()
     conn.close()
-
-
-def listar_repartidores(cursor, solo_activos=False):
-    where = "WHERE COALESCE(activo, 1)=1" if solo_activos else ""
-    cursor.execute(
-        f"""
-        SELECT id, nombre, COALESCE(telefono, ''), COALESCE(notas, ''),
-               COALESCE(activo, 1), fecha_creacion
-        FROM repartidores
-        {where}
-        ORDER BY COALESCE(activo, 1) DESC, LOWER(nombre), id
-        """
-    )
-    return cursor.fetchall()
-
-
-def obtener_repartidor(cursor, repartidor_id):
-    cursor.execute(
-        """
-        SELECT id, nombre, COALESCE(telefono, ''), COALESCE(notas, ''),
-               COALESCE(activo, 1), fecha_creacion
-        FROM repartidores
-        WHERE id=?
-        """,
-        (repartidor_id,),
-    )
-    return cursor.fetchone()
-
-
-def normalizar_nombre_repartidor(nombre):
-    nombre = (nombre or "").strip()
-    if not nombre:
-        raise ValueError("El nombre del repartidor es obligatorio.")
-    return nombre[:120]
-
-
-def crear_repartidor(cursor, nombre, telefono="", notas="", activo=1):
-    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute(
-        """
-        INSERT INTO repartidores (nombre, telefono, notas, activo, fecha_creacion)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            normalizar_nombre_repartidor(nombre),
-            (telefono or "").strip()[:80],
-            (notas or "").strip()[:500],
-            1 if int(a_float(activo, 1)) == 1 else 0,
-            fecha,
-        ),
-    )
-    return obtener_ultimo_id(cursor, "repartidores")
-
-
-def orden_tiene_delivery_legacy(cursor, orden_id):
-    cursor.execute(
-        """
-        SELECT oi.producto,
-               (
-                   SELECT c.nombre
-                   FROM productos p
-                   LEFT JOIN categorias c ON p.categoria_id = c.id
-                   WHERE LOWER(p.nombre)=LOWER(oi.producto)
-                   ORDER BY COALESCE(p.activo, 1) DESC, p.id
-                   LIMIT 1
-               ) AS categoria
-        FROM orden_items oi
-        WHERE oi.orden_id=?
-        """,
-        (orden_id,),
-    )
-    return any(es_producto_delivery_legacy(producto, categoria) for producto, categoria in cursor.fetchall())
-
-
-def validar_orden_delivery_modificable(cursor, orden_id):
-    cursor.execute(
-        """
-        SELECT estado, cierre_id
-        FROM ordenes
-        WHERE id=?
-        """,
-        (orden_id,),
-    )
-    orden_row = cursor.fetchone()
-    if not orden_row:
-        raise ValueError("Orden no encontrada")
-    estado, cierre_id = orden_row
-    if cierre_id is not None:
-        raise ValueError("No puedes modificar delivery en una orden archivada en cierre de jornada.")
-    if estado == "cerrada":
-        raise ValueError("No puedes modificar delivery en una orden cerrada.")
-    if orden_tiene_cxc(cursor, orden_id):
-        raise ValueError("No puedes modificar delivery en una orden con cuenta por cobrar asociada.")
-    return estado
-
-
-def actualizar_delivery_orden(cursor, orden_id, monto_delivery, repartidor_id):
-    validar_orden_delivery_modificable(cursor, orden_id)
-    monto = normalizar_monto_delivery(monto_delivery)
-
-    repartidor_id_final = None
-    if monto > 0:
-        if orden_tiene_delivery_legacy(cursor, orden_id):
-            raise ValueError("Esta orden contiene un delivery agregado con el sistema anterior. No se puede agregar delivery explicito.")
-        repartidor_id_texto = (str(repartidor_id or "")).strip()
-        if repartidor_id_texto:
-            repartidor_id_final = int(a_float(repartidor_id_texto))
-            repartidor = obtener_repartidor(cursor, repartidor_id_final)
-            if not repartidor or int(repartidor[4] or 0) != 1:
-                raise ValueError("Debes seleccionar un repartidor activo para guardar delivery.")
-
-    cursor.execute(
-        """
-        UPDATE ordenes
-        SET delivery_usd=?, delivery_repartidor_id=?
-        WHERE id=?
-        """,
-        (monto, repartidor_id_final, orden_id),
-    )
-    return {"delivery_usd": monto, "delivery_repartidor_id": repartidor_id_final}
-
-
-def orden_tiene_movimientos_delivery(cursor, orden_id):
-    cursor.execute("SELECT 1 FROM delivery_movimientos WHERE orden_id=? LIMIT 1", (orden_id,))
-    return cursor.fetchone() is not None
-
-
-def validar_recobro_delivery(cursor, orden_id):
-    if orden_tiene_movimientos_delivery(cursor, orden_id):
-        raise ValueError(
-            "Esta orden tiene movimientos de delivery asociados y no puede recobrarse directamente. "
-            "Debe utilizarse un proceso administrativo de reversion."
-        )
-
-
-def validar_repartidor_delivery_cobro(cursor, delivery_usd, repartidor_id):
-    if a_float(delivery_usd) <= TOLERANCIA_COBRO:
-        return None
-    try:
-        repartidor_id_int = int(a_float(repartidor_id))
-    except Exception:
-        repartidor_id_int = 0
-    if repartidor_id_int <= 0:
-        raise ValueError("Debes asignar un repartidor antes de cobrar esta orden.")
-    repartidor = obtener_repartidor(cursor, repartidor_id_int)
-    if not repartidor or int(repartidor[4] or 0) != 1:
-        raise ValueError("Selecciona un repartidor activo para el delivery.")
-    return repartidor_id_int
-
-
-def insertar_cargo_delivery(cursor, orden_id, repartidor_id, monto_usd, fecha, usuario_id):
-    monto_usd = round(a_float(monto_usd), 2)
-    if monto_usd <= TOLERANCIA_COBRO:
-        return None
-    if orden_tiene_movimientos_delivery(cursor, orden_id):
-        raise ValueError("Esta orden ya tiene movimientos de delivery asociados.")
-    cursor.execute(
-        """
-        INSERT INTO delivery_movimientos (
-            orden_id, repartidor_id, tipo, monto_usd, fecha,
-            usuario_id, referencia, observacion, movimiento_revertido_id
-        )
-        VALUES (?, ?, 'cargo', ?, ?, ?, ?, ?, NULL)
-        """,
-        (
-            orden_id,
-            repartidor_id,
-            monto_usd,
-            fecha,
-            usuario_id,
-            f"orden:{orden_id}",
-            "Cargo delivery generado al cerrar la orden",
-        ),
-    )
-    return obtener_ultimo_id(cursor, "delivery_movimientos")
-
-
-def resumen_delivery_admin(cursor):
-    cursor.execute(
-        """
-        SELECT
-            COALESCE(SUM(CASE WHEN tipo='cargo' THEN monto_usd ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN tipo='pago' THEN ABS(monto_usd) ELSE 0 END), 0),
-            COALESCE(SUM(monto_usd), 0),
-            COALESCE(SUM(CASE WHEN tipo='cargo' AND orden_id IS NOT NULL THEN 1 ELSE 0 END), 0)
-        FROM delivery_movimientos
-        """
-    )
-    generado, pagado, pendiente, servicios = cursor.fetchone()
-    return {
-        "generado": a_float(generado),
-        "pagado": a_float(pagado),
-        "pendiente": a_float(pendiente),
-        "servicios": int(servicios or 0),
-    }
-
-
-def resumen_delivery_por_repartidor(cursor):
-    cursor.execute(
-        """
-        SELECT
-            r.id,
-            r.nombre,
-            COALESCE(r.activo, 1),
-            COALESCE(SUM(CASE WHEN dm.tipo='cargo' AND dm.orden_id IS NOT NULL THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN dm.tipo='cargo' THEN dm.monto_usd ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN dm.tipo='pago' THEN ABS(dm.monto_usd) ELSE 0 END), 0),
-            COALESCE(SUM(dm.monto_usd), 0)
-        FROM repartidores r
-        LEFT JOIN delivery_movimientos dm ON dm.repartidor_id = r.id
-        GROUP BY r.id, r.nombre, r.activo
-        ORDER BY COALESCE(SUM(dm.monto_usd), 0) DESC, LOWER(r.nombre), r.id
-        """
-    )
-    return cursor.fetchall()
-
-
-def resumen_delivery_movimientos(cursor, inicio=None, fin=None, solo_ordenes_sin_cierre=False):
-    where_periodo = []
-    params_periodo = []
-    if inicio:
-        where_periodo.append("dm.fecha >= ?")
-        params_periodo.append(inicio)
-    if fin:
-        where_periodo.append("dm.fecha <= ?")
-        params_periodo.append(fin)
-    where_sql = "WHERE " + " AND ".join(where_periodo) if where_periodo else ""
-    condicion_cargo = "dm.tipo='cargo'"
-    if solo_ordenes_sin_cierre:
-        condicion_cargo += " AND dm.orden_id IS NOT NULL AND o.cierre_id IS NULL"
-
-    cursor.execute(
-        f"""
-        SELECT
-            COALESCE(SUM(CASE WHEN {condicion_cargo} THEN dm.monto_usd ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN dm.tipo='pago' THEN ABS(dm.monto_usd) ELSE 0 END), 0)
-        FROM delivery_movimientos dm
-        LEFT JOIN ordenes o ON o.id = dm.orden_id
-        {where_sql}
-        """,
-        params_periodo,
-    )
-    generado, pagado = cursor.fetchone()
-    cursor.execute("SELECT COALESCE(SUM(monto_usd), 0) FROM delivery_movimientos")
-    pendiente_actual = cursor.fetchone()[0]
-    return {
-        "generado": round(a_float(generado), 2),
-        "pagado": round(a_float(pagado), 2),
-        "pendiente_actual": round(a_float(pendiente_actual), 2),
-    }
-
-
-def detalle_delivery_repartidor(cursor, repartidor_id):
-    repartidor = obtener_repartidor(cursor, repartidor_id)
-    if not repartidor:
-        return None
-
-    cursor.execute(
-        """
-        SELECT
-            COALESCE(SUM(CASE WHEN tipo='cargo' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN tipo='cargo' THEN monto_usd ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN tipo='pago' THEN ABS(monto_usd) ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN tipo IN ('ajuste', 'anulacion') THEN monto_usd ELSE 0 END), 0),
-            COALESCE(SUM(monto_usd), 0)
-        FROM delivery_movimientos
-        WHERE repartidor_id=?
-        """,
-        (repartidor_id,),
-    )
-    servicios, generado, pagado, ajustes_netos, pendiente = cursor.fetchone()
-
-    cursor.execute(
-        """
-        SELECT
-            dm.fecha,
-            dm.tipo,
-            dm.orden_id,
-            o.id,
-            o.numero_orden,
-            dm.monto_usd,
-            dm.referencia,
-            u.nombre,
-            dm.observacion
-        FROM delivery_movimientos dm
-        LEFT JOIN ordenes o ON o.id = dm.orden_id
-        LEFT JOIN usuarios u ON u.id = dm.usuario_id
-        WHERE dm.repartidor_id=?
-        ORDER BY dm.fecha DESC, dm.id DESC
-        """,
-        (repartidor_id,),
-    )
-    movimientos = cursor.fetchall()
-
-    return {
-        "repartidor": repartidor,
-        "resumen": {
-            "servicios": int(servicios or 0),
-            "generado": a_float(generado),
-            "pagado": a_float(pagado),
-            "ajustes_netos": a_float(ajustes_netos),
-            "pendiente": a_float(pendiente),
-        },
-        "movimientos": movimientos,
-    }
-
-
-def registrar_pago_delivery_repartidor(cursor, repartidor_id, monto_usd, referencia, observacion, usuario_id):
-    repartidor = obtener_repartidor(cursor, repartidor_id)
-    if not repartidor:
-        raise ValueError("Repartidor no encontrado")
-
-    monto = round(a_float(monto_usd), 2)
-    if monto <= TOLERANCIA_COBRO:
-        raise ValueError("El monto del pago debe ser mayor a 0.")
-
-    detalle = detalle_delivery_repartidor(cursor, repartidor_id)
-    saldo_actual = round(a_float(detalle["resumen"]["pendiente"] if detalle else 0), 2)
-    if saldo_actual <= TOLERANCIA_COBRO:
-        raise ValueError("Este repartidor no tiene saldo pendiente.")
-    if monto > saldo_actual + TOLERANCIA_COBRO:
-        raise ValueError("El pago no puede superar el saldo pendiente.")
-
-    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute(
-        """
-        INSERT INTO delivery_movimientos (
-            orden_id, repartidor_id, tipo, monto_usd, fecha,
-            usuario_id, referencia, observacion, movimiento_revertido_id
-        )
-        VALUES (NULL, ?, 'pago', ?, ?, ?, ?, ?, NULL)
-        """,
-        (
-            repartidor_id,
-            -monto,
-            fecha,
-            usuario_id,
-            (referencia or "").strip()[:120],
-            (observacion or "").strip()[:500],
-        ),
-    )
-    return obtener_ultimo_id(cursor, "delivery_movimientos")
 
 
 def crear_usuarios_iniciales():
@@ -1604,54 +1243,6 @@ def _crear_notificacion(event_key, usuario_destino_id, tipo, titulo, mensaje, or
         datos=datos,
         fecha=ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
     )
-
-
-def obtener_conductor_delivery_por_defecto(cursor):
-    """El UNICO usuario configurado como boton directo al crear un
-    Delivery (mision seccion 31: "Configuracion del driver por
-    defecto"). Nunca un nombre hardcodeado -- si nadie esta marcado
-    como default, devuelve None y la UI cae a "Buscar conductor"."""
-    cursor.execute(
-        """
-        SELECT id, nombre
-        FROM usuarios
-        WHERE es_conductor_delivery_default=1 AND COALESCE(activo, 1)=1
-        ORDER BY id LIMIT 1
-        """
-    )
-    return cursor.fetchone()
-
-
-def listar_conductores_delivery_activos(cursor):
-    cursor.execute(
-        """
-        SELECT id, nombre
-        FROM usuarios
-        WHERE es_conductor_delivery=1 AND COALESCE(activo, 1)=1
-        ORDER BY nombre
-        """
-    )
-    return cursor.fetchall()
-
-
-def listar_coordinadores_delivery(cursor):
-    """Mision seccion 34: mecanismo central para quienes reciben aviso
-    cuando un Delivery queda NEEDS_DRIVER -- nunca una lista de nombres
-    repetida por el codigo."""
-    cursor.execute(
-        """
-        SELECT id, nombre
-        FROM usuarios
-        WHERE es_coordinador_delivery=1 AND COALESCE(activo, 1)=1
-        ORDER BY nombre
-        """
-    )
-    return cursor.fetchall()
-
-
-ESTADO_DELIVERY_ASIGNADO_INTERNO = "ASSIGNED_INTERNAL"
-ESTADO_DELIVERY_NECESITA_CONDUCTOR = "NEEDS_DRIVER"
-ESTADO_DELIVERY_EXTERNO = "EXTERNAL"
 
 
 def notificar_orden_lista_para_retirar(orden_id, usuario_destino_id, tipo_orden, numero_orden, referencia, cliente):
@@ -3331,7 +2922,7 @@ def init_db():
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
     crear_tablas_cuentas_por_cobrar(get_connection, pk_autoincrement_sql, asegurar_columna)
-    crear_tablas_delivery()
+    crear_tablas_delivery(get_connection, pk_autoincrement_sql, asegurar_columna)
     crear_tablas_comandas()
     crear_tabla_print_jobs(get_connection, pk_autoincrement_sql)
     crear_tabla_service_alerts(get_connection, pk_autoincrement_sql)
@@ -6585,6 +6176,8 @@ def registrar_pago_delivery(repartidor_id):
             request.form.get("referencia"),
             request.form.get("observacion"),
             session.get("usuario_id"),
+            ahora_venezuela,
+            obtener_ultimo_id,
         )
         conn.commit()
     except ValueError as exc:
@@ -6682,7 +6275,7 @@ def nuevo_repartidor():
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            crear_repartidor(cursor, nombre_val, telefono_val, notas_val, 1)
+            crear_repartidor(cursor, nombre_val, telefono_val, notas_val, 1, ahora_venezuela, obtener_ultimo_id)
             conn.commit()
             conn.close()
             return redirect("/repartidores")
@@ -6811,6 +6404,8 @@ def api_repartidores():
                 data.get("telefono", ""),
                 data.get("notas", ""),
                 1,
+                ahora_venezuela,
+                obtener_ultimo_id,
             )
             conn.commit()
             repartidor = obtener_repartidor(cursor, repartidor_id)

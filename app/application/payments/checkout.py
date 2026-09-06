@@ -161,6 +161,7 @@ def ejecutar_cobro(
             totales_cobro["delivery_usd"],
             fecha,
             usuario_id,
+            obtener_ultimo_id,
         )
 
     if estado_previo == "cerrada" and emergencia_activa(orden_id):
