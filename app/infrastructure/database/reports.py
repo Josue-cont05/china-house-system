@@ -18,6 +18,7 @@ from app.domain.sales.calculations import (
     convertir_pago_equivalente,
     etiqueta_metodo_pago,
     normalizar_metodo_pago,
+    sumar_total_por_metodo,
 )
 from app.infrastructure.database.delivery import resumen_delivery_movimientos
 
@@ -153,14 +154,9 @@ def construir_reporte_rango(cursor, desde, hasta, obtener_tasa_actual):
         monto = a_float(monto)
         equiv_bs, equiv_usd = convertir_pago_equivalente(metodo, monto, tasa)
 
-        if metodo == "punto_venta":
-            total_punto_venta_bs += monto
-        elif metodo == "bs_pago_movil":
-            total_pago_movil_bs += monto
-        elif metodo == "bs_efectivo":
-            total_efectivo_bs += monto
-        elif metodo == "usd":
-            total_efectivo_usd += monto
+        total_punto_venta_bs, total_pago_movil_bs, total_efectivo_bs, total_efectivo_usd = sumar_total_por_metodo(
+            metodo, monto, total_punto_venta_bs, total_pago_movil_bs, total_efectivo_bs, total_efectivo_usd
+        )
 
         metodos_pago[metodo]["cantidad"] += 1
         metodos_pago[metodo]["total_bs"] += equiv_bs

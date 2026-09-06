@@ -77,6 +77,31 @@ def convertir_pago_equivalente(metodo, monto, tasa):
     return 0.0, 0.0
 
 
+def sumar_total_por_metodo(
+    metodo,
+    monto,
+    total_punto_venta_bs,
+    total_pago_movil_bs,
+    total_efectivo_bs,
+    total_efectivo_usd,
+):
+    """Regla de clasificacion de pagos por metodo (una sola fuente de
+    verdad -- antes duplicada identica en
+    app/infrastructure/database/cierre.py y
+    app/infrastructure/database/reports.py). `metodo` ya debe venir
+    normalizado (ver normalizar_metodo_pago)."""
+    if metodo == "punto_venta":
+        total_punto_venta_bs += monto
+    elif metodo == "bs_pago_movil":
+        total_pago_movil_bs += monto
+    elif metodo == "bs_efectivo":
+        total_efectivo_bs += monto
+    elif metodo == "usd":
+        total_efectivo_usd += monto
+
+    return total_punto_venta_bs, total_pago_movil_bs, total_efectivo_bs, total_efectivo_usd
+
+
 def calcular_totales_cobro(precios_items, tasa, descuento_bs):
     subtotal_usd = round(sum(_a_float(precio) for precio in precios_items), 2)
     tasa_cobro = _a_float(tasa)
