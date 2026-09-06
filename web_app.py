@@ -56,7 +56,6 @@ from app.domain.sales.item_builder import (
 )
 from app.domain.sales.order_states import (
     orden_archivada,
-    puede_eliminar_orden,
     puede_modificar_orden as puede_modificar_estado_orden,
 )
 from app.domain.sales.order_totals import (
@@ -143,6 +142,7 @@ from app.application.orders.items import (
     agregar_item_a_orden,
     eliminar_item_de_orden,
 )
+from app.application.orders.lifecycle import eliminar_orden_completa
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -8380,28 +8380,11 @@ def eliminar_orden(orden_id):
 
     conn = get_connection()
     cursor = conn.cursor()
-
-    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
-    row = cursor.fetchone()
-
-    if not row:
+    try:
+        eliminar_orden_completa(cursor, orden_id=orden_id)
+    except ValueError as exc:
         conn.close()
-        return "Orden no encontrada"
-
-    if orden_archivada(row[1]):
-        conn.close()
-        return "No se puede eliminar una orden archivada"
-
-    estado = row[0]
-
-    if not puede_eliminar_orden(estado, row[1]):
-        conn.close()
-        return "No se puede eliminar esta orden"
-
-    cursor.execute("DELETE FROM orden_items WHERE orden_id=?", (orden_id,))
-    cursor.execute("DELETE FROM pagos WHERE orden_id=?", (orden_id,))
-    cursor.execute("DELETE FROM ordenes WHERE id=?", (orden_id,))
-
+        return str(exc)
     conn.commit()
     conn.close()
 
