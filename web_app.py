@@ -134,6 +134,11 @@ from app.application.orders.items import (
 )
 from app.application.orders.lifecycle import eliminar_orden_completa
 from app.application.orders.create import OrdenYaAbiertaError, crear_orden_nueva
+from app.application.delivery.assignment import (
+    OrdenNoEncontradaError,
+    asignar_conductor_interno,
+    marcar_conductor_externo,
+)
 from app.domain.delivery.rules import (
     ESTADO_DELIVERY_ASIGNADO_INTERNO,
     ESTADO_DELIVERY_EXTERNO,
@@ -7584,55 +7589,29 @@ def asignar_conductor_delivery(orden_id):
     37/49)."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT tipo, numero_orden, cliente, referencia, cierre_id FROM ordenes WHERE id=?",
-        (orden_id,),
-    )
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return "Orden no encontrada", 404
-    tipo, numero_orden, cliente, referencia, cierre_id = row
-    if (tipo or "").strip().lower() != "delivery":
-        conn.close()
-        return "Esta orden no es un Delivery", 400
-    if orden_archivada(cierre_id):
-        conn.close()
-        return "No puedes modificar una orden archivada en cierre de jornada", 400
-
     modo = (request.form.get("modo") or "").strip()
+    try:
+        if modo == "interno":
+            conductor_id, numero_orden, cliente, referencia = asignar_conductor_interno(
+                cursor,
+                orden_id=orden_id,
+                conductor_user_id=request.form.get("conductor_user_id"),
+            )
+        elif modo == "externo":
+            marcar_conductor_externo(cursor, orden_id=orden_id)
+        else:
+            raise ValueError("Modo invalido")
+    except OrdenNoEncontradaError as exc:
+        conn.close()
+        return str(exc), 404
+    except ValueError as exc:
+        conn.close()
+        return str(exc), 400
+    conn.commit()
+    conn.close()
     if modo == "interno":
-        try:
-            conductor_id = int(request.form.get("conductor_user_id"))
-        except (TypeError, ValueError):
-            conn.close()
-            return "Selecciona un conductor valido", 400
-        cursor.execute(
-            "SELECT id FROM usuarios WHERE id=? AND es_conductor_delivery=1 AND COALESCE(activo,1)=1",
-            (conductor_id,),
-        )
-        if not cursor.fetchone():
-            conn.close()
-            return "Ese usuario no esta habilitado como conductor de delivery", 400
-        cursor.execute(
-            "UPDATE ordenes SET delivery_driver_user_id=?, delivery_driver_status=? WHERE id=?",
-            (conductor_id, ESTADO_DELIVERY_ASIGNADO_INTERNO, orden_id),
-        )
-        conn.commit()
-        conn.close()
         notificar_delivery_conductor_asignado_posteriormente(orden_id, conductor_id, numero_orden, cliente, referencia)
-        return redirect(f"/orden/{orden_id}")
-    elif modo == "externo":
-        cursor.execute(
-            "UPDATE ordenes SET delivery_driver_user_id=NULL, delivery_driver_status=? WHERE id=?",
-            (ESTADO_DELIVERY_EXTERNO, orden_id),
-        )
-        conn.commit()
-        conn.close()
-        return redirect(f"/orden/{orden_id}")
-    else:
-        conn.close()
-        return "Modo invalido", 400
+    return redirect(f"/orden/{orden_id}")
 
 
 @app.route("/agregar/<int:orden_id>/<int:producto_id>")
