@@ -319,14 +319,18 @@ class SqlKitchenComandaRepository:
             conn.close()
 
     def listar_pedidos_despacho(self):
-        """Pedidos que Monica todavia debe atender/despachar.
+        """Pedidos que Monica todavia debe atender/armar en Despacho.
 
-        CORRECCION (mision "no mezclar despacho con estado financiero"):
-        FACTURADA, COBRADA y CERRADA (financiero) NO son ENTREGADA. La
-        UNICA condicion que retira una orden de esta lista es
-        despachado_at IS NOT NULL -- nunca estado='cerrada', nunca
-        facturar, nunca cobro. Una orden que ya entro a cocina, se
-        factura y se cobra sigue aqui hasta que Monica pulse ENTREGADO.
+        CORRECCION (mision "correccion semantica de Despacho"):
+        FACTURADA, COBRADA y CERRADA (financiero) NO son LISTA PARA
+        RETIRAR. La UNICA condicion que retira una orden de esta lista
+        es listo_despacho_at IS NOT NULL -- nunca estado='cerrada',
+        nunca facturar, nunca cobro. Una orden que ya entro a cocina, se
+        factura y se cobra sigue aqui hasta que Monica pulse LISTO PARA
+        RETIRAR/DELIVERY. Ese boton NUNCA significa "el cliente ya lo
+        recibio" -- solo que Monica termino de armarlo y alguien puede
+        retirarlo (mesonero, cliente de Pick Up, o el conductor de
+        Delivery).
 
         La UNICA excepcion es cierre_id (archivo de jornada): auditado
         cerrar_jornada() (web_app.py) rechaza archivar mientras exista
@@ -336,9 +340,9 @@ class SqlKitchenComandaRepository:
         contable del dia -- no es un estado financiero de la orden
         (como cobrar) ni significa "anulada", pero representa que ese
         dia de operacion ya se dio por terminado. Sin este limite,
-        agregar despachado_at a una base de datos en produccion con
+        agregar listo_despacho_at a una base de datos en produccion con
         historial (ordenes de dias/meses anteriores, todas con
-        despachado_at NULL por ser una columna nueva) resucitaria de
+        listo_despacho_at NULL por ser una columna nueva) resucitaria de
         golpe todo ese historial en la pantalla de Monica. Ordenes del
         dia en curso (cierre_id IS NULL) siguen visibles pase lo que
         pase con facturar/cobro/estado, exactamente como pide la
@@ -371,7 +375,7 @@ class SqlKitchenComandaRepository:
                 FROM ordenes o
                 LEFT JOIN orden_comandas c0 ON c0.orden_id = o.id AND c0.secuencia = 0
                 WHERE o.cierre_id IS NULL
-                  AND o.despachado_at IS NULL
+                  AND o.listo_despacho_at IS NULL
                   AND (
                     EXISTS (SELECT 1 FROM orden_comandas c WHERE c.orden_id = o.id)
                     OR o.estado IN ('en cocina', 'listo')
@@ -383,20 +387,22 @@ class SqlKitchenComandaRepository:
         finally:
             conn.close()
 
-    def marcar_despachado(self, orden_id, usuario, fecha):
-        """Idempotente: si la orden ya tenia despachado_at, no cambia
-        nada y devuelve False (dos clicks / dos usuarios no producen
-        dos entregas). NO toca facturar/estado/cierre_id -- ENTREGADO
-        es un concepto de despacho, no financiero (ver mision seccion
-        2 y 7: no mezclar con cobrado/cerrado/pagado)."""
+    def marcar_listo_para_retirar(self, orden_id, usuario, fecha):
+        """Idempotente: si la orden ya tenia listo_despacho_at, no
+        cambia nada y devuelve False (dos clicks / dos usuarios no
+        producen dos eventos). NO toca facturar/estado/cierre_id/pagos
+        -- LISTO PARA RETIRAR es un concepto operativo de Despacho, no
+        financiero, y tampoco significa "el cliente ya lo recibio" (ver
+        mision "correccion semantica de Despacho": no mezclar con
+        cobrado/cerrado/pagado/entregado-al-cliente)."""
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
             cursor.execute(
                 """
                 UPDATE ordenes
-                SET despachado_at=?, despachado_por=?
-                WHERE id=? AND cierre_id IS NULL AND despachado_at IS NULL
+                SET listo_despacho_at=?, listo_despacho_por=?
+                WHERE id=? AND cierre_id IS NULL AND listo_despacho_at IS NULL
                 """,
                 (fecha, usuario, orden_id),
             )

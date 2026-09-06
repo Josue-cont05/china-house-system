@@ -1362,7 +1362,7 @@ def calcular_pendiente_post_cobro(cursor, orden_id):
     o sin diferencia real)."""
     cursor.execute(
         """
-        SELECT estado, cierre_id, despachado_at, descuento, delivery_usd,
+        SELECT estado, cierre_id, listo_despacho_at, descuento, delivery_usd,
                total_cliente_usd
         FROM ordenes WHERE id=?
         """,
@@ -1371,8 +1371,8 @@ def calcular_pendiente_post_cobro(cursor, orden_id):
     row = cursor.fetchone()
     if not row:
         return None
-    estado, cierre_id, despachado_at, descuento, delivery_usd, total_previo = row
-    if estado != "cerrada" or orden_archivada(cierre_id) or despachado_at is not None:
+    estado, cierre_id, listo_despacho_at, descuento, delivery_usd, total_previo = row
+    if estado != "cerrada" or orden_archivada(cierre_id) or listo_despacho_at is not None:
         return None
 
     cursor.execute(
@@ -3834,10 +3834,42 @@ def init_db():
     crear_datos_base_inventario()
     asegurar_columna("categorias", "activo", "INTEGER DEFAULT 1")
     asegurar_columna("productos", "activo", "INTEGER DEFAULT 1")
+    # Columnas HISTORICAS -- mision "correccion semantica de Despacho":
+    # despachado_at/despachado_por se llamaban asi porque la pantalla
+    # de Monica originalmente decia "ENTREGADO", pero esa etiqueta nunca
+    # significo "el cliente ya lo recibio" -- significaba "Monica ya
+    # armo el pedido en Despacho y alguien puede retirarlo". Se
+    # renombran a listo_despacho_at/listo_despacho_por para reflejar
+    # eso. NO se borran (pueden tener historial en produccion): quedan
+    # como snapshot legado, migrar_listo_despacho_desde_legado() abajo
+    # las copia UNA vez al campo nuevo y de ahi en adelante toda la
+    # logica usa exclusivamente listo_despacho_at/listo_despacho_por.
     asegurar_columna("ordenes", "despachado_at", "TEXT")
     asegurar_columna("ordenes", "despachado_por", "TEXT")
+    asegurar_columna("ordenes", "listo_despacho_at", "TEXT")
+    asegurar_columna("ordenes", "listo_despacho_por", "TEXT")
+    migrar_listo_despacho_desde_legado()
     asegurar_columna("categorias", "requiere_atencion_despacho", "INTEGER DEFAULT 0")
     migrar_categoria_bebidas_requiere_despacho()
+
+
+def migrar_listo_despacho_desde_legado():
+    """Idempotente y no destructiva: copia despachado_at/despachado_por
+    a listo_despacho_at/listo_despacho_por SOLO donde el campo nuevo
+    todavia este vacio (nunca sobreescribe un valor ya migrado o ya
+    establecido por la logica nueva)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE ordenes
+        SET listo_despacho_at = despachado_at,
+            listo_despacho_por = despachado_por
+        WHERE listo_despacho_at IS NULL AND despachado_at IS NOT NULL
+        """
+    )
+    conn.commit()
+    conn.close()
 
 
 def cargar_productos():
@@ -8352,7 +8384,7 @@ def agregar(orden_id, producto_id):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT estado, cierre_id, despachado_at FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute("SELECT estado, cierre_id, listo_despacho_at FROM ordenes WHERE id=?", (orden_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
@@ -8365,11 +8397,11 @@ def agregar(orden_id, producto_id):
     edicion_emergencia_activa = emergencia_activa(orden_id)
     # Agregar un item NUEVO (para enviar a cocina) esta permitido aunque
     # la orden ya este cobrada (estado='cerrada'), mientras Monica
-    # todavia no la haya despachado fisicamente -- CERRADA != ENTREGADA
-    # (mision Despacho). Ver puede_agregar_item_orden.
+    # todavia no la haya marcado LISTA PARA RETIRAR -- CERRADA != LISTA
+    # PARA RETIRAR (mision Despacho). Ver puede_agregar_item_orden.
     if not puede_agregar_item_orden(row[1], row[2], edicion_emergencia_activa):
         conn.close()
-        return "No puedes agregar productos a una orden ya entregada"
+        return "No puedes agregar productos a una orden ya lista para retirar"
 
     cursor.execute(
         """
@@ -10591,7 +10623,7 @@ def cierre():
     elif pendientes_despacho > 0:
         mensaje = (
             "<h2 style='color:#e67e22;'>No se puede cerrar la jornada: hay "
-            f"{pendientes_despacho} pedido(s) pendientes de entregar en Despacho.</h2>"
+            f"{pendientes_despacho} pedido(s) pendientes en Despacho.</h2>"
         )
     elif cantidad_ordenes_cerradas == 0:
         mensaje = "<h2 style='color:#dc2626;'>No hay ordenes cerradas para esta jornada.</h2>"
@@ -10786,7 +10818,7 @@ def cerrar_jornada():
         </head>
         <body style="font-family:Arial; padding:20px;">
         <h1>🔒 No se puede cerrar la jornada</h1>
-        <p>No se puede cerrar la jornada: hay pedidos pendientes de entregar en Despacho.</p>
+        <p>No se puede cerrar la jornada: hay pedidos pendientes en Despacho.</p>
         <p>Total pendientes: {pendientes_despacho}</p>
         <a href="/despacho" class="volver">🛎️ Ir a Despacho</a>
         <a href="/" class="volver">🏠 Volver</a>
@@ -11098,13 +11130,13 @@ def _despacho_repository():
 
 def contar_pedidos_pendientes_despacho():
     """Cuantas ordenes de la jornada actual (cierre_id IS NULL) ya
-    entraron a cocina y todavia no tienen despachado_at -- MISMO
+    entraron a cocina y todavia no tienen listo_despacho_at -- MISMO
     criterio exacto que listar_pedidos_despacho() (una sola fuente de
     verdad). Se usa para bloquear el cierre de jornada: cobrar/facturar
-    una orden no significa que Monica ya la entrego fisicamente (ver
-    listar_pedidos_despacho para la razon de por que cierre_id, y no
-    despachado_at, es la unica excepcion aceptada para el HISTORICO ya
-    archivado)."""
+    una orden no significa que Monica ya la marco LISTA PARA RETIRAR
+    (ver listar_pedidos_despacho para la razon de por que cierre_id, y
+    no listo_despacho_at, es la unica excepcion aceptada para el
+    HISTORICO ya archivado)."""
     return len(_despacho_repository().listar_pedidos_despacho())
 
 
@@ -11183,7 +11215,11 @@ def _render_pedido_despacho(row, resumen_texto, ahora):
     if observacion:
         observacion_html = f'<div class="pedido-obs">⚠️ {html_lib.escape(observacion)}</div>'
 
-    texto_entrega = "DESPACHADO" if str(tipo or "").strip().lower() == "delivery" else "ENTREGADO"
+    # "LISTO PARA RETIRAR/DELIVERY" -- NUNCA "entregado": esta pantalla
+    # solo confirma que Monica termino de armar el pedido en Despacho,
+    # no que el cliente ya lo recibio (mision "correccion semantica de
+    # Despacho"). Ver marcar_listo_para_retirar en kitchen_comandas.py.
+    texto_entrega = "✅ LISTO PARA DELIVERY" if str(tipo or "").strip().lower() == "delivery" else "✅ LISTO PARA RETIRAR"
 
     return f"""
     <div class="pedido {color_class}" data-orden-id="{orden_id}">
@@ -11395,12 +11431,15 @@ def api_despacho_estado():
 
 @app.route("/despacho/<int:orden_id>/entregado", methods=["POST"])
 def despacho_entregar(orden_id):
-    """Idempotente (repository.marcar_despachado no cambia nada si ya
-    estaba despachada). La pantalla /despacho SIEMPRE llama esta ruta
+    """Idempotente (repository.marcar_listo_para_retirar no cambia nada
+    si ya estaba lista). La pantalla /despacho SIEMPRE llama esta ruta
     via fetch() -- ver script en pantalla_despacho() -- por eso responde
-    JSON directamente en vez de redirigir."""
+    JSON directamente en vez de redirigir. La URL/endpoint se conservan
+    tal cual (contrato existente) aunque la etiqueta ya no diga
+    "entregado": esta accion marca LISTO PARA RETIRAR/DELIVERY, nunca
+    "recibido por el cliente"."""
     repository = _despacho_repository()
-    repository.marcar_despachado(
+    repository.marcar_listo_para_retirar(
         orden_id,
         usuario_activo(),
         ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),

@@ -3527,7 +3527,7 @@ class PostCobroIncrementalTest(unittest.TestCase):
         conn = self._conn()
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE ordenes SET despachado_at=?, despachado_por=? WHERE id=?",
+            "UPDATE ordenes SET listo_despacho_at=?, listo_despacho_por=? WHERE id=?",
             ("2026-08-21 11:00:00", "Monica", orden_id),
         )
         conn.commit()

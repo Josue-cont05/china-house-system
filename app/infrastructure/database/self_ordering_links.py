@@ -25,7 +25,7 @@ class SqlSelfOrderLinkRepository:
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "SELECT estado, cierre_id, despachado_at FROM ordenes WHERE id=? LIMIT 1",
+                "SELECT estado, cierre_id, listo_despacho_at FROM ordenes WHERE id=? LIMIT 1",
                 (orden_id,),
             )
             return cursor.fetchone()

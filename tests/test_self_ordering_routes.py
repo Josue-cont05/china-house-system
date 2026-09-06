@@ -149,7 +149,7 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         if cierre_id is not None:
             cursor.execute("UPDATE ordenes SET cierre_id=? WHERE id=?", (cierre_id, orden_id))
         if despachado_at is not None:
-            cursor.execute("UPDATE ordenes SET despachado_at=? WHERE id=?", (despachado_at, orden_id))
+            cursor.execute("UPDATE ordenes SET listo_despacho_at=? WHERE id=?", (despachado_at, orden_id))
         conn.commit()
         conn.close()
 

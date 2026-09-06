@@ -134,7 +134,7 @@ class DespachoRoutesTest(unittest.TestCase):
     def _estado_orden(self, orden_id):
         conn = self._conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT estado, despachado_at, despachado_por, facturar FROM ordenes WHERE id=?", (orden_id,))
+        cursor.execute("SELECT estado, listo_despacho_at, listo_despacho_por, facturar FROM ordenes WHERE id=?", (orden_id,))
         row = cursor.fetchone()
         conn.close()
         return row
@@ -258,9 +258,9 @@ class EntregadoIdempotenteTest(DespachoRoutesTest):
         respuesta = self.client.post(f"/despacho/{orden_id}/entregado")
 
         self.assertEqual(respuesta.get_json(), {"ok": True})
-        estado, despachado_at, despachado_por, _facturar = self._estado_orden(orden_id)
-        self.assertIsNotNone(despachado_at)
-        self.assertEqual(despachado_por, "Monica")
+        estado, listo_despacho_at, listo_despacho_por, _facturar = self._estado_orden(orden_id)
+        self.assertIsNotNone(listo_despacho_at)
+        self.assertEqual(listo_despacho_por, "Monica")
 
     def test_doble_click_no_produce_dos_entregas(self):
         orden_id = self._crear_orden()
@@ -297,8 +297,8 @@ class EntregadoIdempotenteTest(DespachoRoutesTest):
 
         self.client.get(f"/activar_factura/{orden_id}")
 
-        _estado, despachado_at, _por, facturar = self._estado_orden(orden_id)
-        self.assertIsNone(despachado_at)
+        _estado, listo_despacho_at, _por, facturar = self._estado_orden(orden_id)
+        self.assertIsNone(listo_despacho_at)
         self.assertEqual(facturar, 1)
 
     def test_tarjeta_facturar_apunta_a_la_ruta_existente(self):
@@ -325,7 +325,7 @@ class EntregadoIdempotenteTest(DespachoRoutesTest):
 class VisibilidadFinancieraTest(DespachoRoutesTest):
     """Corrige la regresion detectada antes del push: CERRADA/COBRADA/
     FACTURADA NO son ENTREGADA. La unica condicion de salida de
-    DESPACHO es despachado_at IS NOT NULL (ver docstring de
+    DESPACHO es listo_despacho_at IS NOT NULL (ver docstring de
     listar_pedidos_despacho en kitchen_comandas.py para la unica
     excepcion auditada: cierre_id, el archivo de jornada, no el cobro)."""
 
@@ -373,9 +373,9 @@ class VisibilidadFinancieraTest(DespachoRoutesTest):
 
         self._marcar_cobrada(orden_id)
 
-        estado, despachado_at, _por, _f = self._estado_orden(orden_id)
+        estado, listo_despacho_at, _por, _f = self._estado_orden(orden_id)
         self.assertEqual(estado, "cerrada")
-        self.assertIsNone(despachado_at)
+        self.assertIsNone(listo_despacho_at)
         self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
 
     def test_entregado_retira_la_tarjeta(self):
@@ -388,25 +388,25 @@ class VisibilidadFinancieraTest(DespachoRoutesTest):
 
         self.assertNotIn(f'data-orden-id="{orden_id}"', self._despacho_html())
 
-    def test_facturar_no_cambia_despachado_at(self):
+    def test_facturar_no_cambia_listo_despacho_at(self):
         orden_id = self._crear_orden()
         self._agregar_item(orden_id)
         self.client.get(f"/enviar_cocina/{orden_id}")
 
         self.client.get(f"/activar_factura/{orden_id}")
 
-        _estado, despachado_at, _por, _f = self._estado_orden(orden_id)
-        self.assertIsNone(despachado_at)
+        _estado, listo_despacho_at, _por, _f = self._estado_orden(orden_id)
+        self.assertIsNone(listo_despacho_at)
 
-    def test_cobrar_no_cambia_despachado_at(self):
+    def test_cobrar_no_cambia_listo_despacho_at(self):
         orden_id = self._crear_orden()
         self._agregar_item(orden_id)
         self.client.get(f"/enviar_cocina/{orden_id}")
 
         self._marcar_cobrada(orden_id)
 
-        _estado, despachado_at, _por, _f = self._estado_orden(orden_id)
-        self.assertIsNone(despachado_at)
+        _estado, listo_despacho_at, _por, _f = self._estado_orden(orden_id)
+        self.assertIsNone(listo_despacho_at)
 
     def test_cerrar_financieramente_no_equivale_a_entregar(self):
         orden_id = self._crear_orden()
@@ -415,10 +415,10 @@ class VisibilidadFinancieraTest(DespachoRoutesTest):
 
         self._marcar_cobrada(orden_id)
 
-        estado, despachado_at, despachado_por, _f = self._estado_orden(orden_id)
+        estado, listo_despacho_at, listo_despacho_por, _f = self._estado_orden(orden_id)
         self.assertEqual(estado, "cerrada")
-        self.assertIsNone(despachado_at)
-        self.assertIsNone(despachado_por)
+        self.assertIsNone(listo_despacho_at)
+        self.assertIsNone(listo_despacho_por)
         self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
 
     def test_delivery_cerrado_pero_no_despachado_sigue_visible(self):
@@ -430,7 +430,7 @@ class VisibilidadFinancieraTest(DespachoRoutesTest):
 
         html = self._despacho_html()
         self.assertIn(f'data-orden-id="{orden_id}"', html)
-        self.assertIn("DESPACHADO", html)
+        self.assertIn("LISTO PARA DELIVERY", html)
 
     def test_pickup_cerrado_pero_no_entregado_sigue_visible(self):
         orden_id = self._crear_orden(tipo="Para llevar", referencia="Pedro")
@@ -582,8 +582,8 @@ class AlertasBebidasTest(DespachoRoutesTest):
 
         self.client.post(f"/despacho/alertas/{alerta_id}/atendido")
 
-        _estado, despachado_at, _por, _f = self._estado_orden(orden_id)
-        self.assertIsNone(despachado_at)
+        _estado, listo_despacho_at, _por, _f = self._estado_orden(orden_id)
+        self.assertIsNone(listo_despacho_at)
         html = self._despacho_html()
         self.assertIn(f'data-orden-id="{orden_id}"', html)
 
@@ -742,7 +742,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
     """Corrige el hueco detectado antes del push: cerrar_jornada()
     archivaba (asignaba cierre_id) ordenes ya cobradas sin exigir que
     Monica las hubiera entregado, haciendolas desaparecer de DESPACHO
-    sin pasar por despachado_at. Ver el docstring de
+    sin pasar por listo_despacho_at. Ver el docstring de
     listar_pedidos_despacho() (kitchen_comandas.py) para la unica
     excepcion aceptada (cierre_id de un dia YA archivado, para no
     resucitar historico)."""
@@ -754,7 +754,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
     def _cierre_ids(self):
         conn = self._conn()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, cierre_id, despachado_at FROM ordenes ORDER BY id")
+        cursor.execute("SELECT id, cierre_id, listo_despacho_at FROM ordenes ORDER BY id")
         filas = cursor.fetchall()
         conn.close()
         return filas
@@ -767,7 +767,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         respuesta = self.client.get("/cerrar_jornada")
 
         self.assertIn("No se puede cerrar la jornada", respuesta.get_data(as_text=True))
-        _id, cierre_id, _despachado_at = self._cierre_ids()[0]
+        _id, cierre_id, _listo_despacho_at = self._cierre_ids()[0]
         self.assertIsNone(cierre_id)
 
     def test_cierre_bloqueado_por_orden_lista_no_despachada(self):
@@ -783,7 +783,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         respuesta = self.client.get("/cerrar_jornada")
 
         self.assertIn("No se puede cerrar la jornada", respuesta.get_data(as_text=True))
-        _id, cierre_id, _despachado_at = self._cierre_ids()[0]
+        _id, cierre_id, _listo_despacho_at = self._cierre_ids()[0]
         self.assertIsNone(cierre_id)
 
     def test_cierre_bloqueado_por_orden_cerrada_no_despachada(self):
@@ -796,12 +796,12 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         respuesta = self.client.get("/cerrar_jornada")
 
         self.assertIn(
-            "No se puede cerrar la jornada: hay pedidos pendientes de entregar en Despacho.",
+            "No se puede cerrar la jornada: hay pedidos pendientes en Despacho.",
             respuesta.get_data(as_text=True),
         )
-        _id, cierre_id, despachado_at = self._cierre_ids()[0]
+        _id, cierre_id, listo_despacho_at = self._cierre_ids()[0]
         self.assertIsNone(cierre_id)
-        self.assertIsNone(despachado_at)
+        self.assertIsNone(listo_despacho_at)
 
     def test_cierre_permitido_despues_de_entregado(self):
         orden_id = self._crear_orden()
@@ -814,9 +814,9 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
 
         cuerpo = respuesta.get_data(as_text=True)
         self.assertNotIn("No se puede cerrar la jornada", cuerpo)
-        _id, cierre_id, despachado_at = self._cierre_ids()[0]
+        _id, cierre_id, listo_despacho_at = self._cierre_ids()[0]
         self.assertIsNotNone(cierre_id)
-        self.assertIsNotNone(despachado_at)
+        self.assertIsNotNone(listo_despacho_at)
 
     def test_historico_archivado_sigue_fuera_de_despacho(self):
         orden_id = self._crear_orden()
@@ -829,7 +829,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         html = self._despacho_html()
         self.assertNotIn(f'data-orden-id="{orden_id}"', html)
 
-    def test_cierre_no_modifica_despachado_at(self):
+    def test_cierre_no_modifica_listo_despacho_at(self):
         orden_id = self._crear_orden()
         self._agregar_item(orden_id)
         self.client.get(f"/enviar_cocina/{orden_id}")
@@ -852,7 +852,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
 
         cuerpo = respuesta.get_data(as_text=True)
         self.assertIn(
-            "No se puede cerrar la jornada: hay pedidos pendientes de entregar en Despacho.",
+            "No se puede cerrar la jornada: hay pedidos pendientes en Despacho.",
             cuerpo,
         )
         self.assertIn("Despacho", cuerpo)
@@ -1239,6 +1239,120 @@ class IncrementalKitchenRegressionTest(DespachoRoutesTest):
 
         nuevo_link = self.client.post(f"/orden/{orden_id}/self-ordering/link")
         self.assertEqual(nuevo_link.status_code, 409)
+
+
+class MigracionListoDespachoTest(DespachoRoutesTest):
+    """Mision "correccion semantica de Despacho", seccion 16: migrar
+    despachado_at/despachado_por -> listo_despacho_at/listo_despacho_por
+    sin perder datos historicos y de forma idempotente."""
+
+    def test_columnas_legacy_se_conservan(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(ordenes)")
+        columnas = {fila[1] for fila in cursor.fetchall()}
+        conn.close()
+        self.assertIn("despachado_at", columnas)
+        self.assertIn("despachado_por", columnas)
+        self.assertIn("listo_despacho_at", columnas)
+        self.assertIn("listo_despacho_por", columnas)
+
+    def test_backfill_copia_legacy_solo_si_el_campo_nuevo_esta_vacio(self):
+        orden_id = self._crear_orden()
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE ordenes SET despachado_at=?, despachado_por=? WHERE id=?",
+            ("2026-08-01 12:00:00", "Monica", orden_id),
+        )
+        conn.commit()
+        conn.close()
+
+        web_app.migrar_listo_despacho_desde_legado()
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT listo_despacho_at, listo_despacho_por FROM ordenes WHERE id=?",
+            (orden_id,),
+        )
+        listo_at, listo_por = cursor.fetchone()
+        conn.close()
+        self.assertEqual(listo_at, "2026-08-01 12:00:00")
+        self.assertEqual(listo_por, "Monica")
+
+    def test_backfill_no_sobreescribe_un_listo_despacho_at_ya_establecido(self):
+        orden_id = self._crear_orden()
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET despachado_at=?, despachado_por=?,
+                listo_despacho_at=?, listo_despacho_por=?
+            WHERE id=?
+            """,
+            ("2026-08-01 12:00:00", "Monica", "2026-08-01 09:00:00", "Sara", orden_id),
+        )
+        conn.commit()
+        conn.close()
+
+        web_app.migrar_listo_despacho_desde_legado()
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT listo_despacho_at, listo_despacho_por FROM ordenes WHERE id=?",
+            (orden_id,),
+        )
+        listo_at, listo_por = cursor.fetchone()
+        conn.close()
+        self.assertEqual(listo_at, "2026-08-01 09:00:00")
+        self.assertEqual(listo_por, "Sara")
+
+    def test_init_db_es_idempotente_tras_la_migracion(self):
+        orden_id = self._crear_orden()
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE ordenes SET despachado_at=?, despachado_por=? WHERE id=?",
+            ("2026-08-01 12:00:00", "Monica", orden_id),
+        )
+        conn.commit()
+        conn.close()
+
+        web_app.init_db()
+        web_app.init_db()
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT despachado_at, despachado_por, listo_despacho_at, listo_despacho_por FROM ordenes WHERE id=?",
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        self.assertEqual(row, ("2026-08-01 12:00:00", "Monica", "2026-08-01 12:00:00", "Monica"))
+
+    def test_marcar_listo_para_retirar_ya_no_escribe_columnas_legacy(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self.client.post(f"/despacho/{orden_id}/entregado")
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT despachado_at, despachado_por, listo_despacho_at, listo_despacho_por FROM ordenes WHERE id=?",
+            (orden_id,),
+        )
+        despachado_at, despachado_por, listo_at, listo_por = cursor.fetchone()
+        conn.close()
+        self.assertIsNone(despachado_at)
+        self.assertIsNone(despachado_por)
+        self.assertIsNotNone(listo_at)
+        self.assertEqual(listo_por, "Monica")
 
 
 if __name__ == "__main__":
