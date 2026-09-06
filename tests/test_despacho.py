@@ -16,6 +16,7 @@ Cubre las dos familias de escenarios obligatorios de la mision:
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 from tests.support_env import import_web_app
 
@@ -585,6 +586,104 @@ class AlertasBebidasTest(DespachoRoutesTest):
         self.assertIsNone(despachado_at)
         html = self._despacho_html()
         self.assertIn(f'data-orden-id="{orden_id}"', html)
+
+
+class _AbortingCursor:
+    """Envuelve un cursor real reproduciendo la semantica REAL de
+    PostgreSQL ante un fallo dentro de una transaccion: una vez que una
+    sentencia falla, la transaccion queda "aborted" y CUALQUIER sentencia
+    posterior (menos un ROLLBACK/ROLLBACK TO SAVEPOINT) sigue fallando,
+    hasta que se libera con ese rollback. sqlite3 (usado en estos tests)
+    NO tiene esta semantica -- por eso no basta con un mock que solo
+    lance una excepcion una vez; hay que simularla explicitamente
+    (incluyendo que un COMMIT sobre una transaccion abortada equivale a
+    un ROLLBACK, ver _AbortingConnection.commit) para que la prueba
+    detecte de verdad si el codigo usa SAVEPOINT."""
+
+    def __init__(self, real_cursor, poison_needle, conn_state):
+        self._real = real_cursor
+        self._poison_needle = poison_needle
+        self._conn_state = conn_state
+
+    def execute(self, sql, params=()):
+        stripped = sql.strip().upper()
+        if self._conn_state.aborted:
+            if stripped.startswith("ROLLBACK"):
+                self._conn_state.aborted = False
+                return self._real.execute(sql, params)
+            raise Exception(
+                "current transaction is aborted, commands ignored until end of transaction block"
+            )
+        if self._poison_needle in stripped and stripped.startswith("INSERT"):
+            self._conn_state.aborted = True
+            raise Exception("simulated INSERT failure poisoning the transaction")
+        return self._real.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class _AbortingConnection:
+    def __init__(self, real_conn, poison_needle):
+        self._real = real_conn
+        self._poison_needle = poison_needle
+        self.aborted = False
+
+    def cursor(self):
+        return _AbortingCursor(self._real.cursor(), self._poison_needle, self)
+
+    def commit(self):
+        # Postgres real: COMMIT sobre una transaccion "aborted" se
+        # convierte en ROLLBACK (con un WARNING), nunca confirma nada.
+        if self.aborted:
+            self.aborted = False
+            return self._real.rollback()
+        return self._real.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class ServiceAlertTransactionIsolationTest(DespachoRoutesTest):
+    """Mision seccion 12/13: un fallo REAL (a nivel SQL, no solo una
+    excepcion de Python mockeada) al crear una service_alert NUNCA debe
+    poder tumbar la comanda/print_job de cocina que ya se creo en la
+    misma transaccion -- ni siquiera bajo la semantica de PostgreSQL,
+    donde una sentencia fallida deja la transaccion "aborted" hasta un
+    ROLLBACK (posible o total)."""
+
+    def test_fallo_real_de_service_alert_no_pierde_comanda_ni_print_job(self):
+        orden_id = self._crear_orden()
+        self._crear_producto("Coca-Cola", "Bebidas")
+        self._agregar_item(orden_id, producto="Arroz Chino")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Coca-Cola")
+
+        conexion_real = web_app.get_connection
+
+        def fabrica_abortante():
+            return _AbortingConnection(conexion_real(), "SERVICE_ALERTS")
+
+        with unittest.mock.patch.object(web_app, "get_connection", fabrica_abortante):
+            respuesta = self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self.assertEqual(respuesta.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, secuencia FROM orden_comandas WHERE orden_id=? ORDER BY secuencia",
+            (orden_id,),
+        )
+        comandas = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM print_jobs WHERE required_role='COCINA'")
+        total_print_jobs = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertEqual([c[1] for c in comandas], [0, 1])
+        self.assertEqual(total_print_jobs, 2)
+        # La alerta se perdio (tolerable) pero NUNCA la comanda/print_job.
+        self.assertEqual(self._alertas_pendientes(), [])
 
 
 class EscenarioAutoReviewTest(DespachoRoutesTest):

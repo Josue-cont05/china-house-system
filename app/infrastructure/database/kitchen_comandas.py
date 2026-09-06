@@ -624,10 +624,20 @@ def crear_comanda_en_cursor(
 
     # La alerta de servicio es un EFECTO ADICIONAL (mision Despacho,
     # seccion "bebidas": nunca debe sustituir ni condicionar la comanda
-    # normal). Se aisla en su propio try/except a proposito: un fallo
-    # aqui (dato inesperado, condicion de carrera, lo que sea) NUNCA
-    # debe poder deshacer la comanda/print_job de cocina que YA se creo
+    # normal). Se aisla en su propio SAVEPOINT a proposito: un fallo aqui
+    # (dato inesperado, condicion de carrera, lo que sea) NUNCA debe
+    # poder deshacer la comanda/print_job de cocina que YA se creo
     # arriba -- perder la alerta es tolerable, perder el plato no.
+    #
+    # Un try/except de Python por si solo NO basta en PostgreSQL: si el
+    # INSERT de la alerta falla, la transaccion queda "aborted" y CUALQUIER
+    # sentencia posterior en el mismo commit() (incluida la que ya crearia
+    # la comanda/print_job) se pierde de forma silenciosa (Postgres
+    # convierte un COMMIT sobre una transaccion abortada en un ROLLBACK).
+    # SAVEPOINT + ROLLBACK TO SAVEPOINT es sintaxis SQL estandar soportada
+    # por sqlite3 y psycopg2 por igual, y aisla el fallo sin tocar el
+    # resto de la transaccion en curso.
+    cursor.execute("SAVEPOINT alerta_servicio")
     try:
         _evaluar_alerta_servicio(
             cursor,
@@ -641,10 +651,13 @@ def crear_comanda_en_cursor(
             fecha=fecha,
         )
     except Exception as exc:
+        cursor.execute("ROLLBACK TO SAVEPOINT alerta_servicio")
         print(
             f"ADVERTENCIA: no se pudo evaluar/crear alerta de servicio "
             f"para comanda {comanda_id} (orden {orden_id}): {exc}"
         )
+    else:
+        cursor.execute("RELEASE SAVEPOINT alerta_servicio")
 
     return ResultadoComanda(
         comanda_id=comanda_id,

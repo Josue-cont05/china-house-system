@@ -1319,6 +1319,159 @@ def crear_cuenta_por_cobrar_inicial(
     return cuenta_id
 
 
+def agregar_cargo_cuenta_existente(cursor, cuenta_id, monto_cargo, fecha, usuario_id, observacion):
+    """Agrega deuda NUEVA a una cuenta por cobrar que ya existe (mision
+    "seguridad financiera de agregados post-cobro", seccion 7: una orden
+    que ya genero CxC y despues recibe consumo nuevo debe sumarse a la
+    MISMA cuenta -- cuentas_por_cobrar.orden_id es UNIQUE, nunca se crea
+    una segunda -- sin perder ni duplicar el saldo previo). Inserta un
+    movimiento 'cargo' positivo (mismo patron que
+    insertar_movimiento_cxc_inicial) y reabre la cuenta a 'pendiente' si
+    ya se habia saldado por completo."""
+    cursor.execute(
+        """
+        INSERT INTO cuentas_por_cobrar_movimientos (
+            cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
+            tasa_movimiento, metodo_pago, referencia, fecha,
+            usuario_id, observacion, movimiento_revertido_id,
+            referencia_externa_tipo, referencia_externa_id
+        )
+        VALUES (?, 'cargo', ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL)
+        """,
+        (cuenta_id, monto_cargo, fecha, usuario_id, observacion),
+    )
+    cursor.execute("SELECT saldo_pendiente FROM cuentas_por_cobrar WHERE id=?", (cuenta_id,))
+    nuevo_saldo = round(a_float(cursor.fetchone()[0]) + monto_cargo, 2)
+    cursor.execute(
+        "UPDATE cuentas_por_cobrar SET saldo_pendiente=?, estado='pendiente' WHERE id=?",
+        (nuevo_saldo, cuenta_id),
+    )
+    return nuevo_saldo
+
+
+def calcular_pendiente_post_cobro(cursor, orden_id):
+    """Mision "seguridad financiera de agregados post-cobro" (secciones
+    4-14): una orden ya cobrada (estado='cerrada') pero todavia no
+    despachada puede recibir productos nuevos (ver
+    puede_agregar_item_orden en app/domain/sales/order_states.py). Esta
+    funcion es de SOLO LECTURA: compara el total recalculado ahora
+    mismo desde orden_items/delivery contra el snapshot
+    total_cliente_usd que quedo grabado en el ultimo cobro, y devuelve
+    cuanto hay pendiente de cobrar por ese consumo nuevo (o None si no
+    aplica: orden no cerrada, archivada, ya despachada, delivery legacy,
+    o sin diferencia real)."""
+    cursor.execute(
+        """
+        SELECT estado, cierre_id, despachado_at, descuento, delivery_usd,
+               total_cliente_usd
+        FROM ordenes WHERE id=?
+        """,
+        (orden_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    estado, cierre_id, despachado_at, descuento, delivery_usd, total_previo = row
+    if estado != "cerrada" or orden_archivada(cierre_id) or despachado_at is not None:
+        return None
+
+    cursor.execute(
+        """
+        SELECT oi.producto, oi.precio,
+               (
+                   SELECT c.nombre FROM productos p
+                   LEFT JOIN categorias c ON p.categoria_id = c.id
+                   WHERE LOWER(p.nombre)=LOWER(oi.producto)
+                   ORDER BY COALESCE(p.activo, 1) DESC, p.id
+                   LIMIT 1
+               ) AS categoria
+        FROM orden_items oi
+        WHERE oi.orden_id=?
+        """,
+        (orden_id,),
+    )
+    items = cursor.fetchall()
+    try:
+        tasa_actual = obtener_tasa_cobro(cursor)
+        totales_actuales = calcular_totales_financieros_delivery(
+            items, tasa_actual, a_float(descuento), a_float(delivery_usd)
+        )
+    except ValueError:
+        return None
+
+    if totales_actuales["modo"] == "legacy":
+        # Ordenes con delivery legacy (categoria delivery mezclada en
+        # orden_items) no soportan el flujo de cobro incremental: sus
+        # campos snapshot_* vienen en None (ver calculations.py).
+        return None
+
+    total_actual_usd = totales_actuales["total_cliente_usd"]
+    total_previo_usd = a_float(total_previo)
+    pendiente_usd = round(total_actual_usd - total_previo_usd, 2)
+    if pendiente_usd <= TOLERANCIA_COBRO:
+        return None
+
+    return {
+        "pendiente_usd": pendiente_usd,
+        "total_actual_usd": total_actual_usd,
+        "total_previo_usd": total_previo_usd,
+        "tasa_actual": tasa_actual,
+        "totales_actuales": totales_actuales,
+    }
+
+
+def _aplicar_totales_post_cobro(cursor, orden_id, totales, cliente_id=None, cliente_nombre=None):
+    """Actualiza SOLO los campos agregados de la orden (consumo total
+    recalculado) tras liquidar un cobro incremental. Nunca toca
+    estado/fecha_cobro/fecha_venta/tasa_cobro/descuento ni borra pagos o
+    movimientos previos -- el cobro original queda intacto (mision
+    seccion 8: "no reescribir historia financiera")."""
+    if cliente_id is not None:
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET subtotal_usd=?, total_usd=?, total_bs=?,
+                venta_restaurante_usd=?, delivery_usd=?,
+                total_cliente_usd=?, total_cliente_bs=?,
+                cliente_id=COALESCE(cliente_id, ?), cliente=COALESCE(cliente, ?)
+            WHERE id=? AND cierre_id IS NULL
+            """,
+            (
+                totales["subtotal_snapshot_usd"],
+                totales["total_usd"],
+                totales["total_bs"],
+                totales["snapshot_venta_restaurante_usd"],
+                totales["snapshot_delivery_usd"],
+                totales["snapshot_total_cliente_usd"],
+                totales["total_cliente_bs"],
+                cliente_id,
+                cliente_nombre,
+                orden_id,
+            ),
+        )
+    else:
+        cursor.execute(
+            """
+            UPDATE ordenes
+            SET subtotal_usd=?, total_usd=?, total_bs=?,
+                venta_restaurante_usd=?, delivery_usd=?,
+                total_cliente_usd=?, total_cliente_bs=?
+            WHERE id=? AND cierre_id IS NULL
+            """,
+            (
+                totales["subtotal_snapshot_usd"],
+                totales["total_usd"],
+                totales["total_bs"],
+                totales["snapshot_venta_restaurante_usd"],
+                totales["snapshot_delivery_usd"],
+                totales["snapshot_total_cliente_usd"],
+                totales["total_cliente_bs"],
+                orden_id,
+            ),
+        )
+    return cursor.rowcount > 0
+
+
 def asegurar_columna(tabla, columna, definicion):
     conn = get_connection()
     cursor = conn.cursor()
@@ -7124,6 +7277,7 @@ def orden(orden_id):
     repartidores_activos = listar_repartidores(cursor, solo_activos=True)
     repartidor_delivery_actual = obtener_repartidor(cursor, o[12]) if o[12] else None
     tasa = obtener_tasa_actual(cursor)
+    pendiente_post_cobro = calcular_pendiente_post_cobro(cursor, orden_id)
     conn.close()
 
     delivery_usd = a_float(o[11])
@@ -7528,6 +7682,11 @@ def orden(orden_id):
     elif edicion_emergencia_activa:
         html += f"""
         <a href="/cobrar/{orden_id}" class="btn-accion cobrar">💵 Volver a cobrar</a>
+        """
+
+    if not bloqueada_por_cierre and pendiente_post_cobro:
+        html += f"""
+        <a href="/orden/{orden_id}/cobrar_pendiente" class="btn-accion cobrar" style="background:#e67e22;">💵 Cobrar consumo adicional (${pendiente_post_cobro['pendiente_usd']:.2f})</a>
         """
 
     if not bloqueada_por_cierre and items and estado in ("abierta", "en cocina", "listo", "cerrada"):
@@ -9573,6 +9732,230 @@ def cobrar(orden_id):
         renderClientes(clientesActivos.slice(0, 8));
     }}
     aplicarModo(modoCobro.value || "pagado", false);
+    </script>
+    </body>
+    </html>
+    """
+
+
+@app.route("/orden/<int:orden_id>/cobrar_pendiente", methods=["GET", "POST"])
+def cobrar_pendiente_post_cobro(orden_id):
+    """Cobra el saldo pendiente de un consumo NUEVO agregado a una orden
+    que ya se habia cobrado antes (mision "seguridad financiera de
+    agregados post-cobro"): Mesa 4 cobra $6, agrega $2 mas antes de que
+    Monica la marque lista para retirar -> esta ruta cobra SOLO esos $2,
+    nunca borra ni recalcula el cobro anterior.
+
+    Dos acciones posibles:
+    - "pagar_ahora": el cliente paga el pendiente completo ahora mismo.
+      Se AGREGA (nunca se borra) un nuevo registro en `pagos` -- el
+      cobro original permanece intacto.
+    - "dejar_pendiente": el pendiente se registra en cuentas_por_cobrar
+      (reutilizando la cuenta existente de la orden si ya tenia una, o
+      creando una nueva si es la primera vez), exactamente el mismo
+      motor ya usado por el cobro normal en modo parcial/credito.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT numero_orden, cliente, cliente_id FROM ordenes WHERE id=?",
+        (orden_id,),
+    )
+    o = cursor.fetchone()
+    if not o:
+        conn.close()
+        return "Orden no encontrada"
+    numero_orden, cliente_actual, cliente_id_actual = o
+
+    pendiente = calcular_pendiente_post_cobro(cursor, orden_id)
+    if pendiente is None:
+        conn.close()
+        return redirect(f"/orden/{orden_id}")
+
+    cuenta_id_existente = obtener_cuenta_cxc_por_orden(cursor, orden_id)
+    error = ""
+
+    if request.method == "POST":
+        accion = (request.form.get("accion") or "").strip()
+        fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
+        usuario_id = session.get("usuario_id")
+        observacion = f"Consumo adicional post-cobro de la orden #{numero_orden or orden_id}"
+        try:
+            if accion == "pagar_ahora":
+                metodo = normalizar_metodo_pago(request.form.get("metodo"))
+                if metodo not in METODOS_PAGO_VALIDOS:
+                    raise ValueError("Selecciona un metodo de pago valido")
+                monto = a_float(request.form.get("monto"))
+                if monto <= 0:
+                    raise ValueError("El monto debe ser mayor a 0")
+                referencia = (request.form.get("referencia") or "").strip()
+
+                _pago_bs, pago_usd = convertir_pago_equivalente(metodo, monto, pendiente["tasa_actual"])
+                if pago_usd + TOLERANCIA_COBRO < pendiente["pendiente_usd"]:
+                    raise ValueError(
+                        "El pago no cubre el saldo pendiente nuevo "
+                        f"({formato_usd(pendiente['pendiente_usd'])}). "
+                        "Usa 'Dejar pendiente a un cliente' si no se puede cobrar todo ahora."
+                    )
+
+                cursor.execute(
+                    "INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha) VALUES (?, ?, ?, ?, ?)",
+                    (orden_id, metodo, monto, referencia, fecha),
+                )
+                _aplicar_totales_post_cobro(cursor, orden_id, pendiente["totales_actuales"])
+                conn.commit()
+                conn.close()
+                return redirect(f"/orden/{orden_id}")
+
+            elif accion == "dejar_pendiente":
+                cliente_cxc = obtener_cliente_para_cxc(cursor, request.form.get("cliente_id"))
+                if cuenta_id_existente is not None:
+                    agregar_cargo_cuenta_existente(
+                        cursor,
+                        cuenta_id_existente,
+                        pendiente["pendiente_usd"],
+                        fecha,
+                        usuario_id,
+                        observacion,
+                    )
+                else:
+                    crear_cuenta_por_cobrar_inicial(
+                        cursor,
+                        orden_id,
+                        cliente_cxc[0],
+                        cliente_cxc[1],
+                        pendiente["pendiente_usd"],
+                        fecha,
+                        usuario_id,
+                    )
+                _aplicar_totales_post_cobro(
+                    cursor,
+                    orden_id,
+                    pendiente["totales_actuales"],
+                    cliente_id=cliente_cxc[0],
+                    cliente_nombre=cliente_cxc[1],
+                )
+                conn.commit()
+                conn.close()
+                return redirect(f"/orden/{orden_id}")
+
+            else:
+                raise ValueError("Accion invalida")
+        except ValueError as exc:
+            conn.rollback()
+            error = str(exc)
+
+    clientes_cobro = listar_clientes_activos(cursor)
+    conn.close()
+    clientes_cobro_json = json.dumps(
+        [cliente_json_desde_fila(cliente) for cliente in clientes_cobro],
+        ensure_ascii=False,
+    )
+    error_html = f'<div class="error">{html_lib.escape(error)}</div>' if error else ""
+    monto_sugerido_bs = round(pendiente["pendiente_usd"] * pendiente["tasa_actual"], 2)
+
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    {estilos_base()}
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: var(--gris-fondo); color: var(--texto); }}
+    .contenedor {{ width: 95%; max-width: 640px; margin: 18px auto; background: var(--panel); color: var(--texto); padding: 24px; border-radius: 16px; box-shadow: var(--sombra); border: 1px solid var(--borde); }}
+    .titulo {{ text-align: center; font-size: 24px; font-weight: 900; color:var(--verde-neko); }}
+    .sep {{ border-top: 1px dashed var(--borde); margin: 15px 0; }}
+    .saldo-destacado {{ text-align:center; font-size:28px; font-weight:900; color:var(--verde-neko); margin:10px 0; }}
+    input, select {{ width: 100%; padding: 12px; margin: 5px 0; border-radius: 8px; border: 1px solid var(--borde); font-size: 16px; box-sizing: border-box; background:var(--panel-secundario); color:var(--texto); }}
+    .btn {{ width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 8px; font-size: 17px; font-weight:800; cursor: pointer; }}
+    .confirmar {{ background: var(--verde-neko); color: #0F1115; }}
+    .secundario {{ background: var(--panel-secundario); color: var(--texto); border:1px solid var(--borde); }}
+    .volver {{ background: transparent; color: var(--texto-secundario); text-decoration:none; display:block; text-align:center; padding:12px; margin-top:6px; }}
+    .error {{ background:#fdecea; color:#c0392b; padding:12px; border-radius:8px; margin-bottom:12px; }}
+    .bloque {{ border:1px solid var(--borde); border-radius:10px; padding:14px; margin:14px 0; background:var(--panel-secundario); }}
+    .bloque h3 {{ margin:0 0 8px; font-size:15px; }}
+    .cliente-resultados {{ display:grid; gap:6px; margin:8px 0; max-height:180px; overflow-y:auto; }}
+    .cliente-opcion {{ text-align:left; border:1px solid var(--borde); border-radius:8px; background:#242424; color:var(--texto); padding:9px 10px; cursor:pointer; }}
+    .cliente-opcion.activo {{ border-color:var(--verde-neko); background:#11251a; }}
+    .oculto {{ display:none; }}
+    </style>
+    </head>
+    <body>
+    <div class="contenedor">
+    <div class="titulo">💵 Cobrar consumo adicional</div>
+    <div>Orden {texto_numero_orden(numero_orden)}{f' · {html_lib.escape(cliente_actual)}' if cliente_actual else ''}</div>
+    <div class="sep"></div>
+    {error_html}
+    <div>Este consumo se agrego DESPUES del ultimo cobro y todavia no se ha cobrado.</div>
+    <div class="saldo-destacado">${pendiente['pendiente_usd']:.2f} pendiente</div>
+    <div style="text-align:center; color:var(--texto-secundario);">Consumo total actualizado: ${pendiente['total_actual_usd']:.2f} · Bs {monto_sugerido_bs:.2f} a la tasa actual</div>
+
+    <form method="post" class="bloque">
+        <h3>✅ Cobrar ahora</h3>
+        <input type="hidden" name="accion" value="pagar_ahora">
+        <select name="metodo" required>
+            <option value="">Metodo de pago...</option>
+            {"".join(f'<option value="{m}">{html_lib.escape(ETIQUETAS_METODO_PAGO.get(m, m))}</option>' for m in METODOS_PAGO_VALIDOS)}
+        </select>
+        <input type="number" step="0.01" name="monto" placeholder="Monto recibido" value="{monto_sugerido_bs:.2f}" required>
+        <input type="text" name="referencia" placeholder="Referencia (opcional)">
+        <button class="btn confirmar">Cobrar ${pendiente['pendiente_usd']:.2f}</button>
+    </form>
+
+    <form method="post" class="bloque" id="formPendiente">
+        <h3>🕒 Dejar pendiente a un cliente</h3>
+        <input type="hidden" name="accion" value="dejar_pendiente">
+        <input type="hidden" name="cliente_id" id="clienteIdPendiente" value="{cliente_id_actual or ''}" required>
+        <input type="text" id="buscarCliente" placeholder="Buscar cliente por nombre/telefono...">
+        <div id="resultadosCliente" class="cliente-resultados"></div>
+        <div id="clienteSeleccionado" class="{'oculto' if not cliente_id_actual else ''}" style="margin:8px 0; color:var(--verde-neko); font-weight:700;"></div>
+        <button type="submit" class="btn secundario">Dejar pendiente (${pendiente['pendiente_usd']:.2f})</button>
+    </form>
+
+    <a class="volver" href="/orden/{orden_id}">‹ Volver a la orden</a>
+    </div>
+    <script>
+    const clientesActivos = {clientes_cobro_json};
+    const buscarInput = document.getElementById("buscarCliente");
+    const resultadosDiv = document.getElementById("resultadosCliente");
+    const clienteIdInput = document.getElementById("clienteIdPendiente");
+    const clienteSelDiv = document.getElementById("clienteSeleccionado");
+
+    function renderResultados(lista) {{
+        resultadosDiv.innerHTML = lista.map(function(c) {{
+            return '<div class="cliente-opcion" data-id="' + c.id + '" data-nombre="' + c.nombre.replace(/"/g, '&quot;') + '">' + c.nombre + (c.telefono ? ' · ' + c.telefono : '') + '</div>';
+        }}).join("");
+        resultadosDiv.querySelectorAll(".cliente-opcion").forEach(function(el) {{
+            el.addEventListener("click", function() {{
+                clienteIdInput.value = el.dataset.id;
+                clienteSelDiv.textContent = "Cliente seleccionado: " + el.dataset.nombre;
+                clienteSelDiv.classList.remove("oculto");
+                resultadosDiv.innerHTML = "";
+                buscarInput.value = "";
+            }});
+        }});
+    }}
+
+    let debounceTimer = null;
+    buscarInput.addEventListener("input", function() {{
+        clearTimeout(debounceTimer);
+        const q = buscarInput.value.trim().toLowerCase();
+        debounceTimer = setTimeout(function() {{
+            if (!q) {{ renderResultados(clientesActivos.slice(0, 8)); return; }}
+            const filtrados = clientesActivos.filter(function(c) {{
+                return (c.nombre || "").toLowerCase().includes(q) || (c.telefono || "").toLowerCase().includes(q);
+            }});
+            renderResultados(filtrados.slice(0, 8));
+        }}, 150);
+    }});
+
+    document.getElementById("formPendiente").addEventListener("submit", function(ev) {{
+        if (!clienteIdInput.value) {{
+            ev.preventDefault();
+            alert("Selecciona un cliente para dejar el pendiente.");
+        }}
+    }});
     </script>
     </body>
     </html>

@@ -3152,5 +3152,389 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self.client.get("/cuentas_por_cobrar").status_code, 403)
 
 
+class PostCobroIncrementalTest(unittest.TestCase):
+    """Mision "seguridad financiera de agregados post-cobro" (secciones
+    4-14 y escenarios A-D de la seccion 51): una orden ya cobrada que
+    recibe consumo nuevo (permitido por puede_agregar_item_orden
+    mientras no este archivada ni despachada) debe poder cobrarse SOLO
+    por el pendiente nuevo, sin borrar ni recalcular el cobro anterior.
+
+    Deliberadamente NO hereda de SalesSnapshotTest (aunque reutiliza sus
+    mismos helpers, copiados abajo): heredar TestCase de otro TestCase
+    hace que unittest vuelva a ejecutar TODOS los tests heredados como
+    si fueran propios de esta clase (duplicando ~130 pruebas y, peor,
+    duplicando su tearDownClass -- que borra el TEST_DB_PATH compartido
+    por PID -- en un orden alfabetico que tumbaria a SalesSnapshotTest
+    con errores de conexion).
+
+    Deliberadamente NO define tearDownClass: TEST_DB_PATH es compartido
+    por PID entre clases/archivos, y SalesSnapshotTest.tearDownClass ya
+    lo limpia al final (discover ordena "PostCobroIncrementalTest" antes
+    que "SalesSnapshotTest" alfabeticamente, asi que esta clase siempre
+    corre primero dentro del archivo)."""
+
+    def setUp(self):
+        self.app = web_app.app
+        self.client = self.app.test_client()
+        self._clear_operational_data()
+        self._set_tasa(200)
+        with self.client.session_transaction() as sess:
+            sess["usuario_id"] = self._master_user_id()
+            sess["usuario_nombre"] = "Emmanuel"
+            sess["usuario"] = "Emmanuel"
+            sess["usuario_rol"] = "master"
+
+    def _conn(self):
+        return web_app.get_connection()
+
+    def _clear_operational_data(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        for table in (
+            "delivery_movimientos",
+            "cuentas_por_cobrar_movimientos",
+            "cuentas_por_cobrar",
+            "pagos",
+            "orden_items",
+            "ordenes",
+            "repartidores",
+            "clientes",
+            "cierre_detalle",
+            "cierres_caja",
+            "movimientos_inventario",
+            "auditoria_emergencias",
+        ):
+            cursor.execute(f"DELETE FROM {table}")
+        conn.commit()
+        conn.close()
+
+    def _master_user_id(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM usuarios WHERE rol='master' ORDER BY id LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        return row[0]
+
+    def _set_tasa(self, value):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE tasa SET valor=?", (value,))
+        conn.commit()
+        conn.close()
+
+    def _create_empty_order(self, estado="abierta"):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO ordenes (
+                numero_orden, fecha_hora, fecha, tipo, referencia, cliente, estado, usuario_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1, "2026-08-20 12:00:00", "2026-08-20", "mesa", "A1", "Test", estado, self._master_user_id()),
+        )
+        orden_id = web_app.obtener_ultimo_id(cursor, "ordenes")
+        conn.commit()
+        conn.close()
+        return orden_id
+
+    def _create_order(self, price=10.0, estado="abierta"):
+        orden_id = self._create_empty_order(estado=estado)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, ?)",
+            (orden_id, "Producto prueba", price, ""),
+        )
+        conn.commit()
+        conn.close()
+        return orden_id
+
+    def _charge(
+        self,
+        orden_id,
+        metodo1,
+        monto1,
+        metodo2="",
+        monto2="",
+        descuento=0,
+        modo_cobro="pagado",
+        cliente_id="",
+    ):
+        return self.client.post(
+            f"/cobrar/{orden_id}",
+            data={
+                "modo_cobro": modo_cobro,
+                "cliente_id": str(cliente_id),
+                "metodo1": metodo1,
+                "monto1": str(monto1),
+                "ref1": "ref1",
+                "metodo2": metodo2,
+                "monto2": str(monto2),
+                "ref2": "ref2",
+                "descuento": str(descuento),
+            },
+            follow_redirects=False,
+        )
+
+    def _snapshot(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT estado, fecha_cobro, tasa_cobro, subtotal_usd,
+                   descuento_bs_snapshot, total_usd, total_bs, descuento
+            FROM ordenes
+            WHERE id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        cursor.execute(
+            "SELECT metodo, monto, referencia, fecha FROM pagos WHERE orden_id=? ORDER BY id",
+            (orden_id,),
+        )
+        pagos = cursor.fetchall()
+        conn.close()
+        return row, pagos
+
+    def _financial_snapshot(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT estado, fecha_venta, fecha_cobro, tasa_cobro, subtotal_usd,
+                   descuento_bs_snapshot, total_usd, total_bs,
+                   venta_restaurante_usd, delivery_usd, total_cliente_usd,
+                   delivery_repartidor_id, inventario_descontado
+            FROM ordenes
+            WHERE id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row
+
+    def _create_client(self, nombre="Ferreteria El Vecino"):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO clientes (nombre, telefono, documento, notas, activo, fecha_creacion)
+            VALUES (?, ?, ?, ?, 1, ?)
+            """,
+            (nombre, "0412-0000000", "J-00000000-0", "Cliente de prueba", "2026-08-21 10:00:00"),
+        )
+        cliente_id = web_app.obtener_ultimo_id(cursor, "clientes")
+        conn.commit()
+        conn.close()
+        return cliente_id
+
+    def _cuenta_por_orden(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, saldo_pendiente, estado, monto_original_deuda
+            FROM cuentas_por_cobrar
+            WHERE orden_id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row
+
+    def _movimientos_cuenta(self, cuenta_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT tipo, monto_saldo, moneda_pago, monto_pago, tasa_movimiento,
+                   metodo_pago, referencia, usuario_id, observacion
+            FROM cuentas_por_cobrar_movimientos
+            WHERE cuenta_id=?
+            ORDER BY id
+            """,
+            (cuenta_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def _agregar_item_a_orden(self, orden_id, nombre="Item adicional", precio=2.0):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, ?, '')",
+            (orden_id, nombre, precio),
+        )
+        conn.commit()
+        conn.close()
+
+    def _pendiente_pagina(self, orden_id):
+        return self.client.get(f"/orden/{orden_id}/cobrar_pendiente")
+
+    def _pagar_ahora(self, orden_id, metodo="usd", monto=2.0, referencia=""):
+        return self.client.post(
+            f"/orden/{orden_id}/cobrar_pendiente",
+            data={"accion": "pagar_ahora", "metodo": metodo, "monto": str(monto), "referencia": referencia},
+            follow_redirects=False,
+        )
+
+    def _dejar_pendiente(self, orden_id, cliente_id=""):
+        return self.client.post(
+            f"/orden/{orden_id}/cobrar_pendiente",
+            data={"accion": "dejar_pendiente", "cliente_id": str(cliente_id)},
+            follow_redirects=False,
+        )
+
+    # --- Escenario A (mision seccion 4/51-A): pagado completo, agrega, cobra el nuevo pendiente ---
+
+    def test_escenario_a_pagado_completo_agrega_y_cobra_pendiente(self):
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+        snapshot_original, pagos_originales = self._snapshot(orden_id)
+        self.assertEqual(len(pagos_originales), 1)
+
+        self._agregar_item_a_orden(orden_id, precio=2.0)
+
+        # Sin cobrar el pendiente todavia: el cobro original sigue intacto.
+        _snapshot_intermedio, pagos_intermedios = self._snapshot(orden_id)
+        self.assertEqual(pagos_intermedios, pagos_originales)
+
+        respuesta = self._pagar_ahora(orden_id, metodo="usd", monto=2.0)
+        self.assertEqual(respuesta.status_code, 302)
+
+        financial = self._financial_snapshot(orden_id)
+        # total_cliente_usd (indice 10) ahora refleja el TOTAL CONSUMIDO ($8).
+        self.assertEqual(financial[10], 8.0)
+        self.assertEqual(financial[0], "cerrada")
+
+        _snapshot_final, pagos_finales = self._snapshot(orden_id)
+        # El pago original de $6 sigue existiendo intacto (nunca se borro).
+        self.assertEqual(pagos_finales[0], pagos_originales[0])
+        self.assertEqual(len(pagos_finales), 2)
+        self.assertEqual(pagos_finales[1][0:2], ("usd", 2.0))
+        # No se creo ninguna cuenta por cobrar para este camino.
+        self.assertIsNone(self._cuenta_por_orden(orden_id))
+
+    def test_escenario_a_pago_insuficiente_no_se_acepta(self):
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+        self._agregar_item_a_orden(orden_id, precio=2.0)
+
+        respuesta = self._pagar_ahora(orden_id, metodo="usd", monto=1.0)
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn(b"no cubre el saldo pendiente", respuesta.data)
+        _snapshot, pagos = self._snapshot(orden_id)
+        self.assertEqual(len(pagos), 1)
+
+    def test_sin_pendiente_nuevo_redirige_sin_formulario(self):
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+
+        respuesta = self._pendiente_pagina(orden_id)
+
+        self.assertEqual(respuesta.status_code, 302)
+
+    # --- Escenario B (mision seccion 6/51-B): parcial con saldo, agrega, el pendiente se ACUMULA ---
+
+    def test_escenario_b_parcial_agrega_y_acumula_en_la_misma_cuenta(self):
+        cliente_id = self._create_client("Cliente Parcial")
+        orden_id = self._create_order(price=10.0)
+        respuesta = self._charge(orden_id, "usd", 6, modo_cobro="parcial", cliente_id=cliente_id)
+        self.assertEqual(respuesta.status_code, 302)
+
+        cuenta_antes = self._cuenta_por_orden(orden_id)
+        self.assertIsNotNone(cuenta_antes)
+        self.assertEqual(round(cuenta_antes[1], 2), 4.0)  # saldo pendiente original
+
+        self._agregar_item_a_orden(orden_id, precio=2.0)
+        pendiente = self._pendiente_pagina(orden_id)
+        self.assertIn(b"2.00", pendiente.data)
+
+        respuesta = self._dejar_pendiente(orden_id, cliente_id=cliente_id)
+        self.assertEqual(respuesta.status_code, 302)
+
+        cuenta_despues = self._cuenta_por_orden(orden_id)
+        self.assertEqual(cuenta_antes[0], cuenta_despues[0])  # MISMA cuenta, nunca una segunda
+        self.assertEqual(round(cuenta_despues[1], 2), 6.0)  # 4 (original) + 2 (nuevo) = mision seccion 6
+        self.assertEqual(cuenta_despues[2], "pendiente")
+
+        financial = self._financial_snapshot(orden_id)
+        self.assertEqual(financial[10], 12.0)  # total_cliente_usd = TOTAL CONSUMIDO
+
+    # --- Escenario C (mision seccion 7): credito completo, agrega, se suma a la cuenta existente ---
+
+    def test_escenario_c_credito_agrega_sin_duplicar_cuenta(self):
+        cliente_id = self._create_client("Cliente Credito")
+        orden_id = self._create_order(price=10.0)
+        respuesta = self._charge(orden_id, "", 0, modo_cobro="credito", cliente_id=cliente_id)
+        self.assertEqual(respuesta.status_code, 302)
+
+        cuenta_antes = self._cuenta_por_orden(orden_id)
+        self.assertEqual(round(cuenta_antes[1], 2), 10.0)
+
+        self._agregar_item_a_orden(orden_id, precio=3.0)
+        respuesta = self._dejar_pendiente(orden_id, cliente_id=cliente_id)
+        self.assertEqual(respuesta.status_code, 302)
+
+        cuenta_despues = self._cuenta_por_orden(orden_id)
+        self.assertEqual(cuenta_antes[0], cuenta_despues[0])
+        self.assertEqual(round(cuenta_despues[1], 2), 13.0)
+
+        movimientos = self._movimientos_cuenta(cuenta_despues[0])
+        self.assertEqual([m[0] for m in movimientos], ["cargo", "cargo"])
+        self.assertEqual(round(movimientos[0][1], 2), 10.0)
+        self.assertEqual(round(movimientos[1][1], 2), 3.0)
+
+    def test_dejar_pendiente_sin_cliente_no_crea_cuenta(self):
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+        self._agregar_item_a_orden(orden_id, precio=2.0)
+
+        respuesta = self._dejar_pendiente(orden_id, cliente_id="")
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIsNone(self._cuenta_por_orden(orden_id))
+
+    # --- Guard: orden archivada / ya lista para retirar bloquea el flujo ---
+
+    def test_orden_archivada_no_permite_cobro_incremental(self):
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+        self._agregar_item_a_orden(orden_id, precio=2.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET cierre_id=1 WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self._pendiente_pagina(orden_id).status_code, 302)
+        respuesta = self._pagar_ahora(orden_id, metodo="usd", monto=2.0)
+        self.assertEqual(respuesta.status_code, 302)
+        self.assertIsNone(self._cuenta_por_orden(orden_id))
+
+    def test_orden_ya_lista_para_retirar_no_permite_cobro_incremental(self):
+        orden_id = self._create_order(price=6.0)
+        self.assertEqual(self._charge(orden_id, "usd", 6).status_code, 302)
+        self._agregar_item_a_orden(orden_id, precio=2.0)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE ordenes SET despachado_at=?, despachado_por=? WHERE id=?",
+            ("2026-08-21 11:00:00", "Monica", orden_id),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(self._pendiente_pagina(orden_id).status_code, 302)
+
+
 if __name__ == "__main__":
     unittest.main()
