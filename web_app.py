@@ -10728,6 +10728,7 @@ def _render_pedido_despacho(row, resumen_texto, ahora):
         estado,
         hora_envio,
         observacion,
+        todas_comandas_listas,
     ) = row
 
     minutos = _despacho_minutos_transcurridos(hora_envio, ahora)
@@ -10740,7 +10741,12 @@ def _render_pedido_despacho(row, resumen_texto, ahora):
     else:
         color_class = "red"
 
-    if estado == "listo":
+    # Se combina orden_comandas.estado (todas_comandas_listas) con
+    # ordenes.estado: cobrar() sobreescribe ordenes.estado a 'cerrada',
+    # por lo que una orden facturada/cobrada pero cuyas comandas SI
+    # estan listas debe seguir mostrando LISTO, no EN COCINA.
+    es_listo = bool(todas_comandas_listas) or estado == "listo"
+    if es_listo:
         estado_badge = '<span class="badge badge-listo">LISTO</span>'
     else:
         estado_badge = '<span class="badge badge-cocina">EN COCINA</span>'

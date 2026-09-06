@@ -319,14 +319,38 @@ class SqlKitchenComandaRepository:
             conn.close()
 
     def listar_pedidos_despacho(self):
-        """Pedidos que Monica todavia debe atender/despachar: una orden
-        activa (no archivada, no cerrada) que ya entro al flujo
-        operativo de cocina (tiene al menos un lote en orden_comandas,
-        o esta en un estado legacy sin comandas) y que aun no fue
-        marcada despachado_at. Un renglon por ORDEN (no por lote de
-        cocina) -- a diferencia de listar_comandas_cocina(), que es
-        por-comanda. Mas antigua primero, usando SIEMPRE la hora
-        historica de envio a cocina (secuencia 0), nunca 'ahora'."""
+        """Pedidos que Monica todavia debe atender/despachar.
+
+        CORRECCION (mision "no mezclar despacho con estado financiero"):
+        FACTURADA, COBRADA y CERRADA (financiero) NO son ENTREGADA. La
+        UNICA condicion que retira una orden de esta lista es
+        despachado_at IS NOT NULL -- nunca estado='cerrada', nunca
+        facturar, nunca cobro. Una orden que ya entro a cocina, se
+        factura y se cobra sigue aqui hasta que Monica pulse ENTREGADO.
+
+        La UNICA excepcion es cierre_id (archivo de jornada): auditado
+        cerrar_jornada() (web_app.py) rechaza archivar mientras exista
+        CUALQUIER orden no-cerrada (estado != 'cerrada'), asi que
+        cierre_id solo se asigna, una vez al dia, a ordenes que un
+        supervisor ya cerro deliberadamente como parte del cierre
+        contable del dia -- no es un estado financiero de la orden
+        (como cobrar) ni significa "anulada", pero representa que ese
+        dia de operacion ya se dio por terminado. Sin este limite,
+        agregar despachado_at a una base de datos en produccion con
+        historial (ordenes de dias/meses anteriores, todas con
+        despachado_at NULL por ser una columna nueva) resucitaria de
+        golpe todo ese historial en la pantalla de Monica. Ordenes del
+        dia en curso (cierre_id IS NULL) siguen visibles pase lo que
+        pase con facturar/cobro/estado, exactamente como pide la
+        correccion.
+
+        Un renglon por ORDEN (no por lote de cocina) -- a diferencia de
+        listar_comandas_cocina(), que es por-comanda. Mas antigua
+        primero, usando SIEMPRE la hora historica de envio a cocina
+        (secuencia 0), nunca 'ahora'. El indicador EN COCINA/LISTO se
+        calcula de orden_comandas.estado directamente (nunca de
+        ordenes.estado, que cobrar() sobreescribe a 'cerrada' y por
+        tanto deja de reflejar si la cocina ya termino)."""
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
@@ -334,11 +358,19 @@ class SqlKitchenComandaRepository:
                 """
                 SELECT o.id, o.numero_orden, o.tipo, o.referencia, o.cliente,
                        o.estado, COALESCE(c0.fecha_creacion, o.fecha_hora) AS hora_envio,
-                       COALESCE(o.observacion, '')
+                       COALESCE(o.observacion, ''),
+                       COALESCE(
+                           (SELECT CASE
+                               WHEN COUNT(*) = SUM(CASE WHEN c.estado = 'listo' THEN 1 ELSE 0 END)
+                               THEN 1 ELSE 0
+                            END
+                            FROM orden_comandas c
+                            WHERE c.orden_id = o.id),
+                           0
+                       ) AS todas_comandas_listas
                 FROM ordenes o
                 LEFT JOIN orden_comandas c0 ON c0.orden_id = o.id AND c0.secuencia = 0
                 WHERE o.cierre_id IS NULL
-                  AND o.estado != 'cerrada'
                   AND o.despachado_at IS NULL
                   AND (
                     EXISTS (SELECT 1 FROM orden_comandas c WHERE c.orden_id = o.id)

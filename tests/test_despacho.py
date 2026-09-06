@@ -135,6 +135,30 @@ class DespachoRoutesTest(unittest.TestCase):
         conn.close()
         return row
 
+    def _marcar_cobrada(self, orden_id):
+        """Simula lo que hace /cobrar sobre ordenes.estado (lo unico
+        relevante para estos tests): lo sobreescribe a 'cerrada' con una
+        fecha_cobro, sin pasar por el formulario completo de pago."""
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE ordenes SET estado='cerrada', fecha_cobro=? WHERE id=?",
+            ("2026-09-05 19:30:00", orden_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def _tiene_job_recibo(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM print_jobs WHERE event_key=? AND required_role LIKE 'RECIBO%'",
+            (f"{orden_id}-base",),
+        )
+        n = cursor.fetchone()[0]
+        conn.close()
+        return n > 0
+
     def _alertas_pendientes(self):
         repo = web_app.SqlServiceAlertsRepository(web_app.get_connection)
         return repo.listar_pendientes()
@@ -281,6 +305,158 @@ class EntregadoIdempotenteTest(DespachoRoutesTest):
         html = self._despacho_html()
         self.assertIn(f'href="/activar_factura/{orden_id}"', html)
         self.assertIn(f'href="/orden/{orden_id}"', html)
+
+    def test_facturar_desde_despacho_genera_job_y_no_retira_la_tarjeta(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self.client.get(f"/activar_factura/{orden_id}")
+
+        self.assertTrue(self._tiene_job_recibo(orden_id))
+        html = self._despacho_html()
+        self.assertIn(f'data-orden-id="{orden_id}"', html)
+
+
+class VisibilidadFinancieraTest(DespachoRoutesTest):
+    """Corrige la regresion detectada antes del push: CERRADA/COBRADA/
+    FACTURADA NO son ENTREGADA. La unica condicion de salida de
+    DESPACHO es despachado_at IS NOT NULL (ver docstring de
+    listar_pedidos_despacho en kitchen_comandas.py para la unica
+    excepcion auditada: cierre_id, el archivo de jornada, no el cobro)."""
+
+    def test_orden_en_cocina_aparece(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_orden_lista_aparece(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET estado='listo' WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_orden_facturada_sigue_apareciendo(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self.client.get(f"/activar_factura/{orden_id}")
+
+        self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_orden_cobrada_sigue_apareciendo(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._marcar_cobrada(orden_id)
+
+        self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_orden_cerrada_pero_no_despachada_sigue_apareciendo(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._marcar_cobrada(orden_id)
+
+        estado, despachado_at, _por, _f = self._estado_orden(orden_id)
+        self.assertEqual(estado, "cerrada")
+        self.assertIsNone(despachado_at)
+        self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_entregado_retira_la_tarjeta(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+
+        self.client.post(f"/despacho/{orden_id}/entregado")
+
+        self.assertNotIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_facturar_no_cambia_despachado_at(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self.client.get(f"/activar_factura/{orden_id}")
+
+        _estado, despachado_at, _por, _f = self._estado_orden(orden_id)
+        self.assertIsNone(despachado_at)
+
+    def test_cobrar_no_cambia_despachado_at(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._marcar_cobrada(orden_id)
+
+        _estado, despachado_at, _por, _f = self._estado_orden(orden_id)
+        self.assertIsNone(despachado_at)
+
+    def test_cerrar_financieramente_no_equivale_a_entregar(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._marcar_cobrada(orden_id)
+
+        estado, despachado_at, despachado_por, _f = self._estado_orden(orden_id)
+        self.assertEqual(estado, "cerrada")
+        self.assertIsNone(despachado_at)
+        self.assertIsNone(despachado_por)
+        self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_delivery_cerrado_pero_no_despachado_sigue_visible(self):
+        orden_id = self._crear_orden(tipo="Delivery", referencia="Calle 5")
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._marcar_cobrada(orden_id)
+
+        html = self._despacho_html()
+        self.assertIn(f'data-orden-id="{orden_id}"', html)
+        self.assertIn("DESPACHADO", html)
+
+    def test_pickup_cerrado_pero_no_entregado_sigue_visible(self):
+        orden_id = self._crear_orden(tipo="Para llevar", referencia="Pedro")
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._marcar_cobrada(orden_id)
+
+        self.assertIn(f'data-orden-id="{orden_id}"', self._despacho_html())
+
+    def test_badge_listo_se_mantiene_tras_cobrar(self):
+        # cobrar() sobreescribe ordenes.estado a 'cerrada', perdiendo el
+        # 'listo' anterior -- el badge debe seguir viniendo de
+        # orden_comandas.estado, no de ordenes.estado.
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orden_comandas SET estado='listo' WHERE orden_id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        self._marcar_cobrada(orden_id)
+
+        html = self._despacho_html()
+        self.assertIn(f'data-orden-id="{orden_id}"', html)
+        # Unica orden en pantalla: debe mostrar LISTO, no EN COCINA.
+        self.assertIn("LISTO", html)
+        self.assertNotIn("EN COCINA", html)
 
 
 class AlertasBebidasTest(DespachoRoutesTest):
