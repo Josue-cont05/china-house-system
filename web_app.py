@@ -122,6 +122,27 @@ from app.infrastructure.database.notifications import (
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
+from app.infrastructure.database.clientes import (
+    cliente_json_desde_fila,
+    listar_clientes_activos,
+    listar_clientes_admin,
+    listar_cuentas_cliente,
+    obtener_cliente_admin,
+    obtener_cliente_para_cxc,
+    obtener_resumen_cliente,
+)
+from app.infrastructure.database.cxc import (
+    agregar_cargo_cuenta_existente,
+    crear_cuenta_por_cobrar_inicial,
+    crear_tablas_cuentas_por_cobrar,
+    listar_cuentas_por_cobrar_admin,
+    obtener_cuenta_cxc_por_orden,
+    obtener_detalle_cuenta_cxc,
+    orden_tiene_cxc,
+    resumen_cuentas_por_cobrar,
+    validar_recobro_cxc,
+)
+from app.application.cxc.abonos import registrar_abono_cuenta
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -738,622 +759,6 @@ def normalizar_modo_cobro(modo):
     return modo if modo in MODOS_COBRO_VALIDOS else ""
 
 
-def obtener_cliente_para_cxc(cursor, cliente_id):
-    try:
-        cliente_id = int(cliente_id)
-    except (TypeError, ValueError):
-        raise ValueError("Debes seleccionar un cliente valido para la cuenta por cobrar")
-
-    cursor.execute(
-        """
-        SELECT id, nombre
-        FROM clientes
-        WHERE id=? AND COALESCE(activo, 1)=1
-        """,
-        (cliente_id,),
-    )
-    cliente = cursor.fetchone()
-    if not cliente:
-        raise ValueError("Debes seleccionar un cliente valido para la cuenta por cobrar")
-    return cliente
-
-
-def listar_clientes_activos(cursor, busqueda=""):
-    busqueda = (busqueda or "").strip().lower()
-    params = []
-    filtro = ""
-    if busqueda:
-        filtro = """
-          AND (
-              LOWER(nombre) LIKE ?
-              OR LOWER(COALESCE(telefono, '')) LIKE ?
-              OR LOWER(COALESCE(documento, '')) LIKE ?
-          )
-        """
-        patron = f"%{busqueda}%"
-        params = [patron, patron, patron]
-
-    cursor.execute(
-        f"""
-        SELECT id, nombre, telefono, documento
-        FROM clientes
-        WHERE COALESCE(activo, 1)=1
-        {filtro}
-        ORDER BY LOWER(nombre), id
-        LIMIT 100
-        """,
-        params,
-    )
-    return cursor.fetchall()
-
-
-def cliente_json_desde_fila(cliente):
-    return {
-        "id": cliente[0],
-        "nombre": cliente[1] or "",
-        "telefono": cliente[2] or "",
-        "documento": cliente[3] or "",
-    }
-
-
-def filtros_clientes_admin(busqueda, filtro):
-    condiciones = []
-    params = []
-    busqueda = (busqueda or "").strip().lower()
-    filtro = (filtro or "todos").strip().lower()
-
-    if busqueda:
-        condiciones.append(
-            """
-            (
-                LOWER(c.nombre) LIKE ?
-                OR LOWER(COALESCE(c.telefono, '')) LIKE ?
-                OR LOWER(COALESCE(c.documento, '')) LIKE ?
-            )
-            """
-        )
-        patron = f"%{busqueda}%"
-        params.extend([patron, patron, patron])
-
-    if filtro == "activos":
-        condiciones.append("COALESCE(c.activo, 1)=1")
-    elif filtro == "inactivos":
-        condiciones.append("COALESCE(c.activo, 1)=0")
-    elif filtro == "con_saldo":
-        condiciones.append(
-            """
-            EXISTS (
-                SELECT 1 FROM cuentas_por_cobrar cxp
-                WHERE cxp.cliente_id = c.id
-                AND cxp.estado = 'pendiente'
-                AND cxp.saldo_pendiente > 0
-            )
-            """
-        )
-    elif filtro == "sin_saldo":
-        condiciones.append(
-            """
-            NOT EXISTS (
-                SELECT 1 FROM cuentas_por_cobrar cxs
-                WHERE cxs.cliente_id = c.id
-                AND cxs.estado = 'pendiente'
-                AND cxs.saldo_pendiente > 0
-            )
-            """
-        )
-
-    where = "WHERE " + " AND ".join(condiciones) if condiciones else ""
-    return where, params
-
-
-def listar_clientes_admin(cursor, busqueda="", filtro="todos"):
-    where, params = filtros_clientes_admin(busqueda, filtro)
-    cursor.execute(
-        f"""
-        SELECT
-            c.id,
-            c.nombre,
-            COALESCE(c.telefono, ''),
-            COALESCE(c.documento, ''),
-            COALESCE(c.activo, 1),
-            COALESCE(SUM(CASE
-                WHEN cx.estado='pendiente' THEN cx.saldo_pendiente
-                ELSE 0
-            END), 0) AS saldo_pendiente_total,
-            COALESCE(SUM(CASE
-                WHEN cx.estado='pendiente' AND cx.saldo_pendiente > 0 THEN 1
-                ELSE 0
-            END), 0) AS cuentas_pendientes,
-            COALESCE(SUM(CASE WHEN cx.estado='pagada' THEN 1 ELSE 0 END), 0) AS cuentas_pagadas
-        FROM clientes c
-        LEFT JOIN cuentas_por_cobrar cx ON cx.cliente_id = c.id
-        {where}
-        GROUP BY c.id, c.nombre, c.telefono, c.documento, c.activo
-        ORDER BY COALESCE(c.activo, 1) DESC, LOWER(c.nombre), c.id
-        LIMIT 300
-        """,
-        params,
-    )
-    return cursor.fetchall()
-
-
-def obtener_cliente_admin(cursor, cliente_id):
-    cursor.execute(
-        """
-        SELECT id, nombre, COALESCE(telefono, ''), COALESCE(documento, ''),
-               COALESCE(notas, ''), COALESCE(activo, 1), fecha_creacion
-        FROM clientes
-        WHERE id=?
-        """,
-        (cliente_id,),
-    )
-    return cursor.fetchone()
-
-
-def obtener_resumen_cliente(cursor, cliente_id):
-    cursor.execute(
-        """
-        SELECT
-            COALESCE(SUM(CASE WHEN estado='pendiente' THEN saldo_pendiente ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN estado='pendiente' AND saldo_pendiente > 0 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN estado='pagada' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(monto_original_deuda), 0)
-        FROM cuentas_por_cobrar
-        WHERE cliente_id=?
-        """,
-        (cliente_id,),
-    )
-    row = cursor.fetchone() or (0, 0, 0, 0)
-    return {
-        "saldo_pendiente": a_float(row[0]),
-        "cuentas_pendientes": int(row[1] or 0),
-        "cuentas_pagadas": int(row[2] or 0),
-        "total_deuda_generada": a_float(row[3]),
-    }
-
-
-def listar_cuentas_cliente(cursor, cliente_id):
-    cursor.execute(
-        """
-        SELECT cx.id, cx.orden_id, o.numero_orden, cx.fecha_generacion,
-               cx.monto_original_deuda, cx.saldo_pendiente, cx.estado,
-               cx.cliente_nombre_snapshot
-        FROM cuentas_por_cobrar cx
-        LEFT JOIN ordenes o ON o.id = cx.orden_id
-        WHERE cx.cliente_id=?
-        ORDER BY cx.fecha_generacion DESC, cx.id DESC
-        """,
-        (cliente_id,),
-    )
-    return cursor.fetchall()
-
-
-def filtros_cxc_admin(busqueda, estado, cliente_id):
-    condiciones = []
-    params = []
-    busqueda = (busqueda or "").strip().lower()
-    estado = (estado or "pendiente").strip().lower()
-    cliente_id = (str(cliente_id or "")).strip()
-
-    if estado in ("pendiente", "pagada", "anulada"):
-        condiciones.append("cx.estado=?")
-        params.append(estado)
-
-    if cliente_id:
-        condiciones.append("cx.cliente_id=?")
-        params.append(cliente_id)
-
-    if busqueda:
-        condiciones.append(
-            """
-            (
-                LOWER(cx.cliente_nombre_snapshot) LIKE ?
-                OR LOWER(COALESCE(c.nombre, '')) LIKE ?
-                OR LOWER(COALESCE(c.telefono, '')) LIKE ?
-                OR LOWER(COALESCE(c.documento, '')) LIKE ?
-                OR LOWER(CAST(COALESCE(o.numero_orden, o.id) AS TEXT)) LIKE ?
-            )
-            """
-        )
-        patron = f"%{busqueda}%"
-        params.extend([patron, patron, patron, patron, patron])
-
-    where = "WHERE " + " AND ".join(condiciones) if condiciones else ""
-    return where, params
-
-
-def resumen_cuentas_por_cobrar(cursor):
-    cursor.execute(
-        """
-        SELECT
-            COALESCE(SUM(CASE WHEN estado='pendiente' THEN saldo_pendiente ELSE 0 END), 0),
-            COUNT(DISTINCT CASE WHEN estado='pendiente' AND saldo_pendiente > 0 THEN cliente_id END),
-            COALESCE(SUM(CASE WHEN estado='pendiente' AND saldo_pendiente > 0 THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN estado='pagada' THEN 1 ELSE 0 END), 0)
-        FROM cuentas_por_cobrar
-        """
-    )
-    row = cursor.fetchone() or (0, 0, 0, 0)
-    return {
-        "saldo_total": a_float(row[0]),
-        "clientes_con_deuda": int(row[1] or 0),
-        "cuentas_pendientes": int(row[2] or 0),
-        "cuentas_pagadas": int(row[3] or 0),
-    }
-
-
-def listar_cuentas_por_cobrar_admin(cursor, busqueda="", estado="pendiente", cliente_id=""):
-    where, params = filtros_cxc_admin(busqueda, estado, cliente_id)
-    cursor.execute(
-        f"""
-        SELECT
-            cx.id,
-            cx.cliente_id,
-            cx.cliente_nombre_snapshot,
-            COALESCE(c.nombre, ''),
-            COALESCE(c.telefono, ''),
-            COALESCE(c.documento, ''),
-            cx.orden_id,
-            o.numero_orden,
-            cx.fecha_generacion,
-            cx.monto_original_deuda,
-            cx.saldo_pendiente,
-            cx.estado
-        FROM cuentas_por_cobrar cx
-        LEFT JOIN clientes c ON c.id = cx.cliente_id
-        LEFT JOIN ordenes o ON o.id = cx.orden_id
-        {where}
-        ORDER BY cx.fecha_generacion DESC, cx.id DESC
-        LIMIT 300
-        """,
-        params,
-    )
-    return cursor.fetchall()
-
-
-def calcular_suma_movimientos_cxc(cursor, cuenta_id):
-    cursor.execute(
-        """
-        SELECT COALESCE(SUM(monto_saldo), 0)
-        FROM cuentas_por_cobrar_movimientos
-        WHERE cuenta_id=?
-        """,
-        (cuenta_id,),
-    )
-    row = cursor.fetchone()
-    return round(a_float(row[0] if row else 0), 2)
-
-
-def calcular_pagado_inicial_orden(cursor, orden_id, tasa_historica):
-    cursor.execute(
-        """
-        SELECT metodo, monto
-        FROM pagos
-        WHERE orden_id=?
-        ORDER BY id
-        """,
-        (orden_id,),
-    )
-    pagos = cursor.fetchall()
-    total_usd = 0.0
-    total_bs = 0.0
-    for metodo, monto in pagos:
-        pago_bs, pago_usd = convertir_pago_equivalente(metodo, monto, tasa_historica)
-        total_bs += pago_bs
-        total_usd += pago_usd
-    return {
-        "usd": round(total_usd, 2),
-        "bs": round(total_bs, 2),
-        "pagos": pagos,
-    }
-
-
-def obtener_detalle_cuenta_cxc(cursor, cuenta_id):
-    cursor.execute(
-        """
-        SELECT
-            cx.id, cx.orden_id, cx.cliente_id, cx.cliente_nombre_snapshot,
-            cx.moneda_saldo, cx.monto_original_deuda, cx.saldo_pendiente,
-            cx.fecha_generacion, cx.estado, COALESCE(cx.observacion, ''),
-            COALESCE(c.nombre, ''), COALESCE(c.telefono, ''), COALESCE(c.documento, ''),
-            o.numero_orden, o.fecha_venta, o.fecha_cobro, o.tasa_cobro,
-            o.subtotal_usd, o.descuento_bs_snapshot, o.total_usd, o.total_bs
-        FROM cuentas_por_cobrar cx
-        LEFT JOIN clientes c ON c.id = cx.cliente_id
-        LEFT JOIN ordenes o ON o.id = cx.orden_id
-        WHERE cx.id=?
-        """,
-        (cuenta_id,),
-    )
-    cuenta = cursor.fetchone()
-    if not cuenta:
-        return None
-
-    cursor.execute(
-        """
-        SELECT m.fecha, m.tipo, m.monto_saldo, m.moneda_pago, m.monto_pago,
-               m.tasa_movimiento, m.metodo_pago, m.referencia,
-               COALESCE(u.nombre, ''), COALESCE(m.observacion, '')
-        FROM cuentas_por_cobrar_movimientos m
-        LEFT JOIN usuarios u ON u.id = m.usuario_id
-        WHERE m.cuenta_id=?
-        ORDER BY m.fecha ASC, m.id ASC
-        """,
-        (cuenta_id,),
-    )
-    movimientos = cursor.fetchall()
-    suma_movimientos = calcular_suma_movimientos_cxc(cursor, cuenta_id)
-    tasa_historica = a_float(cuenta[16])
-    pagado_inicial = calcular_pagado_inicial_orden(cursor, cuenta[1], tasa_historica)
-    inconsistente = abs(round(a_float(cuenta[6]) - suma_movimientos, 2)) > 0.01
-
-    return {
-        "cuenta": cuenta,
-        "movimientos": movimientos,
-        "suma_movimientos": suma_movimientos,
-        "pagado_inicial": pagado_inicial,
-        "inconsistente": inconsistente,
-    }
-
-
-def metodo_pago_es_usd(metodo):
-    return normalizar_metodo_pago(metodo) == "usd"
-
-
-def metodo_pago_es_bs(metodo):
-    return normalizar_metodo_pago(metodo) in ("punto_venta", "bs_pago_movil", "bs_efectivo")
-
-
-def moneda_pago_desde_metodo(metodo):
-    metodo = normalizar_metodo_pago(metodo)
-    if metodo_pago_es_usd(metodo):
-        return "USD"
-    if metodo_pago_es_bs(metodo):
-        return "BS"
-    return ""
-
-
-def insertar_movimiento_abono_cxc(
-    cursor,
-    cuenta_id,
-    monto_saldo,
-    moneda_pago,
-    monto_pago,
-    tasa_movimiento,
-    metodo_pago,
-    referencia,
-    fecha,
-    usuario_id,
-    observacion,
-):
-    cursor.execute(
-        """
-        INSERT INTO cuentas_por_cobrar_movimientos (
-            cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
-            tasa_movimiento, metodo_pago, referencia, fecha,
-            usuario_id, observacion, movimiento_revertido_id,
-            referencia_externa_tipo, referencia_externa_id
-        )
-        VALUES (?, 'abono', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
-        """,
-        (
-            cuenta_id,
-            monto_saldo,
-            moneda_pago,
-            monto_pago,
-            tasa_movimiento,
-            metodo_pago,
-            referencia,
-            fecha,
-            usuario_id,
-            observacion,
-        ),
-    )
-
-
-def actualizar_saldo_cxc(cursor, cuenta_id, nuevo_saldo, nuevo_estado):
-    cursor.execute(
-        """
-        UPDATE cuentas_por_cobrar
-        SET saldo_pendiente=?, estado=?
-        WHERE id=?
-        """,
-        (nuevo_saldo, nuevo_estado, cuenta_id),
-    )
-
-
-def registrar_abono_cuenta(
-    cursor,
-    cuenta_id,
-    metodo_pago,
-    monto_recibido,
-    referencia,
-    observacion,
-    usuario_id,
-):
-    cursor.execute(
-        """
-        SELECT id, saldo_pendiente, estado, moneda_saldo, cliente_nombre_snapshot
-        FROM cuentas_por_cobrar
-        WHERE id=?
-        """,
-        (cuenta_id,),
-    )
-    cuenta = cursor.fetchone()
-    if not cuenta:
-        raise ValueError("Cuenta por cobrar no encontrada")
-
-    cuenta_id, saldo_actual, estado, moneda_saldo, cliente_nombre = cuenta
-    saldo_actual = round(a_float(saldo_actual), 2)
-    suma_movimientos = calcular_suma_movimientos_cxc(cursor, cuenta_id)
-
-    if abs(round(saldo_actual - suma_movimientos, 2)) > 0.01:
-        raise ValueError("La cuenta tiene una inconsistencia entre saldo y movimientos. No se puede registrar el abono.")
-    if estado != "pendiente" or saldo_actual <= TOLERANCIA_COBRO:
-        raise ValueError("Solo se pueden registrar abonos en cuentas pendientes con saldo.")
-    if (moneda_saldo or "USD") != "USD":
-        raise ValueError("La moneda de saldo de la cuenta no esta soportada para abonos.")
-
-    metodo_pago = normalizar_metodo_pago(metodo_pago)
-    if metodo_pago not in METODOS_PAGO_VALIDOS:
-        raise ValueError("Metodo de pago invalido")
-
-    monto_pago = a_float(monto_recibido)
-    if monto_pago <= 0:
-        raise ValueError("El monto del abono debe ser mayor a 0.")
-
-    moneda_pago = moneda_pago_desde_metodo(metodo_pago)
-    tasa_movimiento = None
-    if moneda_pago == "USD":
-        abono_usd = round(monto_pago, 2)
-    elif moneda_pago == "BS":
-        try:
-            tasa_movimiento = obtener_tasa_cobro(cursor)
-        except ValueError:
-            raise ValueError("No hay una tasa de cambio valida para registrar el abono.")
-        abono_usd = round(monto_pago / tasa_movimiento, 2)
-    else:
-        raise ValueError("Metodo de pago invalido")
-
-    if abono_usd <= 0:
-        raise ValueError("El monto del abono debe ser mayor a 0.")
-    if abono_usd > saldo_actual + TOLERANCIA_COBRO:
-        raise ValueError(f"El abono supera el saldo pendiente de {formato_usd(saldo_actual)}.")
-
-    if abs(abono_usd - saldo_actual) <= TOLERANCIA_COBRO:
-        abono_usd = saldo_actual
-
-    nuevo_saldo = round(max(saldo_actual - abono_usd, 0.0), 2)
-    nuevo_estado = "pagada" if nuevo_saldo <= TOLERANCIA_COBRO else "pendiente"
-    fecha = ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S")
-    observacion = (observacion or "").strip()
-    referencia = (referencia or "").strip()
-
-    insertar_movimiento_abono_cxc(
-        cursor,
-        cuenta_id,
-        -abono_usd,
-        moneda_pago,
-        round(monto_pago, 2),
-        tasa_movimiento,
-        metodo_pago,
-        referencia,
-        fecha,
-        usuario_id,
-        observacion,
-    )
-    actualizar_saldo_cxc(cursor, cuenta_id, nuevo_saldo, nuevo_estado)
-
-    return {
-        "cuenta_id": cuenta_id,
-        "cliente": cliente_nombre,
-        "saldo_anterior": saldo_actual,
-        "abono_usd": abono_usd,
-        "nuevo_saldo": nuevo_saldo,
-        "estado": nuevo_estado,
-        "moneda_pago": moneda_pago,
-        "monto_pago": round(monto_pago, 2),
-        "tasa_movimiento": tasa_movimiento,
-        "fecha": fecha,
-    }
-
-
-def obtener_cuenta_cxc_por_orden(cursor, orden_id):
-    cursor.execute("SELECT id FROM cuentas_por_cobrar WHERE orden_id=?", (orden_id,))
-    row = cursor.fetchone()
-    return row[0] if row else None
-
-
-def validar_recobro_cxc(cursor, orden_id):
-    cuenta_id = obtener_cuenta_cxc_por_orden(cursor, orden_id)
-    if cuenta_id is None:
-        return None
-
-    raise ValueError(
-        "Esta orden tiene una cuenta por cobrar asociada y no puede recobrarse directamente. "
-        "Debe utilizarse un proceso administrativo de reversion."
-    )
-
-
-def insertar_movimiento_cxc_inicial(cursor, cuenta_id, saldo_usd, fecha, usuario_id):
-    cursor.execute(
-        """
-        INSERT INTO cuentas_por_cobrar_movimientos (
-            cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
-            tasa_movimiento, metodo_pago, referencia, fecha,
-            usuario_id, observacion, movimiento_revertido_id,
-            referencia_externa_tipo, referencia_externa_id
-        )
-        VALUES (?, 'cargo', ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL)
-        """,
-        (
-            cuenta_id,
-            saldo_usd,
-            fecha,
-            usuario_id,
-            "Cargo inicial generado al cobrar la orden",
-        ),
-    )
-
-
-def crear_cuenta_por_cobrar_inicial(
-    cursor, orden_id, cliente_id, cliente_nombre, saldo_usd, fecha, usuario_id
-):
-    cursor.execute(
-        """
-        INSERT INTO cuentas_por_cobrar (
-            orden_id, cliente_id, cliente_nombre_snapshot, moneda_saldo,
-            monto_original_deuda, saldo_pendiente, fecha_generacion,
-            estado, usuario_id, observacion
-        )
-        VALUES (?, ?, ?, 'USD', ?, ?, ?, 'pendiente', ?, ?)
-        """,
-        (
-            orden_id,
-            cliente_id,
-            cliente_nombre,
-            saldo_usd,
-            saldo_usd,
-            fecha,
-            usuario_id,
-            "Cuenta por cobrar generada al cobrar la orden",
-        ),
-    )
-    cuenta_id = obtener_ultimo_id(cursor, "cuentas_por_cobrar")
-    insertar_movimiento_cxc_inicial(cursor, cuenta_id, saldo_usd, fecha, usuario_id)
-    return cuenta_id
-
-
-def agregar_cargo_cuenta_existente(cursor, cuenta_id, monto_cargo, fecha, usuario_id, observacion):
-    """Agrega deuda NUEVA a una cuenta por cobrar que ya existe (mision
-    "seguridad financiera de agregados post-cobro", seccion 7: una orden
-    que ya genero CxC y despues recibe consumo nuevo debe sumarse a la
-    MISMA cuenta -- cuentas_por_cobrar.orden_id es UNIQUE, nunca se crea
-    una segunda -- sin perder ni duplicar el saldo previo). Inserta un
-    movimiento 'cargo' positivo (mismo patron que
-    insertar_movimiento_cxc_inicial) y reabre la cuenta a 'pendiente' si
-    ya se habia saldado por completo."""
-    cursor.execute(
-        """
-        INSERT INTO cuentas_por_cobrar_movimientos (
-            cuenta_id, tipo, monto_saldo, moneda_pago, monto_pago,
-            tasa_movimiento, metodo_pago, referencia, fecha,
-            usuario_id, observacion, movimiento_revertido_id,
-            referencia_externa_tipo, referencia_externa_id
-        )
-        VALUES (?, 'cargo', ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, NULL)
-        """,
-        (cuenta_id, monto_cargo, fecha, usuario_id, observacion),
-    )
-    cursor.execute("SELECT saldo_pendiente FROM cuentas_por_cobrar WHERE id=?", (cuenta_id,))
-    nuevo_saldo = round(a_float(cursor.fetchone()[0]) + monto_cargo, 2)
-    cursor.execute(
-        "UPDATE cuentas_por_cobrar SET saldo_pendiente=?, estado='pendiente' WHERE id=?",
-        (nuevo_saldo, cuenta_id),
-    )
-    return nuevo_saldo
-
-
 def calcular_pendiente_post_cobro(cursor, orden_id):
     """Mision "seguridad financiera de agregados post-cobro" (secciones
     4-14): una orden ya cobrada (estado='cerrada') pero todavia no
@@ -1585,76 +990,6 @@ def crear_tablas_cierre_jornada():
     )
     conn.commit()
     conn.close()
-
-
-def crear_tablas_cuentas_por_cobrar():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS clientes (
-            id {pk_autoincrement_sql()},
-            nombre TEXT NOT NULL,
-            telefono TEXT,
-            documento TEXT,
-            notas TEXT,
-            activo INTEGER DEFAULT 1,
-            fecha_creacion TEXT
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS cuentas_por_cobrar (
-            id {pk_autoincrement_sql()},
-            orden_id INTEGER NOT NULL,
-            cliente_id INTEGER NOT NULL,
-            cliente_nombre_snapshot TEXT NOT NULL,
-            moneda_saldo TEXT NOT NULL DEFAULT 'USD',
-            monto_original_deuda REAL NOT NULL DEFAULT 0 CHECK (monto_original_deuda >= 0),
-            saldo_pendiente REAL NOT NULL DEFAULT 0 CHECK (saldo_pendiente >= 0),
-            fecha_generacion TEXT,
-            estado TEXT NOT NULL DEFAULT 'pendiente'
-                CHECK (estado IN ('pendiente', 'pagada', 'anulada')),
-            usuario_id INTEGER,
-            observacion TEXT,
-            UNIQUE (orden_id)
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS cuentas_por_cobrar_movimientos (
-            id {pk_autoincrement_sql()},
-            cuenta_id INTEGER NOT NULL,
-            tipo TEXT NOT NULL
-                CHECK (tipo IN ('cargo', 'abono', 'ajuste', 'reverso', 'compensacion')),
-            -- Delta firmado del saldo de deuda, expresado en moneda_saldo de la cuenta.
-            monto_saldo REAL NOT NULL DEFAULT 0,
-            moneda_pago TEXT,
-            monto_pago REAL,
-            tasa_movimiento REAL,
-            metodo_pago TEXT,
-            referencia TEXT,
-            fecha TEXT,
-            usuario_id INTEGER,
-            observacion TEXT,
-            movimiento_revertido_id INTEGER,
-            referencia_externa_tipo TEXT,
-            referencia_externa_id INTEGER
-        )
-        """
-    )
-
-    conn.commit()
-    conn.close()
-
-    asegurar_columna("ordenes", "cliente_id", "INTEGER")
-    asegurar_columna("ordenes", "fecha_venta", "TEXT")
-    asegurar_columna("cuentas_por_cobrar_movimientos", "movimiento_revertido_id", "INTEGER")
 
 
 def crear_tablas_delivery():
@@ -1896,11 +1231,6 @@ def crear_repartidor(cursor, nombre, telefono="", notas="", activo=1):
         ),
     )
     return obtener_ultimo_id(cursor, "repartidores")
-
-
-def orden_tiene_cxc(cursor, orden_id):
-    cursor.execute("SELECT 1 FROM cuentas_por_cobrar WHERE orden_id=? LIMIT 1", (orden_id,))
-    return cursor.fetchone() is not None
 
 
 def orden_tiene_delivery_legacy(cursor, orden_id):
@@ -4156,7 +3486,7 @@ def init_db():
     asegurar_columna_facturar()
     limpiar_facturas_archivadas()
     crear_tablas_cierre_jornada()
-    crear_tablas_cuentas_por_cobrar()
+    crear_tablas_cuentas_por_cobrar(get_connection, pk_autoincrement_sql, asegurar_columna)
     crear_tablas_delivery()
     crear_tablas_comandas()
     crear_tabla_print_jobs(get_connection, pk_autoincrement_sql)
@@ -5224,6 +4554,9 @@ def registrar_abono_cxc(cuenta_id):
             valores["referencia"],
             valores["observacion"],
             session.get("usuario_id"),
+            obtener_tasa_cobro,
+            ahora_venezuela,
+            formato_usd,
         )
         conn.commit()
         conn.close()
@@ -9734,6 +9067,7 @@ def cobrar(orden_id):
                             saldo_cxc_usd,
                             fecha,
                             session.get("usuario_id"),
+                            obtener_ultimo_id,
                         )
 
                     if totales_cobro["delivery_usd"] > TOLERANCIA_COBRO:
@@ -10414,6 +9748,7 @@ def cobrar_pendiente_post_cobro(orden_id):
                         pendiente["pendiente_usd"],
                         fecha,
                         usuario_id,
+                        obtener_ultimo_id,
                     )
                 _aplicar_totales_post_cobro(
                     cursor,

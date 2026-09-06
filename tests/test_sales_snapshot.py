@@ -1613,7 +1613,7 @@ class SalesSnapshotTest(unittest.TestCase):
         scenarios = (
             ("web_app.insertar_cargo_delivery", "pagado"),
             ("web_app.crear_cuenta_por_cobrar_inicial", "parcial"),
-            ("web_app.insertar_movimiento_cxc_inicial", "parcial"),
+            ("app.infrastructure.database.cxc.insertar_movimiento_cxc_inicial", "parcial"),
             ("web_app.descontar_inventario_por_orden", "pagado"),
         )
         for patch_target, modo in scenarios:
@@ -2637,7 +2637,7 @@ class SalesSnapshotTest(unittest.TestCase):
         orden_id = self._create_order(price=20.0)
         cliente_id = self._create_client("Cliente Rollback")
         with mock.patch(
-            "web_app.insertar_movimiento_cxc_inicial",
+            "app.infrastructure.database.cxc.insertar_movimiento_cxc_inicial",
             side_effect=RuntimeError("fallo movimiento cxc"),
         ):
             response = self._charge(
@@ -3081,7 +3081,10 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertIn(b"inconsistencia", response.data)
 
     def test_cxc_abono_rolls_back_on_movement_or_balance_failure(self):
-        for patch_target in ("web_app.insertar_movimiento_abono_cxc", "web_app.actualizar_saldo_cxc"):
+        for patch_target in (
+            "app.application.cxc.abonos.insertar_movimiento_abono_cxc",
+            "app.application.cxc.abonos.actualizar_saldo_cxc",
+        ):
             with self.subTest(patch_target=patch_target):
                 cliente_id = self._create_client(f"Cliente Rollback {patch_target}")
                 orden_id = self._create_order(price=20.0)
