@@ -62,6 +62,9 @@ class DespachoRoutesTest(unittest.TestCase):
         for table in (
             "service_alerts",
             "print_jobs",
+            "cierre_detalle",
+            "cierres_caja",
+            "pagos",
             "orden_comanda_items",
             "orden_comandas",
             "orden_items",
@@ -634,6 +637,159 @@ class EscenarioAutoReviewTest(DespachoRoutesTest):
         html = self._despacho_html()
         self.assertNotIn(f'data-orden-id="{mesa_4}"', html)
         self.assertIn(f'data-orden-id="{mesa_3}"', html)
+
+
+class CierreJornadaDespachoTest(DespachoRoutesTest):
+    """Corrige el hueco detectado antes del push: cerrar_jornada()
+    archivaba (asignaba cierre_id) ordenes ya cobradas sin exigir que
+    Monica las hubiera entregado, haciendolas desaparecer de DESPACHO
+    sin pasar por despachado_at. Ver el docstring de
+    listar_pedidos_despacho() (kitchen_comandas.py) para la unica
+    excepcion aceptada (cierre_id de un dia YA archivado, para no
+    resucitar historico)."""
+
+    def setUp(self):
+        super().setUp()
+        self._login(rol="master")
+
+    def _cierre_ids(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, cierre_id, despachado_at FROM ordenes ORDER BY id")
+        filas = cursor.fetchall()
+        conn.close()
+        return filas
+
+    def test_cierre_bloqueado_por_orden_en_cocina_no_despachada(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        respuesta = self.client.get("/cerrar_jornada")
+
+        self.assertIn("No se puede cerrar la jornada", respuesta.get_data(as_text=True))
+        _id, cierre_id, _despachado_at = self._cierre_ids()[0]
+        self.assertIsNone(cierre_id)
+
+    def test_cierre_bloqueado_por_orden_lista_no_despachada(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET estado='listo' WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        respuesta = self.client.get("/cerrar_jornada")
+
+        self.assertIn("No se puede cerrar la jornada", respuesta.get_data(as_text=True))
+        _id, cierre_id, _despachado_at = self._cierre_ids()[0]
+        self.assertIsNone(cierre_id)
+
+    def test_cierre_bloqueado_por_orden_cerrada_no_despachada(self):
+        # El hueco real: cobrada (estado='cerrada') pero no entregada.
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+
+        respuesta = self.client.get("/cerrar_jornada")
+
+        self.assertIn(
+            "No se puede cerrar la jornada: hay pedidos pendientes de entregar en Despacho.",
+            respuesta.get_data(as_text=True),
+        )
+        _id, cierre_id, despachado_at = self._cierre_ids()[0]
+        self.assertIsNone(cierre_id)
+        self.assertIsNone(despachado_at)
+
+    def test_cierre_permitido_despues_de_entregado(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+        self.client.post(f"/despacho/{orden_id}/entregado")
+
+        respuesta = self.client.get("/cerrar_jornada")
+
+        cuerpo = respuesta.get_data(as_text=True)
+        self.assertNotIn("No se puede cerrar la jornada", cuerpo)
+        _id, cierre_id, despachado_at = self._cierre_ids()[0]
+        self.assertIsNotNone(cierre_id)
+        self.assertIsNotNone(despachado_at)
+
+    def test_historico_archivado_sigue_fuera_de_despacho(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+        self.client.post(f"/despacho/{orden_id}/entregado")
+        self.client.get("/cerrar_jornada")
+
+        html = self._despacho_html()
+        self.assertNotIn(f'data-orden-id="{orden_id}"', html)
+
+    def test_cierre_no_modifica_despachado_at(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+        self.client.post(f"/despacho/{orden_id}/entregado")
+        _id, _cierre_id, despachado_antes = self._cierre_ids()[0]
+
+        self.client.get("/cerrar_jornada")
+
+        _id, _cierre_id, despachado_despues = self._cierre_ids()[0]
+        self.assertEqual(despachado_antes, despachado_despues)
+
+    def test_mensaje_de_bloqueo_es_claro(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+
+        respuesta = self.client.get("/cerrar_jornada")
+
+        cuerpo = respuesta.get_data(as_text=True)
+        self.assertIn(
+            "No se puede cerrar la jornada: hay pedidos pendientes de entregar en Despacho.",
+            cuerpo,
+        )
+        self.assertIn("Despacho", cuerpo)
+
+    def test_orden_eliminada_no_bloquea_cierre(self):
+        # Auditoria: en este proyecto "anular/cancelar" una orden es
+        # eliminarla (DELETE FROM ordenes via /eliminar_orden), no un
+        # estado persistido -- no existe "anulada" en ordenes.estado.
+        # Una vez eliminada, deja de existir para cualquier conteo.
+        pendiente_id = self._crear_orden(referencia="Mesa 1")
+        self._agregar_item(pendiente_id)
+        self.client.get(f"/enviar_cocina/{pendiente_id}")
+
+        cobrada_id = self._crear_orden(referencia="Mesa 2")
+        self._agregar_item(cobrada_id)
+        self.client.get(f"/enviar_cocina/{cobrada_id}")
+        self._marcar_cobrada(cobrada_id)
+        self.client.post(f"/despacho/{cobrada_id}/entregado")
+
+        # "pendiente_id" bloquearia el cierre (en cocina, no despachada);
+        # se cancela/anula eliminandola, como ya permite el sistema.
+        self.client.post(
+            f"/eliminar_orden/{pendiente_id}",
+            data={"clave": web_app.CLAVE_SUPERVISOR},
+        )
+
+        respuesta = self.client.get("/cerrar_jornada")
+
+        cuerpo = respuesta.get_data(as_text=True)
+        self.assertNotIn("No se puede cerrar la jornada", cuerpo)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM ordenes WHERE id=?", (pendiente_id,))
+        existe = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(existe, 0)
 
 
 if __name__ == "__main__":

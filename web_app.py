@@ -10193,11 +10193,17 @@ def cierre():
 
     ordenes_activas = resumen["ordenes_activas"]
     cantidad_ordenes_cerradas = resumen["cantidad_ordenes_cerradas"]
+    pendientes_despacho = contar_pedidos_pendientes_despacho()
 
     if ordenes_activas > 0:
         mensaje = (
             f"<h2 style='color:#e67e22;'>Hay {ordenes_activas} órdenes activas pendientes, "
             "debes cerrarlas o eliminarlas antes de cerrar jornada.</h2>"
+        )
+    elif pendientes_despacho > 0:
+        mensaje = (
+            "<h2 style='color:#e67e22;'>No se puede cerrar la jornada: hay "
+            f"{pendientes_despacho} pedido(s) pendientes de entregar en Despacho.</h2>"
         )
     elif cantidad_ordenes_cerradas == 0:
         mensaje = "<h2 style='color:#dc2626;'>No hay ordenes cerradas para esta jornada.</h2>"
@@ -10205,7 +10211,7 @@ def cierre():
         mensaje = "<h2 style='color:#1a6b4a;'>✅ Jornada lista para cierre</h2>"
 
     boton = ""
-    if ordenes_activas == 0 and cantidad_ordenes_cerradas > 0:
+    if ordenes_activas == 0 and pendientes_despacho == 0 and cantidad_ordenes_cerradas > 0:
         boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:#3DDC84; color:#0F1115; padding:14px 20px; border-radius:12px; font-weight:800; text-decoration:none;">🔒 Confirmar cierre de jornada</a>'
 
     auditoria_html = ""
@@ -10376,6 +10382,25 @@ def cerrar_jornada():
         <h1>🔒 No se puede cerrar la jornada</h1>
         <p>Hay órdenes activas pendientes, debes cerrarlas o eliminarlas antes de cerrar jornada.</p>
         <p>Total pendientes: {resumen['ordenes_activas']}</p>
+        <a href="/" class="volver">🏠 Volver</a>
+        </body>
+        </html>
+        """
+
+    pendientes_despacho = contar_pedidos_pendientes_despacho()
+    if pendientes_despacho > 0:
+        return f"""
+        <html>
+        <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>{estilos_base()}</style>
+        </head>
+        <body style="font-family:Arial; padding:20px;">
+        <h1>🔒 No se puede cerrar la jornada</h1>
+        <p>No se puede cerrar la jornada: hay pedidos pendientes de entregar en Despacho.</p>
+        <p>Total pendientes: {pendientes_despacho}</p>
+        <a href="/despacho" class="volver">🛎️ Ir a Despacho</a>
         <a href="/" class="volver">🏠 Volver</a>
         </body>
         </html>
@@ -10681,6 +10706,18 @@ def marcar_listo(orden_id):
 
 def _despacho_repository():
     return SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
+
+
+def contar_pedidos_pendientes_despacho():
+    """Cuantas ordenes de la jornada actual (cierre_id IS NULL) ya
+    entraron a cocina y todavia no tienen despachado_at -- MISMO
+    criterio exacto que listar_pedidos_despacho() (una sola fuente de
+    verdad). Se usa para bloquear el cierre de jornada: cobrar/facturar
+    una orden no significa que Monica ya la entrego fisicamente (ver
+    listar_pedidos_despacho para la razon de por que cierre_id, y no
+    despachado_at, es la unica excepcion aceptada para el HISTORICO ya
+    archivado)."""
+    return len(_despacho_repository().listar_pedidos_despacho())
 
 
 def _despacho_minutos_transcurridos(fecha_texto, ahora):
