@@ -56,3 +56,5 @@ Thumbs.db
 /dist/
 /release/
 *.zip
+.claude_run_start.txt
+.claude_continuation.md
