@@ -26,6 +26,7 @@ from app.shared.constants.system import (
 )
 from app.domain.sales.calculations import (
     DELIVERY_MONTO_MAXIMO,
+    MODOS_COBRO_VALIDOS,
     TOLERANCIA_COBRO,
     calcular_totales_cobro,
     calcular_totales_financieros_delivery,
@@ -33,6 +34,7 @@ from app.domain.sales.calculations import (
     es_categoria_delivery,
     es_producto_delivery_legacy,
     normalizar_metodo_pago,
+    normalizar_modo_cobro,
     normalizar_monto_delivery,
 )
 from app.domain.sales.item_descriptions import (
@@ -64,10 +66,6 @@ from app.domain.sales.order_totals import (
     calcular_totales_visuales_delivery,
     calcular_totales_visuales_orden,
 )
-from app.domain.sales.receipts import (
-    construir_recibo_cobrado,
-    construir_recibo_provisional,
-)
 from app.infrastructure.database.sales.orders import SqlSalesOrderRepository
 from app.infrastructure.database.sales.catalog import SqlSalesCatalogRepository
 from app.application.self_ordering.catalog import ReglasCatalogoSelfOrdering
@@ -89,9 +87,6 @@ from app.application.kitchen.comandas import (
 from app.infrastructure.database.kitchen_comandas import SqlKitchenComandaRepository
 from app.domain.sales.print_queue import (
     ROL_COCINA,
-    TIPO_JOB_RECIBO,
-    TipoOrdenDesconocido,
-    rol_recibo_por_tipo_orden,
     roles_validos,
 )
 from app.infrastructure.database.print_queue import (
@@ -100,7 +95,6 @@ from app.infrastructure.database.print_queue import (
     RESULTADO_OK,
     RESULTADO_OK_IDEMPOTENTE,
     SqlPrintQueueRepository,
-    crear_job_en_cursor,
     crear_tabla_print_jobs,
 )
 from app.domain.sales.kitchen_ticket_times import formatear_hora_visible
@@ -143,6 +137,10 @@ from app.infrastructure.database.cxc import (
     validar_recobro_cxc,
 )
 from app.application.cxc.abonos import registrar_abono_cuenta
+from app.infrastructure.database.payments import calcular_pendiente_post_cobro
+from app.application.payments.pendiente import dejar_pendiente_a_cliente, pagar_pendiente_ahora
+from app.application.payments.checkout import OrdenYaCerradaOArchivadaError, ejecutar_cobro
+from app.application.payments.receipts import crear_print_job_recibo, obtener_facturas_pendientes
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -749,154 +747,6 @@ def obtener_tasa_cobro(cursor):
     if tasa <= 0:
         raise ValueError("Tasa de cobro invalida")
     return tasa
-
-
-MODOS_COBRO_VALIDOS = {"pagado", "parcial", "credito"}
-
-
-def normalizar_modo_cobro(modo):
-    modo = (modo or "pagado").strip().lower()
-    return modo if modo in MODOS_COBRO_VALIDOS else ""
-
-
-def calcular_pendiente_post_cobro(cursor, orden_id):
-    """Mision "seguridad financiera de agregados post-cobro" (secciones
-    4-14): una orden ya cobrada (estado='cerrada') pero todavia no
-    despachada puede recibir productos nuevos (ver
-    puede_agregar_item_orden en app/domain/sales/order_states.py). Esta
-    funcion es de SOLO LECTURA: compara el total recalculado ahora
-    mismo desde orden_items/delivery contra el snapshot
-    total_cliente_usd que quedo grabado en el ultimo cobro, y devuelve
-    cuanto hay pendiente de cobrar por ese consumo nuevo (o None si no
-    aplica: orden no cerrada, archivada, ya despachada, delivery legacy,
-    o sin diferencia real)."""
-    cursor.execute(
-        """
-        SELECT estado, cierre_id, listo_despacho_at, descuento, delivery_usd,
-               total_cliente_usd
-        FROM ordenes WHERE id=?
-        """,
-        (orden_id,),
-    )
-    row = cursor.fetchone()
-    if not row:
-        return None
-    estado, cierre_id, listo_despacho_at, descuento, delivery_usd, total_previo = row
-    if estado != "cerrada" or orden_archivada(cierre_id) or listo_despacho_at is not None:
-        return None
-
-    cursor.execute(
-        """
-        SELECT oi.producto, oi.precio,
-               (
-                   SELECT c.nombre FROM productos p
-                   LEFT JOIN categorias c ON p.categoria_id = c.id
-                   WHERE LOWER(p.nombre)=LOWER(oi.producto)
-                   ORDER BY COALESCE(p.activo, 1) DESC, p.id
-                   LIMIT 1
-               ) AS categoria
-        FROM orden_items oi
-        WHERE oi.orden_id=?
-        """,
-        (orden_id,),
-    )
-    items = cursor.fetchall()
-    try:
-        tasa_actual = obtener_tasa_cobro(cursor)
-        totales_actuales = calcular_totales_financieros_delivery(
-            items, tasa_actual, a_float(descuento), a_float(delivery_usd)
-        )
-    except ValueError:
-        return None
-
-    if totales_actuales["modo"] == "legacy":
-        # Ordenes con delivery legacy (categoria delivery mezclada en
-        # orden_items) no soportan el flujo de cobro incremental: sus
-        # campos snapshot_* vienen en None (ver calculations.py).
-        return None
-
-    total_actual_usd = totales_actuales["total_cliente_usd"]
-    total_previo_usd = a_float(total_previo)
-    pendiente_usd = round(total_actual_usd - total_previo_usd, 2)
-    if pendiente_usd <= TOLERANCIA_COBRO:
-        return None
-
-    return {
-        "pendiente_usd": pendiente_usd,
-        "total_actual_usd": total_actual_usd,
-        "total_previo_usd": total_previo_usd,
-        "tasa_actual": tasa_actual,
-        "totales_actuales": totales_actuales,
-    }
-
-
-def _aplicar_totales_post_cobro(cursor, orden_id, totales, cliente_id=None, cliente_nombre=None):
-    """Actualiza SOLO los campos agregados de la orden (consumo total
-    recalculado) tras liquidar un cobro incremental. Nunca toca
-    estado/fecha_cobro/fecha_venta/tasa_cobro/descuento ni borra pagos o
-    movimientos previos -- el cobro original queda intacto (mision
-    seccion 8: "no reescribir historia financiera")."""
-    if cliente_id is not None:
-        cursor.execute(
-            """
-            UPDATE ordenes
-            SET subtotal_usd=?, total_usd=?, total_bs=?,
-                venta_restaurante_usd=?, delivery_usd=?,
-                total_cliente_usd=?, total_cliente_bs=?,
-                cliente_id=COALESCE(cliente_id, ?), cliente=COALESCE(cliente, ?)
-            WHERE id=? AND cierre_id IS NULL
-            """,
-            (
-                totales["subtotal_snapshot_usd"],
-                totales["total_usd"],
-                totales["total_bs"],
-                totales["snapshot_venta_restaurante_usd"],
-                totales["snapshot_delivery_usd"],
-                totales["snapshot_total_cliente_usd"],
-                totales["total_cliente_bs"],
-                cliente_id,
-                cliente_nombre,
-                orden_id,
-            ),
-        )
-    else:
-        cursor.execute(
-            """
-            UPDATE ordenes
-            SET subtotal_usd=?, total_usd=?, total_bs=?,
-                venta_restaurante_usd=?, delivery_usd=?,
-                total_cliente_usd=?, total_cliente_bs=?
-            WHERE id=? AND cierre_id IS NULL
-            """,
-            (
-                totales["subtotal_snapshot_usd"],
-                totales["total_usd"],
-                totales["total_bs"],
-                totales["snapshot_venta_restaurante_usd"],
-                totales["snapshot_delivery_usd"],
-                totales["snapshot_total_cliente_usd"],
-                totales["total_cliente_bs"],
-                orden_id,
-            ),
-        )
-    return cursor.rowcount > 0
-
-
-def marcar_items_incluidos_en_snapshot(cursor, orden_id):
-    """Mision "recibos post-cobro": llamar SIEMPRE que una orden termine
-    de cobrarse (cobro inicial o liquidacion de un pendiente
-    incremental): TODOS los orden_items presentes en ese instante pasan
-    a formar parte oficial del snapshot/recibo (incluido_en_snapshot=1).
-    Cualquier item agregado DESPUES de este punto empieza en 0 (ver
-    /agregar) hasta que se liquide con un cobro/cobro-pendiente
-    posterior. Este flag responde "esta oficialmente incluido en el
-    total vigente ahora mismo", no "a que cobro numero pertenece" -- por
-    eso sigue siendo correcto sin importar cuantos ciclos
-    cobrar->agregar->cobrar_pendiente se repitan."""
-    cursor.execute(
-        "UPDATE orden_items SET incluido_en_snapshot=1 WHERE orden_id=?",
-        (orden_id,),
-    )
 
 
 def asegurar_columna(tabla, columna, definicion):
@@ -7105,7 +6955,7 @@ def orden(orden_id):
     repartidores_activos = listar_repartidores(cursor, solo_activos=True)
     repartidor_delivery_actual = obtener_repartidor(cursor, o[12]) if o[12] else None
     tasa = obtener_tasa_actual(cursor)
-    pendiente_post_cobro = calcular_pendiente_post_cobro(cursor, orden_id)
+    pendiente_post_cobro = calcular_pendiente_post_cobro(cursor, orden_id, obtener_tasa_cobro)
     conductor_delivery_info = None
     conductores_delivery_activos = []
     if (o[3] or "").strip().lower() == "delivery":
@@ -8990,112 +8840,44 @@ def cobrar(orden_id):
                     return str(exc), 400
 
                 try:
-                    cursor.execute("DELETE FROM pagos WHERE orden_id = ?", (orden_id,))
-
-                    if insertar_pago_1:
-                        cursor.execute(
-                            """
-                            INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-                            VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (orden_id, metodo1_val, monto1, ref1_val, fecha),
-                        )
-
-                    if insertar_pago_2:
-                        cursor.execute(
-                            """
-                            INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha)
-                            VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (orden_id, metodo2_val, monto2, ref2_val, fecha),
-                        )
-
-                    cursor.execute(
-                        """
-                        UPDATE ordenes
-                        SET estado='cerrada',
-                            descuento=?,
-                            fecha_venta=?,
-                            fecha_cobro=?,
-                            tasa_cobro=?,
-                            subtotal_usd=?,
-                            descuento_bs_snapshot=?,
-                            total_usd=?,
-                            total_bs=?,
-                            venta_restaurante_usd=?,
-                            delivery_usd=?,
-                            total_cliente_usd=?,
-                            total_cliente_bs=?,
-                            cliente_id=?,
-                            cliente=?
-                        WHERE id=?
-                          AND cierre_id IS NULL
-                          AND estado IN ('abierta', 'en cocina', 'listo', 'cerrada')
-                        """,
-                        (
-                            totales_cobro["descuento_bs"],
-                            fecha,
-                            fecha_cobro,
-                            totales_cobro["tasa"],
-                            totales_cobro["subtotal_snapshot_usd"],
-                            totales_cobro["descuento_bs"],
-                            totales_cobro["total_usd"],
-                            totales_cobro["total_bs"],
-                            totales_cobro["snapshot_venta_restaurante_usd"],
-                            totales_cobro["snapshot_delivery_usd"],
-                            totales_cobro["snapshot_total_cliente_usd"],
-                            totales_cobro["total_cliente_bs"],
-                            cliente_id_orden,
-                            cliente_nombre_orden,
-                            orden_id,
-                        ),
+                    ejecutar_cobro(
+                        cursor,
+                        orden_id=orden_id,
+                        fecha=fecha,
+                        fecha_cobro=fecha_cobro,
+                        totales_cobro=totales_cobro,
+                        cliente_id_orden=cliente_id_orden,
+                        cliente_nombre_orden=cliente_nombre_orden,
+                        insertar_pago_1=insertar_pago_1,
+                        metodo1=metodo1_val,
+                        monto1=monto1,
+                        ref1=ref1_val,
+                        insertar_pago_2=insertar_pago_2,
+                        metodo2=metodo2_val,
+                        monto2=monto2,
+                        ref2=ref2_val,
+                        saldo_cxc_usd=saldo_cxc_usd,
+                        cliente_cxc=cliente_cxc,
+                        usuario_id=session.get("usuario_id"),
+                        estado_previo=estado,
+                        repartidor_delivery_cobro=repartidor_delivery_cobro,
+                        obtener_ultimo_id=obtener_ultimo_id,
+                        crear_cuenta_por_cobrar_inicial=crear_cuenta_por_cobrar_inicial,
+                        insertar_cargo_delivery=insertar_cargo_delivery,
+                        emergencia_activa=emergencia_activa,
+                        registrar_auditoria_emergencia=registrar_auditoria_emergencia,
+                        descontar_inventario_por_orden=descontar_inventario_por_orden,
                     )
-
-                    if getattr(cursor, "rowcount", 0) == 0:
-                        conn.rollback()
-                        conn.close()
-                        return "Esta orden ya fue cerrada o pertenece a un cierre de jornada"
-
-                    marcar_items_incluidos_en_snapshot(cursor, orden_id)
-
-                    if saldo_cxc_usd > TOLERANCIA_COBRO:
-                        crear_cuenta_por_cobrar_inicial(
-                            cursor,
-                            orden_id,
-                            cliente_cxc[0],
-                            cliente_cxc[1],
-                            saldo_cxc_usd,
-                            fecha,
-                            session.get("usuario_id"),
-                            obtener_ultimo_id,
-                        )
-
-                    if totales_cobro["delivery_usd"] > TOLERANCIA_COBRO:
-                        insertar_cargo_delivery(
-                            cursor,
-                            orden_id,
-                            repartidor_delivery_cobro,
-                            totales_cobro["delivery_usd"],
-                            fecha,
-                            session.get("usuario_id"),
-                        )
-
-                    if estado == "cerrada" and emergencia_activa(orden_id):
-                        registrar_auditoria_emergencia(
-                            cursor,
-                            orden_id,
-                            "volver_a_cobrar_emergencia",
-                            "Pagos reemplazados durante edicion de emergencia",
-                        )
-
-                    descontar_inventario_por_orden(cursor, orden_id)
-
-                    conn.commit()
+                except OrdenYaCerradaOArchivadaError as exc:
+                    conn.rollback()
                     conn.close()
+                    return str(exc)
                 except Exception:
                     conn.rollback()
                     conn.close()
                     raise
+                conn.commit()
+                conn.close()
                 if estado == "cerrada":
                     desactivar_emergencia_sesion(orden_id)
                 return redirect("/")
@@ -9687,7 +9469,7 @@ def cobrar_pendiente_post_cobro(orden_id):
         return "Orden no encontrada"
     numero_orden, cliente_actual, cliente_id_actual = o
 
-    pendiente = calcular_pendiente_post_cobro(cursor, orden_id)
+    pendiente = calcular_pendiente_post_cobro(cursor, orden_id, obtener_tasa_cobro)
     if pendiente is None:
         conn.close()
         return redirect(f"/orden/{orden_id}")
@@ -9702,62 +9484,32 @@ def cobrar_pendiente_post_cobro(orden_id):
         observacion = f"Consumo adicional post-cobro de la orden #{numero_orden or orden_id}"
         try:
             if accion == "pagar_ahora":
-                metodo = normalizar_metodo_pago(request.form.get("metodo"))
-                if metodo not in METODOS_PAGO_VALIDOS:
-                    raise ValueError("Selecciona un metodo de pago valido")
-                monto = a_float(request.form.get("monto"))
-                if monto <= 0:
-                    raise ValueError("El monto debe ser mayor a 0")
-                referencia = (request.form.get("referencia") or "").strip()
-
-                _pago_bs, pago_usd = convertir_pago_equivalente(metodo, monto, pendiente["tasa_actual"])
-                if pago_usd + TOLERANCIA_COBRO < pendiente["pendiente_usd"]:
-                    raise ValueError(
-                        "El pago no cubre el saldo pendiente nuevo "
-                        f"({formato_usd(pendiente['pendiente_usd'])}). "
-                        "Usa 'Dejar pendiente a un cliente' si no se puede cobrar todo ahora."
-                    )
-
-                cursor.execute(
-                    "INSERT INTO pagos (orden_id, metodo, monto, referencia, fecha) VALUES (?, ?, ?, ?, ?)",
-                    (orden_id, metodo, monto, referencia, fecha),
+                pagar_pendiente_ahora(
+                    cursor,
+                    orden_id=orden_id,
+                    metodo=request.form.get("metodo"),
+                    monto=request.form.get("monto"),
+                    referencia=request.form.get("referencia"),
+                    pendiente=pendiente,
+                    fecha=fecha,
+                    formato_usd=formato_usd,
                 )
-                _aplicar_totales_post_cobro(cursor, orden_id, pendiente["totales_actuales"])
-                marcar_items_incluidos_en_snapshot(cursor, orden_id)
                 conn.commit()
                 conn.close()
                 return redirect(f"/orden/{orden_id}")
 
             elif accion == "dejar_pendiente":
-                cliente_cxc = obtener_cliente_para_cxc(cursor, request.form.get("cliente_id"))
-                if cuenta_id_existente is not None:
-                    agregar_cargo_cuenta_existente(
-                        cursor,
-                        cuenta_id_existente,
-                        pendiente["pendiente_usd"],
-                        fecha,
-                        usuario_id,
-                        observacion,
-                    )
-                else:
-                    crear_cuenta_por_cobrar_inicial(
-                        cursor,
-                        orden_id,
-                        cliente_cxc[0],
-                        cliente_cxc[1],
-                        pendiente["pendiente_usd"],
-                        fecha,
-                        usuario_id,
-                        obtener_ultimo_id,
-                    )
-                _aplicar_totales_post_cobro(
+                dejar_pendiente_a_cliente(
                     cursor,
-                    orden_id,
-                    pendiente["totales_actuales"],
-                    cliente_id=cliente_cxc[0],
-                    cliente_nombre=cliente_cxc[1],
+                    orden_id=orden_id,
+                    cliente_id_form=request.form.get("cliente_id"),
+                    cuenta_id_existente=cuenta_id_existente,
+                    pendiente=pendiente,
+                    fecha=fecha,
+                    usuario_id=usuario_id,
+                    observacion=observacion,
+                    obtener_ultimo_id=obtener_ultimo_id,
                 )
-                marcar_items_incluidos_en_snapshot(cursor, orden_id)
                 conn.commit()
                 conn.close()
                 return redirect(f"/orden/{orden_id}")
@@ -11696,88 +11448,7 @@ def facturas_pendientes():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT o.id, o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
-                   o.factura_reimpresion_token, o.fecha_hora, o.fecha_cobro,
-                   o.tasa_cobro, o.subtotal_usd, o.descuento_bs_snapshot,
-                   o.total_usd, o.total_bs, o.venta_restaurante_usd,
-                   o.delivery_usd, o.total_cliente_usd, o.total_cliente_bs,
-                   o.descuento
-            FROM ordenes o
-            LEFT JOIN usuarios u ON o.usuario_id = u.id
-            WHERE o.facturar = 1
-              AND o.cierre_id IS NULL
-            """
-        )
-        ordenes = cursor.fetchall()
-        resultado = []
-
-        if not ordenes:
-            conn.close()
-            return jsonify(resultado)
-
-        orden_ids = [o[0] for o in ordenes]
-        placeholders = ",".join("?" for _ in orden_ids)
-        cursor.execute(
-            f"""
-            SELECT orden_id, producto, precio, COALESCE(indicacion, '')
-            FROM orden_items
-            WHERE orden_id IN ({placeholders})
-              AND COALESCE(incluido_en_snapshot, 1)=1
-            ORDER BY id ASC
-            """,
-            orden_ids,
-        )
-
-        items_por_orden = defaultdict(list)
-        for orden_id, producto, precio, indicacion in cursor.fetchall():
-            items_por_orden[orden_id].append((producto, precio, indicacion))
-
-        tasa_actual = None
-        if any(o[9] is None for o in ordenes):
-            tasa_actual = obtener_tasa_actual(cursor)
-
-        for o in ordenes:
-            items = items_por_orden[o[0]]
-            tasa_cobro = o[9]
-
-            if tasa_cobro is None:
-                recibo = construir_recibo_provisional(
-                    items,
-                    delivery_usd=o[15],
-                    descuento_bs=o[18],
-                    tasa_actual=tasa_actual,
-                )
-            else:
-                recibo = construir_recibo_cobrado(
-                    items,
-                    tasa_cobro=tasa_cobro,
-                    subtotal_usd=o[10],
-                    descuento_bs=o[11],
-                    total_usd=o[12],
-                    total_bs=o[13],
-                    venta_restaurante_usd=o[14],
-                    delivery_usd=o[15],
-                    total_cliente_usd=o[16],
-                    total_cliente_bs=o[17],
-                )
-
-            resultado.append(
-                {
-                    "id": o[0],
-                    "numero": o[1],
-                    "tipo": o[2],
-                    "cliente": o[3],
-                    "referencia": o[4],
-                    "usuario": o[5] if o[5] else "N/A",
-                    "fecha_hora": o[8] if o[8] else o[7],
-                    "evento_impresion": f"{o[0]}-{o[6] if o[6] else 'base'}",
-                    **recibo,
-                }
-            )
-
+        resultado = obtener_facturas_pendientes(cursor, obtener_tasa_actual)
         conn.close()
         if resultado:
             print(f"Facturas pendientes devueltas: {len(resultado)}")
@@ -11788,97 +11459,6 @@ def facturas_pendientes():
         return jsonify([])
 
 
-def _crear_print_job_recibo(cursor, orden_id, token, fecha_evento):
-    """Snapshot inmutable del recibo (mismo contrato que /facturas_pendientes,
-    construido con la MISMA autoridad financiera -- construir_recibo_provisional/
-    construir_recibo_cobrado, nunca recalculado aparte) guardado como
-    payload de un print_job nuevo. `token` es None para la activacion
-    normal (evento "base") o el token de una reimpresion explicita (evento
-    distinto, mision seccion 43: nunca se confunde con el original).
-
-    Si el tipo de orden no es uno de los 3 conocidos (Mesa/Delivery/Para
-    llevar), NO se crea el job (se loguea y se deja constancia): mejor no
-    enrutar un recibo a un rol adivinado que enrutarlo mal. El polling
-    legacy de /facturas_pendientes sigue funcionando como red de
-    seguridad mientras tanto.
-    """
-    cursor.execute(
-        """
-        SELECT o.numero_orden, o.tipo, o.cliente, o.referencia, u.nombre,
-               o.fecha_hora, o.fecha_cobro, o.tasa_cobro, o.subtotal_usd,
-               o.descuento_bs_snapshot, o.total_usd, o.total_bs,
-               o.venta_restaurante_usd, o.delivery_usd, o.total_cliente_usd,
-               o.total_cliente_bs, o.descuento
-        FROM ordenes o
-        LEFT JOIN usuarios u ON o.usuario_id = u.id
-        WHERE o.id=?
-        LIMIT 1
-        """,
-        (orden_id,),
-    )
-    o = cursor.fetchone()
-    if o is None:
-        return False
-
-    try:
-        rol = rol_recibo_por_tipo_orden(o[1])
-    except TipoOrdenDesconocido as e:
-        print(f"ADVERTENCIA: no se creo print_job de recibo para orden {orden_id}: {e}")
-        return False
-
-    cursor.execute(
-        """
-        SELECT producto, precio, COALESCE(indicacion, '')
-        FROM orden_items
-        WHERE orden_id=? AND COALESCE(incluido_en_snapshot, 1)=1
-        ORDER BY id ASC
-        """,
-        (orden_id,),
-    )
-    items = cursor.fetchall()
-
-    tasa_cobro = o[7]
-    if tasa_cobro is None:
-        tasa_actual = obtener_tasa_actual(cursor)
-        recibo = construir_recibo_provisional(
-            items, delivery_usd=o[13], descuento_bs=o[16], tasa_actual=tasa_actual
-        )
-    else:
-        recibo = construir_recibo_cobrado(
-            items,
-            tasa_cobro=tasa_cobro,
-            subtotal_usd=o[8],
-            descuento_bs=o[9],
-            total_usd=o[10],
-            total_bs=o[11],
-            venta_restaurante_usd=o[12],
-            delivery_usd=o[13],
-            total_cliente_usd=o[14],
-            total_cliente_bs=o[15],
-        )
-
-    payload = {
-        "id": orden_id,
-        "numero": o[0],
-        "tipo": o[1],
-        "cliente": o[2],
-        "referencia": o[3],
-        "usuario": o[4] if o[4] else "N/A",
-        "fecha_hora": o[6] if o[6] else o[5],
-        **recibo,
-    }
-    event_key = f"{orden_id}-{token if token else 'base'}"
-    crear_job_en_cursor(
-        cursor,
-        event_key=event_key,
-        job_type=TIPO_JOB_RECIBO,
-        required_role=rol,
-        payload=payload,
-        fecha=fecha_evento,
-    )
-    return True
-
-
 @app.route("/activar_factura/<int:orden_id>")
 def activar_factura(orden_id):
     conn = get_connection()
@@ -11887,7 +11467,9 @@ def activar_factura(orden_id):
         "UPDATE ordenes SET facturar=1, factura_reimpresion_token=NULL WHERE id=? AND cierre_id IS NULL",
         (orden_id,),
     )
-    _crear_print_job_recibo(cursor, orden_id, None, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"))
+    crear_print_job_recibo(
+        cursor, orden_id, None, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"), obtener_tasa_actual
+    )
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -11925,7 +11507,9 @@ def reimprimir_factura(orden_id):
         """,
         (token, orden_id),
     )
-    _crear_print_job_recibo(cursor, orden_id, token, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"))
+    crear_print_job_recibo(
+        cursor, orden_id, token, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"), obtener_tasa_actual
+    )
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")

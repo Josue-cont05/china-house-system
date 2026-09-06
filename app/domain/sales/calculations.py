@@ -24,6 +24,14 @@ def normalizar_metodo_pago(metodo):
     return metodo
 
 
+MODOS_COBRO_VALIDOS = {"pagado", "parcial", "credito"}
+
+
+def normalizar_modo_cobro(modo):
+    modo = (modo or "pagado").strip().lower()
+    return modo if modo in MODOS_COBRO_VALIDOS else ""
+
+
 def es_categoria_delivery(categoria):
     return (categoria or "").strip().lower() == "delivery"
 

@@ -3597,7 +3597,7 @@ class PostCobroIncrementalTest(unittest.TestCase):
         # 4) El saldo pendiente nuevo es EXACTAMENTE Neko Clan + 2 Coca-Cola = $4, nunca $10 de nuevo.
         conn = self._conn()
         cursor = conn.cursor()
-        pendiente = web_app.calcular_pendiente_post_cobro(cursor, orden_id)
+        pendiente = web_app.calcular_pendiente_post_cobro(cursor, orden_id, web_app.obtener_tasa_cobro)
         conn.close()
         self.assertIsNotNone(pendiente)
         self.assertEqual(pendiente["pendiente_usd"], 4.0)
