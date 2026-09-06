@@ -114,6 +114,11 @@ from app.infrastructure.database.service_alerts import (
     crear_alerta_en_cursor,
     crear_tabla_service_alerts,
 )
+from app.infrastructure.database.notifications import (
+    SqlNotificationsRepository,
+    crear_notificacion,
+    crear_tabla_notifications,
+)
 from app.infrastructure.database.self_ordering_links import SqlSelfOrderLinkRepository
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
@@ -2385,6 +2390,201 @@ def usuario_puede_ver_inventario():
     return usuario_rol() in ("master", "cocina", "cocina_reportes")
 
 
+# ---------------------------------------------------------------------------
+# NOTIFICATIONS -- motor general de notificaciones internas (mision "engine
+# general de notificaciones" + "Mesa" + "Pick Up" + "Delivery"). Ver
+# app/infrastructure/database/notifications.py para el porque de la
+# independencia respecto a print_jobs/service_alerts.
+# ---------------------------------------------------------------------------
+
+def _notificaciones_repo():
+    return SqlNotificationsRepository(get_connection)
+
+
+def _crear_notificacion(event_key, usuario_destino_id, tipo, titulo, mensaje, orden_id=None, datos=None):
+    return crear_notificacion(
+        get_connection,
+        event_key=event_key,
+        usuario_destino_id=usuario_destino_id,
+        tipo=tipo,
+        titulo=titulo,
+        mensaje=mensaje,
+        orden_id=orden_id,
+        datos=datos,
+        fecha=ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
+def obtener_conductor_delivery_por_defecto(cursor):
+    """El UNICO usuario configurado como boton directo al crear un
+    Delivery (mision seccion 31: "Configuracion del driver por
+    defecto"). Nunca un nombre hardcodeado -- si nadie esta marcado
+    como default, devuelve None y la UI cae a "Buscar conductor"."""
+    cursor.execute(
+        """
+        SELECT id, nombre
+        FROM usuarios
+        WHERE es_conductor_delivery_default=1 AND COALESCE(activo, 1)=1
+        ORDER BY id LIMIT 1
+        """
+    )
+    return cursor.fetchone()
+
+
+def listar_conductores_delivery_activos(cursor):
+    cursor.execute(
+        """
+        SELECT id, nombre
+        FROM usuarios
+        WHERE es_conductor_delivery=1 AND COALESCE(activo, 1)=1
+        ORDER BY nombre
+        """
+    )
+    return cursor.fetchall()
+
+
+def listar_coordinadores_delivery(cursor):
+    """Mision seccion 34: mecanismo central para quienes reciben aviso
+    cuando un Delivery queda NEEDS_DRIVER -- nunca una lista de nombres
+    repetida por el codigo."""
+    cursor.execute(
+        """
+        SELECT id, nombre
+        FROM usuarios
+        WHERE es_coordinador_delivery=1 AND COALESCE(activo, 1)=1
+        ORDER BY nombre
+        """
+    )
+    return cursor.fetchall()
+
+
+ESTADO_DELIVERY_ASIGNADO_INTERNO = "ASSIGNED_INTERNAL"
+ESTADO_DELIVERY_NECESITA_CONDUCTOR = "NEEDS_DRIVER"
+ESTADO_DELIVERY_EXTERNO = "EXTERNAL"
+
+
+def notificar_orden_lista_para_retirar(orden_id, usuario_destino_id, tipo_orden, numero_orden, referencia, cliente):
+    """ORDER_READY_FOR_HANDOFF (mision seccion 26/27/28): Monica termino
+    de armar el pedido en Despacho. NUNCA dice "entregado" -- el
+    responsable todavia debe retirarlo (mesonero) o avisar al cliente
+    (Pick Up)."""
+    if not usuario_destino_id:
+        return
+    tipo_normalizado = (tipo_orden or "").strip().lower()
+    numero_texto = texto_numero_orden(numero_orden)
+    if tipo_normalizado == "mesa":
+        titulo = f"🍜 {html_lib.escape(referencia or 'MESA')} — PEDIDO LISTO"
+        mensaje = f"El pedido {numero_texto} esta listo en Despacho. Retiralo para llevarlo a la mesa."
+    elif tipo_normalizado in ("para llevar", "pickup", "pick up"):
+        titulo = "🛍️ PICK UP LISTO"
+        mensaje = f"El pedido {numero_texto}" + (f" (Cliente: {cliente})" if cliente else "") + " esta listo. Puedes avisarle al cliente para retirar."
+    else:
+        titulo = f"🛵 DELIVERY {numero_texto} LISTO"
+        mensaje = "El pedido esta listo en Despacho. Ya puedes retirarlo para salir."
+
+    _crear_notificacion(
+        f"ORDER_READY_FOR_HANDOFF:{orden_id}",
+        usuario_destino_id,
+        "ORDER_READY_FOR_HANDOFF",
+        titulo,
+        mensaje,
+        orden_id=orden_id,
+    )
+
+
+def notificar_delivery_asignado(orden_id, conductor_user_id, numero_orden, cliente, referencia):
+    _crear_notificacion(
+        f"DELIVERY_CREATED_ASSIGNED:{orden_id}:{conductor_user_id}",
+        conductor_user_id,
+        "DELIVERY_CREATED_ASSIGNED",
+        "🛵 NUEVO DELIVERY ASIGNADO",
+        (
+            f"Pedido {texto_numero_orden(numero_orden)}"
+            + (f"\nCliente: {cliente}" if cliente else "")
+            + (f"\nReferencia/Zona: {referencia}" if referencia else "")
+            + "\n\nTienes asignado este delivery."
+        ),
+        orden_id=orden_id,
+    )
+
+
+def notificar_delivery_necesita_conductor(cursor, orden_id, numero_orden, cliente, referencia):
+    mensaje = (
+        f"Pedido {texto_numero_orden(numero_orden)}"
+        + (f"\nCliente: {cliente}" if cliente else "")
+        + (f"\nReferencia/Zona: {referencia}" if referencia else "")
+        + "\n\nEntro un delivery y hay que conseguir conductor."
+    )
+    coordinadores = listar_coordinadores_delivery(cursor)
+    if not coordinadores:
+        print(f"ADVERTENCIA: Delivery {orden_id} quedo NEEDS_DRIVER pero no hay coordinadores configurados.")
+        return
+    for coordinador_id, _nombre in coordinadores:
+        _crear_notificacion(
+            f"DELIVERY_NEEDS_DRIVER:{orden_id}:{coordinador_id}",
+            coordinador_id,
+            "DELIVERY_NEEDS_DRIVER",
+            "⚠️ NUEVO DELIVERY — CONDUCTOR PENDIENTE",
+            mensaje,
+            orden_id=orden_id,
+        )
+
+
+def _render_panel_conductor_delivery(orden_id, info, conductores_activos):
+    """Mision seccion 36 "asignacion posterior de conductor": UI minima
+    para resolver NEEDS_DRIVER/EXTERNO o reasignar un Delivery interno,
+    sin necesitar una pantalla administrativa aparte."""
+    if info is None:
+        return ""
+
+    estado_texto = {
+        ESTADO_DELIVERY_ASIGNADO_INTERNO: f"🛵 Asignado a {html_lib.escape(info['nombre'] or '?')}",
+        ESTADO_DELIVERY_NECESITA_CONDUCTOR: "⚠️ Sin conductor (NEEDS_DRIVER)",
+        ESTADO_DELIVERY_EXTERNO: "🛵 Conductor externo",
+    }.get(info["status"], info["status"])
+
+    opciones = "".join(
+        f'<option value="{cid}" {"selected" if cid == info["driver_id"] else ""}>{html_lib.escape(nombre)}</option>'
+        for cid, nombre in conductores_activos
+    )
+
+    return f"""
+    <div class="delivery-panel">
+        <h3>🛵 Conductor de Delivery</h3>
+        <div class="delivery-help"><b>{estado_texto}</b></div>
+        <form method="post" action="/orden/{orden_id}/delivery_conductor" style="margin-top:10px;">
+            <input type="hidden" name="modo" value="interno">
+            <label>Asignar conductor interno</label>
+            <select name="conductor_user_id">
+                <option value="">Selecciona...</option>
+                {opciones}
+            </select>
+            <button class="btn" type="submit">Asignar</button>
+        </form>
+        <form method="post" action="/orden/{orden_id}/delivery_conductor" style="margin-top:8px;">
+            <input type="hidden" name="modo" value="externo">
+            <button class="btn" type="submit">Marcar como conductor EXTERNO</button>
+        </form>
+    </div>
+    """
+
+
+def notificar_delivery_conductor_asignado_posteriormente(orden_id, conductor_user_id, numero_orden, cliente, referencia):
+    _crear_notificacion(
+        f"DELIVERY_DRIVER_ASSIGNED:{orden_id}:{conductor_user_id}",
+        conductor_user_id,
+        "DELIVERY_DRIVER_ASSIGNED",
+        "🛵 NUEVO DELIVERY ASIGNADO",
+        (
+            f"Pedido {texto_numero_orden(numero_orden)}"
+            + (f"\nCliente: {cliente}" if cliente else "")
+            + (f"\nReferencia/Zona: {referencia}" if referencia else "")
+            + "\n\nTienes asignado este delivery."
+        ),
+        orden_id=orden_id,
+    )
+
+
 def usuario_puede_editar_inventario():
     return usuario_rol() == "master"
 
@@ -2898,12 +3098,124 @@ def estilos_base():
 
 
 def barra_superior(extra_links=""):
+    usuario_id = session.get("usuario_id")
+    campana_html = ""
+    if usuario_id:
+        campana_html = """
+        <div class="campana-wrap" style="position:relative;">
+            <button type="button" id="campanaNotifBtn" style="background:none;border:none;font-size:20px;cursor:pointer;position:relative;color:inherit;">
+                🔔<span id="campanaNotifContador" style="display:none;position:absolute;top:-6px;right:-8px;background:#ef4444;color:white;border-radius:999px;font-size:10px;font-weight:800;padding:2px 5px;">0</span>
+            </button>
+            <div id="campanaNotifPanel" style="display:none;position:absolute;right:0;top:32px;width:300px;max-height:360px;overflow-y:auto;background:#20242B;border:1px solid #31363F;border-radius:10px;box-shadow:0 10px 24px rgba(0,0,0,0.3);z-index:1000;padding:6px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;">
+                    <b style="font-size:13px;color:#F4F4F4;">Notificaciones</b>
+                    <button type="button" id="campanaMarcarTodas" style="background:none;border:none;color:#3DDC84;font-size:12px;cursor:pointer;">Marcar todas leidas</button>
+                </div>
+                <div id="campanaNotifLista" style="display:flex;flex-direction:column;gap:4px;"></div>
+            </div>
+        </div>
+        <script>
+        (function() {{
+            var SONIDO_NOTIF = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+            var yaSonadas = new Set();
+            try {{
+                (JSON.parse(sessionStorage.getItem("notif_sonadas") || "[]")).forEach(function(id) {{ yaSonadas.add(id); }});
+            }} catch (e) {{}}
+            function guardarSonadas() {{
+                try {{ sessionStorage.setItem("notif_sonadas", JSON.stringify(Array.from(yaSonadas))); }} catch (e) {{}}
+            }}
+            var btn = document.getElementById("campanaNotifBtn");
+            var panel = document.getElementById("campanaNotifPanel");
+            var contador = document.getElementById("campanaNotifContador");
+            var lista = document.getElementById("campanaNotifLista");
+            var marcarTodas = document.getElementById("campanaMarcarTodas");
+            var primerCarga = true;
+
+            function tiempoTranscurrido(fechaTexto) {{
+                try {{
+                    var entonces = new Date(fechaTexto.replace(" ", "T") + "-04:00").getTime();
+                    var minutos = Math.max(Math.round((Date.now() - entonces) / 60000), 0);
+                    if (minutos < 1) return "ahora";
+                    if (minutos < 60) return minutos + " min";
+                    var horas = Math.round(minutos / 60);
+                    return horas + " h";
+                }} catch (e) {{ return ""; }}
+            }}
+
+            function escapeHtml(texto) {{
+                var div = document.createElement("div");
+                div.textContent = texto == null ? "" : String(texto);
+                return div.innerHTML;
+            }}
+
+            function render(notificaciones) {{
+                if (!notificaciones.length) {{
+                    lista.innerHTML = '<div style="padding:14px;color:#7C828C;font-size:13px;">Sin notificaciones.</div>';
+                    return;
+                }}
+                lista.innerHTML = notificaciones.map(function(n) {{
+                    var estilo = n.leida ? "opacity:0.6;" : "border-left:3px solid #3DDC84;";
+                    var enlace = n.orden_id ? '<a href="/orden/' + encodeURIComponent(n.orden_id) + '" style="color:#3DDC84;font-size:11px;">Ver orden</a>' : '';
+                    return '<div class="campana-item" data-id="' + n.id + '" data-leida="' + (n.leida ? "1" : "0") + '" style="padding:8px;border-radius:6px;background:#181B20;cursor:pointer;' + estilo + '">' +
+                        '<div style="font-size:13px;font-weight:800;color:#F4F4F4;">' + escapeHtml(n.titulo) + '</div>' +
+                        '<div style="font-size:12px;color:#B0B6BE;white-space:pre-line;margin-top:2px;">' + escapeHtml(n.mensaje) + '</div>' +
+                        '<div style="display:flex;justify-content:space-between;margin-top:4px;">' +
+                        '<span style="font-size:11px;color:#7C828C;">' + tiempoTranscurrido(n.created_at) + '</span>' + enlace +
+                        '</div></div>';
+                }}).join("");
+                lista.querySelectorAll(".campana-item").forEach(function(el) {{
+                    el.addEventListener("click", function(ev) {{
+                        if (ev.target.tagName === "A") return;
+                        if (el.dataset.leida === "1") return;
+                        fetch("/api/notificaciones/" + el.dataset.id + "/leer", {{ method: "POST" }}).then(actualizar);
+                    }});
+                }});
+            }}
+
+            function actualizar() {{
+                fetch("/api/notificaciones").then(function(r) {{ return r.json(); }}).then(function(data) {{
+                    if (!data || !data.ok) return;
+                    contador.textContent = data.no_leidas;
+                    contador.style.display = data.no_leidas > 0 ? "block" : "none";
+                    render(data.notificaciones);
+                    if (!primerCarga) {{
+                        var huboNueva = false;
+                        data.notificaciones.forEach(function(n) {{
+                            if (!n.leida && !yaSonadas.has(n.id)) {{ yaSonadas.add(n.id); huboNueva = true; }}
+                        }});
+                        if (huboNueva) {{
+                            try {{ new Audio(SONIDO_NOTIF).play().catch(function() {{}}); }} catch (e) {{}}
+                            guardarSonadas();
+                        }}
+                    }} else {{
+                        data.notificaciones.forEach(function(n) {{ if (!n.leida) yaSonadas.add(n.id); }});
+                        guardarSonadas();
+                        primerCarga = false;
+                    }}
+                }}).catch(function() {{}});
+            }}
+
+            btn.addEventListener("click", function() {{
+                panel.style.display = panel.style.display === "none" ? "block" : "none";
+            }});
+            document.addEventListener("click", function(ev) {{
+                if (!btn.contains(ev.target) && !panel.contains(ev.target)) {{ panel.style.display = "none"; }}
+            }});
+            marcarTodas.addEventListener("click", function() {{
+                fetch("/api/notificaciones/leer_todas", {{ method: "POST" }}).then(actualizar);
+            }});
+
+            actualizar();
+            setInterval(actualizar, 5000);
+        }})();
+        </script>
+        """
     return f"""
     <style>{estilos_base()}</style>
     <div class="header">
         <div class="titulo">🐱 Neko Wok <span class="brand-dot">·</span> <span style="font-size:14px;font-weight:500;opacity:0.85;">POS</span></div>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
-            <div style="font-size:13px; opacity:0.85;">👤 <b>{usuario_activo()}</b></div>
+            <div style="font-size:13px; opacity:0.85; display:flex; align-items:center; gap:10px;">{campana_html}👤 <b>{usuario_activo()}</b></div>
             <div class="menu-top">
                 {extra_links}
                 <a href="/logout">🚪 Salir</a>
@@ -3851,6 +4163,18 @@ def init_db():
     migrar_listo_despacho_desde_legado()
     asegurar_columna("categorias", "requiere_atencion_despacho", "INTEGER DEFAULT 0")
     migrar_categoria_bebidas_requiere_despacho()
+    crear_tabla_notifications(get_connection, pk_autoincrement_sql)
+    # Delivery interno (mision "delivery"): flags sobre usuarios reales,
+    # nunca nombres hardcodeados en logica. es_conductor_delivery marca
+    # quien puede aparecer en "buscar conductor"; es_conductor_delivery_default
+    # marca al UNICO usuario cuyo boton directo aparece al crear un
+    # Delivery (ej. "JOSUE"); es_coordinador_delivery marca a quienes
+    # reciben aviso cuando un Delivery queda NEEDS_DRIVER.
+    asegurar_columna("usuarios", "es_conductor_delivery", "INTEGER DEFAULT 0")
+    asegurar_columna("usuarios", "es_conductor_delivery_default", "INTEGER DEFAULT 0")
+    asegurar_columna("usuarios", "es_coordinador_delivery", "INTEGER DEFAULT 0")
+    asegurar_columna("ordenes", "delivery_driver_user_id", "INTEGER")
+    asegurar_columna("ordenes", "delivery_driver_status", "TEXT")
 
 
 def migrar_listo_despacho_desde_legado():
@@ -4896,7 +5220,9 @@ def usuarios():
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin, COALESCE(activo, 1)
+        SELECT id, nombre, COALESCE(rol, 'mesonera'), pin, COALESCE(activo, 1),
+               COALESCE(es_conductor_delivery, 0), COALESCE(es_conductor_delivery_default, 0),
+               COALESCE(es_coordinador_delivery, 0)
         FROM usuarios
         ORDER BY COALESCE(activo, 1) DESC, rol ASC, nombre ASC
         """
@@ -4904,9 +5230,18 @@ def usuarios():
     filas_usuarios = cursor.fetchall()
     conn.close()
 
+    def _boton_flag(usuario_id, flag, activo_flag, etiqueta):
+        estilo = "background:var(--verde-neko);color:#0F1115;" if activo_flag else "background:var(--panel-secundario);color:var(--texto);"
+        return f"""
+        <form method="post" action="/usuarios/{usuario_id}/delivery_flags" style="margin:0;display:inline;">
+            <input type="hidden" name="flag" value="{flag}">
+            <button type="submit" class="btn-accion" style="{estilo}border:1px solid var(--borde);cursor:pointer;">{etiqueta}</button>
+        </form>
+        """
+
     filas_activos = ""
     filas_inactivos = ""
-    for usuario_id, nombre, rol, pin, activo in filas_usuarios:
+    for usuario_id, nombre, rol, pin, activo, es_conductor, es_conductor_default, es_coordinador in filas_usuarios:
         pin_estado = "Configurado" if pin else "Sin configurar"
         badge_activo = (
             '<span style="background:#dcfce7;color:#166534;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:700;">Activo</span>'
@@ -4915,6 +5250,11 @@ def usuarios():
         )
         toggle_label = "Desactivar" if activo else "Activar"
         toggle_style = "background:#ef4444;" if activo else "background:#16a34a;"
+        flags_delivery_html = (
+            _boton_flag(usuario_id, "conductor", es_conductor, "🛵 Conductor")
+            + _boton_flag(usuario_id, "conductor_default", es_conductor_default, "⭐ Conductor por defecto")
+            + _boton_flag(usuario_id, "coordinador", es_coordinador, "📋 Coordinador delivery")
+        )
         fila = f"""
         <tr>
             <td>{html_lib.escape(nombre or '')}</td>
@@ -4927,6 +5267,7 @@ def usuarios():
                     <button type="submit" class="btn-accion" style="{toggle_style}color:white;border:none;cursor:pointer;">{toggle_label}</button>
                 </form>
             </td>
+            <td style="display:flex;gap:6px;flex-wrap:wrap;">{flags_delivery_html if activo else '<span style="color:var(--texto-secundario);font-size:12px;">Solo usuarios activos</span>'}</td>
         </tr>
         """
         if activo:
@@ -4991,14 +5332,14 @@ def usuarios():
         <div class="card">
             <p class="seccion-titulo">✅ Usuarios activos</p>
             <table>
-                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Estado</th><th>Acciones</th></tr></thead>
+                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Estado</th><th>Acciones</th><th>Delivery</th></tr></thead>
                 <tbody>{filas_activos}</tbody>
             </table>
         </div>
         <div class="card">
             <p class="seccion-titulo">🚫 Usuarios inactivos</p>
             <table>
-                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Estado</th><th>Acciones</th></tr></thead>
+                <thead><tr><th>Nombre</th><th>Rol</th><th>PIN</th><th>Estado</th><th>Acciones</th><th>Delivery</th></tr></thead>
                 <tbody>{filas_inactivos}</tbody>
             </table>
         </div>
@@ -5035,6 +5376,44 @@ def crear_usuario():
         """,
         (nombre, pin, rol, activo),
     )
+    conn.commit()
+    conn.close()
+    return redirect("/usuarios")
+
+
+@app.route("/usuarios/<int:usuario_id>/delivery_flags", methods=["POST"])
+def alternar_flag_delivery_usuario(usuario_id):
+    """Mision seccion 30/31/34: configuracion central de quien puede ser
+    conductor interno, quien es el conductor por defecto (UNICO -- se
+    desmarca de los demas al marcar uno nuevo) y quienes son
+    coordinadores de delivery. Nada de esto vive en logica de negocio
+    hardcodeada: son flags reales sobre `usuarios`."""
+    if not usuario_es_master():
+        return "Acceso denegado", 403
+
+    flag = (request.form.get("flag") or "").strip()
+    columnas = {
+        "conductor": "es_conductor_delivery",
+        "conductor_default": "es_conductor_delivery_default",
+        "coordinador": "es_coordinador_delivery",
+    }
+    columna = columnas.get(flag)
+    if not columna:
+        return "Flag invalido", 400
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT COALESCE({columna}, 0) FROM usuarios WHERE id=?", (usuario_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return "Usuario no encontrado", 404
+
+    nuevo_valor = 0 if row[0] else 1
+    if flag == "conductor_default" and nuevo_valor == 1:
+        # Un unico conductor por defecto a la vez.
+        cursor.execute("UPDATE usuarios SET es_conductor_delivery_default=0")
+    cursor.execute(f"UPDATE usuarios SET {columna}=? WHERE id=?", (nuevo_valor, usuario_id))
     conn.commit()
     conn.close()
     return redirect("/usuarios")
@@ -5166,7 +5545,9 @@ def index():
         """
     )
     ordenes = cursor.fetchall()
+    conductor_default = obtener_conductor_delivery_por_defecto(cursor)
     conn.close()
+    conductor_default_nombre = html_lib.escape(conductor_default[1]) if conductor_default else ""
 
     html = """
     <html>
@@ -5332,6 +5713,14 @@ def index():
                     <label style="font-size:13px;font-weight:700;color:#6b7280;">Referencia</label>
                     <input name="referencia" id="referenciaLibreOrden" placeholder="Nombre, telefono o referencia">
                 </div>
+                <div id="grupoConductorDelivery" style="display:none;">
+                    <label style="font-size:13px;font-weight:700;color:#6b7280;">¿Quién hará el delivery?</label>
+                    <input type="hidden" name="delivery_driver_choice" id="deliveryDriverChoice" value="needs_driver">
+                    <div style="display:flex; gap:8px; margin-bottom:8px;">
+                        """ + (f'''<button type="button" class="btn-conductor" data-choice="default" style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--borde);background:var(--panel-secundario);color:var(--texto);font-weight:800;cursor:pointer;">🛵 {conductor_default_nombre.upper()}</button>''' if conductor_default_nombre else '') + """
+                        <button type="button" class="btn-conductor activo" data-choice="needs_driver" style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--verde-neko);background:var(--verde-neko);color:#0F1115;font-weight:800;cursor:pointer;">🔎 BUSCAR CONDUCTOR</button>
+                    </div>
+                </div>
                 <label style="font-size:13px;font-weight:700;color:#6b7280;">👤 Cliente</label>
                 <input name="cliente" placeholder="Nombre del cliente">
                 <button class="btn-nueva-orden" type="submit">➕ Crear orden</button>
@@ -5341,16 +5730,35 @@ def index():
                 const tipo = document.getElementById("tipoOrden");
                 const mesa = document.getElementById("grupoMesaOrden");
                 const referencia = document.getElementById("grupoReferenciaOrden");
+                const conductorGrupo = document.getElementById("grupoConductorDelivery");
+                const conductorChoice = document.getElementById("deliveryDriverChoice");
                 const mesaSelect = document.getElementById("referenciaMesaOrden");
                 const referenciaInput = document.getElementById("referenciaLibreOrden");
                 function actualizarReferenciaOrden() {{
                     const esMesa = tipo.value === "Mesa";
+                    const esDelivery = tipo.value === "Delivery";
                     mesa.style.display = esMesa ? "" : "none";
                     referencia.style.display = esMesa ? "none" : "";
+                    conductorGrupo.style.display = esDelivery ? "" : "none";
                     mesaSelect.required = esMesa;
                     referenciaInput.required = !esMesa;
                 }}
                 tipo.addEventListener("change", actualizarReferenciaOrden);
+                conductorGrupo.querySelectorAll(".btn-conductor").forEach(function(btn) {{
+                    btn.addEventListener("click", function() {{
+                        conductorGrupo.querySelectorAll(".btn-conductor").forEach(function(b) {{
+                            b.classList.remove("activo");
+                            b.style.borderColor = "var(--borde)";
+                            b.style.background = "var(--panel-secundario)";
+                            b.style.color = "var(--texto)";
+                        }});
+                        btn.classList.add("activo");
+                        btn.style.borderColor = "var(--verde-neko)";
+                        btn.style.background = "var(--verde-neko)";
+                        btn.style.color = "#0F1115";
+                        conductorChoice.value = btn.dataset.choice;
+                    }});
+                }});
                 actualizarReferenciaOrden();
             }})();
             </script>
@@ -7265,16 +7673,35 @@ def crear_orden():
         if orden_abierta is not None:
             return f"{etiqueta_mesa(referencia)} ya tiene una orden abierta.", 409
 
+    es_delivery = (tipo or "").strip().lower() == "delivery"
+    delivery_driver_user_id = None
+    delivery_driver_status = None
+    if es_delivery:
+        eleccion = (request.form.get("delivery_driver_choice") or "").strip()
+        conn_conductor = get_connection()
+        cursor_conductor = conn_conductor.cursor()
+        conductor_default = obtener_conductor_delivery_por_defecto(cursor_conductor)
+        conn_conductor.close()
+        if eleccion == "default" and conductor_default:
+            delivery_driver_user_id = conductor_default[0]
+            delivery_driver_status = ESTADO_DELIVERY_ASIGNADO_INTERNO
+        else:
+            delivery_driver_status = ESTADO_DELIVERY_NECESITA_CONDUCTOR
+
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
         INSERT INTO ordenes (
-            numero_orden, fecha_hora, fecha, tipo, referencia, cliente, estado, usuario_id
+            numero_orden, fecha_hora, fecha, tipo, referencia, cliente, estado, usuario_id,
+            delivery_driver_user_id, delivery_driver_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (None, fecha_hora, fecha, tipo, referencia, cliente, "abierta", usuario_id),
+        (
+            None, fecha_hora, fecha, tipo, referencia, cliente, "abierta", usuario_id,
+            delivery_driver_user_id, delivery_driver_status,
+        ),
     )
     orden_id = obtener_ultimo_id(cursor, "ordenes")
     conn.commit()
@@ -7287,6 +7714,14 @@ def crear_orden():
             )
         except MesaSelfOrderingOcupada as exc:
             return str(exc), 409
+    if es_delivery:
+        if delivery_driver_status == ESTADO_DELIVERY_ASIGNADO_INTERNO:
+            notificar_delivery_asignado(orden_id, delivery_driver_user_id, None, cliente, referencia)
+        elif delivery_driver_status == ESTADO_DELIVERY_NECESITA_CONDUCTOR:
+            conn_notif = get_connection()
+            cursor_notif = conn_notif.cursor()
+            notificar_delivery_necesita_conductor(cursor_notif, orden_id, None, cliente, referencia)
+            conn_notif.close()
     return redirect(f"/orden/{orden_id}")
 
 
@@ -7310,6 +7745,25 @@ def orden(orden_id):
     repartidor_delivery_actual = obtener_repartidor(cursor, o[12]) if o[12] else None
     tasa = obtener_tasa_actual(cursor)
     pendiente_post_cobro = calcular_pendiente_post_cobro(cursor, orden_id)
+    conductor_delivery_info = None
+    conductores_delivery_activos = []
+    if (o[3] or "").strip().lower() == "delivery":
+        cursor.execute(
+            "SELECT delivery_driver_user_id, delivery_driver_status FROM ordenes WHERE id=?",
+            (orden_id,),
+        )
+        driver_id, driver_status = cursor.fetchone()
+        driver_nombre = None
+        if driver_id:
+            cursor.execute("SELECT nombre FROM usuarios WHERE id=?", (driver_id,))
+            fila_driver = cursor.fetchone()
+            driver_nombre = fila_driver[0] if fila_driver else None
+        conductor_delivery_info = {
+            "driver_id": driver_id,
+            "status": driver_status or ESTADO_DELIVERY_NECESITA_CONDUCTOR,
+            "nombre": driver_nombre,
+        }
+        conductores_delivery_activos = listar_conductores_delivery_activos(cursor)
     conn.close()
 
     delivery_usd = a_float(o[11])
@@ -7700,6 +8154,7 @@ def orden(orden_id):
                 <a href="/repartidores" class="delivery-help">Administrar repartidores</a>
             </div>
         </div>
+        {_render_panel_conductor_delivery(orden_id, conductor_delivery_info, conductores_delivery_activos)}
         <div class="total total-cliente">Total Orden: ${total_orden_usd:.2f}</div>
         <div class="total">Bs: {formato_bs_resumen(total_orden_bs)}</div>
         {boton_reimprimir}
@@ -8377,6 +8832,67 @@ def actualizar_delivery(orden_id):
         conn.rollback()
         conn.close()
         return str(exc), 400
+
+
+@app.route("/orden/<int:orden_id>/delivery_conductor", methods=["POST"])
+def asignar_conductor_delivery(orden_id):
+    """Mision seccion 36 "asignacion posterior de conductor": un
+    Delivery creado como NEEDS_DRIVER (o EXTERNAL) puede resolverse mas
+    tarde asignando un conductor interno (usuario real, nunca un
+    nombre) o marcandolo EXTERNO. NEEDS_DRIVER solo se resuelve
+    asignando -- leer la notificacion NUNCA lo resuelve (mision seccion
+    37/49)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT tipo, numero_orden, cliente, referencia, cierre_id FROM ordenes WHERE id=?",
+        (orden_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return "Orden no encontrada", 404
+    tipo, numero_orden, cliente, referencia, cierre_id = row
+    if (tipo or "").strip().lower() != "delivery":
+        conn.close()
+        return "Esta orden no es un Delivery", 400
+    if orden_archivada(cierre_id):
+        conn.close()
+        return "No puedes modificar una orden archivada en cierre de jornada", 400
+
+    modo = (request.form.get("modo") or "").strip()
+    if modo == "interno":
+        try:
+            conductor_id = int(request.form.get("conductor_user_id"))
+        except (TypeError, ValueError):
+            conn.close()
+            return "Selecciona un conductor valido", 400
+        cursor.execute(
+            "SELECT id FROM usuarios WHERE id=? AND es_conductor_delivery=1 AND COALESCE(activo,1)=1",
+            (conductor_id,),
+        )
+        if not cursor.fetchone():
+            conn.close()
+            return "Ese usuario no esta habilitado como conductor de delivery", 400
+        cursor.execute(
+            "UPDATE ordenes SET delivery_driver_user_id=?, delivery_driver_status=? WHERE id=?",
+            (conductor_id, ESTADO_DELIVERY_ASIGNADO_INTERNO, orden_id),
+        )
+        conn.commit()
+        conn.close()
+        notificar_delivery_conductor_asignado_posteriormente(orden_id, conductor_id, numero_orden, cliente, referencia)
+        return redirect(f"/orden/{orden_id}")
+    elif modo == "externo":
+        cursor.execute(
+            "UPDATE ordenes SET delivery_driver_user_id=NULL, delivery_driver_status=? WHERE id=?",
+            (ESTADO_DELIVERY_EXTERNO, orden_id),
+        )
+        conn.commit()
+        conn.close()
+        return redirect(f"/orden/{orden_id}")
+    else:
+        conn.close()
+        return "Modo invalido", 400
 
 
 @app.route("/agregar/<int:orden_id>/<int:producto_id>")
@@ -11415,6 +11931,44 @@ def pantalla_despacho():
     """
 
 
+@app.route("/api/notificaciones")
+def api_notificaciones():
+    """Mision "campana global": cada usuario ve SOLO sus propias
+    notificaciones (nunca las de otro), autenticacion/sesion existente
+    reutilizada -- sin rutas publicas ni auth paralela."""
+    usuario_id = session.get("usuario_id")
+    if not usuario_id:
+        return jsonify({"ok": False, "error": "No autenticado"}), 401
+    repo = _notificaciones_repo()
+    return jsonify(
+        {
+            "ok": True,
+            "notificaciones": repo.listar_para_usuario(usuario_id),
+            "no_leidas": repo.contar_no_leidas(usuario_id),
+        }
+    )
+
+
+@app.route("/api/notificaciones/<int:notificacion_id>/leer", methods=["POST"])
+def api_notificacion_leer(notificacion_id):
+    usuario_id = session.get("usuario_id")
+    if not usuario_id:
+        return jsonify({"ok": False, "error": "No autenticado"}), 401
+    repo = _notificaciones_repo()
+    repo.marcar_leida(notificacion_id, usuario_id, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/notificaciones/leer_todas", methods=["POST"])
+def api_notificaciones_leer_todas():
+    usuario_id = session.get("usuario_id")
+    if not usuario_id:
+        return jsonify({"ok": False, "error": "No autenticado"}), 401
+    repo = _notificaciones_repo()
+    repo.marcar_todas_leidas(usuario_id, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"))
+    return jsonify({"ok": True})
+
+
 @app.route("/api/despacho/estado")
 def api_despacho_estado():
     datos = _despacho_datos_html()
@@ -11439,12 +11993,53 @@ def despacho_entregar(orden_id):
     "entregado": esta accion marca LISTO PARA RETIRAR/DELIVERY, nunca
     "recibido por el cliente"."""
     repository = _despacho_repository()
-    repository.marcar_listo_para_retirar(
+    fue_transicion_nueva = repository.marcar_listo_para_retirar(
         orden_id,
         usuario_activo(),
         ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"),
     )
+    if fue_transicion_nueva:
+        _notificar_listo_para_retirar(orden_id)
     return jsonify({"ok": True})
+
+
+def _notificar_listo_para_retirar(orden_id):
+    """Efecto secundario tolerante a fallos (mision seccion 92/notifications
+    independientes de service_alerts): si algo falla aqui, LISTO PARA
+    RETIRAR ya quedo guardado -- nunca se revierte por esto."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT tipo, numero_orden, referencia, cliente, usuario_id,
+                   delivery_driver_user_id, delivery_driver_status
+            FROM ordenes WHERE id=?
+            """,
+            (orden_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return
+        tipo, numero_orden, referencia, cliente, usuario_id, driver_id, driver_status = row
+        if (tipo or "").strip().lower() == "delivery":
+            if driver_status == ESTADO_DELIVERY_ASIGNADO_INTERNO and driver_id:
+                _crear_notificacion(
+                    f"DELIVERY_READY:{orden_id}",
+                    driver_id,
+                    "DELIVERY_READY",
+                    f"🛵 DELIVERY {texto_numero_orden(numero_orden)} LISTO",
+                    "El pedido esta listo en Despacho. Ya puedes retirarlo para salir.",
+                    orden_id=orden_id,
+                )
+            # NEEDS_DRIVER/EXTERNAL: no se inventa un conductor -- ver
+            # mision seccion 35 (deja de notificarse esta etapa hasta
+            # que se asigne conductor, para no generar ruido).
+        else:
+            notificar_orden_lista_para_retirar(orden_id, usuario_id, tipo, numero_orden, referencia, cliente)
+    except Exception as exc:
+        print(f"ADVERTENCIA: no se pudo notificar listo para retirar de orden {orden_id}: {exc}")
 
 
 @app.route("/despacho/alertas/<int:alerta_id>/atendido", methods=["POST"])
