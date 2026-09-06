@@ -147,8 +147,28 @@ from app.application.delivery.assignment import (
 from app.infrastructure.database.reports import construir_reporte_rango
 from app.infrastructure.database.cierre import construir_resumen_cierre, ejecutar_cierre_jornada
 from app.infrastructure.database.inventario import (
+    actualizar_stock_inventario,
+    crear_compra,
     crear_datos_base_inventario,
+    crear_producto_base,
+    crear_produccion as crear_produccion_en_bd,
+    crear_proveedor,
+    crear_receta,
     crear_tablas_inventario,
+    eliminar_receta_por_id,
+    listar_compras_recientes,
+    listar_inventario_para_produccion,
+    listar_insumos_inventario,
+    listar_movimientos_inventario_recientes,
+    listar_producciones_recientes,
+    listar_productos_base,
+    listar_proveedores,
+    listar_recetas,
+    obtener_item_inventario_por_id,
+    obtener_producto_base_por_id,
+    obtener_proveedor_por_id,
+    producto_base_existe_por_nombre,
+    proveedor_existe_por_nombre,
 )
 from app.infrastructure.database.usuarios import (
     actualizar_usuario,
@@ -4144,13 +4164,7 @@ def recetas():
         if not producto_menu or not insumo or cantidad <= 0:
             error = "Debes seleccionar producto, insumo y cantidad valida"
         else:
-            cursor.execute(
-                """
-                INSERT INTO recetas (producto_menu, insumo, cantidad, unidad)
-                VALUES (?, ?, ?, ?)
-                """,
-                (producto_menu, insumo, cantidad, unidad),
-            )
+            crear_receta(cursor, producto_menu, insumo, cantidad, unidad)
             conn.commit()
             conn.close()
             return redirect("/recetas")
@@ -4164,23 +4178,8 @@ def recetas():
     )
     productos_menu = cursor.fetchall()
 
-    cursor.execute(
-        """
-        SELECT nombre, unidad
-        FROM inventario
-        ORDER BY nombre ASC
-        """
-    )
-    insumos = cursor.fetchall()
-
-    cursor.execute(
-        """
-        SELECT id, producto_menu, insumo, cantidad, unidad
-        FROM recetas
-        ORDER BY producto_menu ASC, insumo ASC, id ASC
-        """
-    )
-    recetas_db = cursor.fetchall()
+    insumos = listar_insumos_inventario(cursor)
+    recetas_db = listar_recetas(cursor)
     conn.close()
 
     recetas_html = ""
@@ -4300,7 +4299,7 @@ def eliminar_receta(receta_id):
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM recetas WHERE id=?", (receta_id,))
+    eliminar_receta_por_id(cursor, receta_id)
     conn.commit()
     conn.close()
     return redirect("/recetas")
@@ -4313,16 +4312,7 @@ def movimientos_inventario():
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT fecha, producto, tipo, cantidad, stock_anterior, stock_nuevo,
-               referencia, usuario, observacion
-        FROM movimientos_inventario
-        ORDER BY id DESC
-        LIMIT 300
-        """
-    )
-    movimientos = cursor.fetchall()
+    movimientos = listar_movimientos_inventario_recientes(cursor)
     conn.close()
 
     filas = ""
@@ -4388,23 +4378,8 @@ def compras():
     cursor = conn.cursor()
     error = ""
 
-    cursor.execute(
-        """
-        SELECT id, nombre, unidad
-        FROM productos_base
-        ORDER BY nombre ASC
-        """
-    )
-    productos_base = cursor.fetchall()
-
-    cursor.execute(
-        """
-        SELECT id, nombre
-        FROM proveedores
-        ORDER BY nombre ASC
-        """
-    )
-    proveedores = cursor.fetchall()
+    productos_base = listar_productos_base(cursor)
+    proveedores = listar_proveedores(cursor)
 
     if request.method == "POST":
         accion = request.form.get("accion", "agregar").strip()
@@ -4419,27 +4394,11 @@ def compras():
             if producto_base_id == "" or cantidad <= 0 or precio_total <= 0:
                 error = "Debes seleccionar un producto, cantidad y precio total validos"
             else:
-                cursor.execute(
-                    """
-                    SELECT nombre, unidad
-                    FROM productos_base
-                    WHERE id=?
-                    """,
-                    (producto_base_id,),
-                )
-                producto_row = cursor.fetchone()
+                producto_row = obtener_producto_base_por_id(cursor, producto_base_id)
 
                 proveedor = ""
                 if proveedor_id != "":
-                    cursor.execute(
-                        """
-                        SELECT nombre
-                        FROM proveedores
-                        WHERE id=?
-                        """,
-                        (proveedor_id,),
-                    )
-                    proveedor_row = cursor.fetchone()
+                    proveedor_row = obtener_proveedor_por_id(cursor, proveedor_id)
                     if not proveedor_row:
                         error = "Proveedor no valido"
                     else:
@@ -4483,19 +4442,14 @@ def compras():
                 usuario_id = session.get("usuario_id")
 
                 for item in compras_temporales:
-                    cursor.execute(
-                        """
-                        INSERT INTO compras (producto, cantidad, precio_total, proveedor, fecha, usuario_id)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            item["producto"],
-                            item["cantidad"],
-                            item.get("precio_total", 0),
-                            item["proveedor"],
-                            fecha,
-                            usuario_id,
-                        ),
+                    crear_compra(
+                        cursor,
+                        item["producto"],
+                        item["cantidad"],
+                        item.get("precio_total", 0),
+                        item["proveedor"],
+                        fecha,
+                        usuario_id,
                     )
 
                     sumar_inventario_con_costo(
@@ -4511,15 +4465,7 @@ def compras():
                 conn.close()
                 return redirect("/inventario")
 
-    cursor.execute(
-        """
-        SELECT producto, cantidad, precio_total, proveedor, fecha
-        FROM compras
-        ORDER BY id DESC
-        LIMIT 20
-        """
-    )
-    historial = cursor.fetchall()
+    historial = listar_compras_recientes(cursor)
     conn.close()
 
     html = """
@@ -4699,32 +4645,15 @@ def proveedores():
         if nombre == "":
             error = "Nombre requerido"
         else:
-            cursor.execute(
-                "SELECT id FROM proveedores WHERE lower(nombre)=lower(?)",
-                (nombre,),
-            )
-            if cursor.fetchone():
+            if proveedor_existe_por_nombre(cursor, nombre):
                 error = "Ese proveedor ya existe"
             else:
-                cursor.execute(
-                    """
-                    INSERT INTO proveedores (nombre)
-                    VALUES (?)
-                    """,
-                    (nombre,),
-                )
+                crear_proveedor(cursor, nombre)
                 conn.commit()
                 conn.close()
                 return redirect("/proveedores")
 
-    cursor.execute(
-        """
-        SELECT nombre
-        FROM proveedores
-        ORDER BY nombre ASC
-        """
-    )
-    lista = cursor.fetchall()
+    lista = [(nombre,) for _id, nombre in listar_proveedores(cursor)]
     conn.close()
 
     html = """
@@ -4802,32 +4731,15 @@ def productos_base():
         if nombre == "" or unidad == "":
             error = "Datos invalidos"
         else:
-            cursor.execute(
-                "SELECT id FROM productos_base WHERE lower(nombre)=lower(?)",
-                (nombre,),
-            )
-            if cursor.fetchone():
+            if producto_base_existe_por_nombre(cursor, nombre):
                 error = "Ese producto base ya existe"
             else:
-                cursor.execute(
-                    """
-                    INSERT INTO productos_base (nombre, unidad)
-                    VALUES (?, ?)
-                    """,
-                    (nombre, unidad),
-                )
+                crear_producto_base(cursor, nombre, unidad)
                 conn.commit()
                 conn.close()
                 return redirect("/productos_base")
 
-    cursor.execute(
-        """
-        SELECT nombre, unidad
-        FROM productos_base
-        ORDER BY nombre ASC
-        """
-    )
-    lista = cursor.fetchall()
+    lista = [(nombre, unidad) for _id, nombre, unidad in listar_productos_base(cursor)]
     conn.close()
 
     html = """
@@ -4900,23 +4812,8 @@ def produccion():
     cursor = conn.cursor()
     error = ""
 
-    cursor.execute(
-        """
-        SELECT id, nombre, unidad, stock_actual, costo_promedio
-        FROM inventario
-        ORDER BY nombre ASC
-        """
-    )
-    inventario_items = cursor.fetchall()
-
-    cursor.execute(
-        """
-        SELECT id, nombre, unidad
-        FROM productos_base
-        ORDER BY nombre ASC
-        """
-    )
-    productos_base_items = cursor.fetchall()
+    inventario_items = listar_inventario_para_produccion(cursor)
+    productos_base_items = listar_productos_base(cursor)
 
     if request.method == "POST":
         producto_origen_id = request.form.get("producto_origen", "").strip()
@@ -4941,27 +4838,8 @@ def produccion():
         ):
             error = "Datos invalidos"
         else:
-            cursor.execute(
-                """
-                SELECT id, nombre, stock_actual, unidad, costo_promedio
-                FROM inventario
-                WHERE id=?
-                LIMIT 1
-                """,
-                (producto_origen_id,),
-            )
-            origen = cursor.fetchone()
-
-            cursor.execute(
-                """
-                SELECT id, nombre, unidad
-                FROM productos_base
-                WHERE id=?
-                LIMIT 1
-                """,
-                (producto_resultado_id,),
-            )
-            resultado_base = cursor.fetchone()
+            origen = obtener_item_inventario_por_id(cursor, producto_origen_id)
+            resultado_base = obtener_producto_base_por_id(cursor, producto_resultado_id)
 
             if not origen:
                 error = "Producto origen no encontrado en inventario"
@@ -4973,8 +4851,8 @@ def produccion():
                 error = "La cantidad resultado no puede ser mayor que la cantidad origen"
             else:
                 producto_origen = origen[1]
-                producto_resultado = resultado_base[1]
-                unidad_resultado = resultado_base[2] if resultado_base[2] else "unidad"
+                producto_resultado = resultado_base[0]
+                unidad_resultado = resultado_base[1] if resultado_base[1] else "unidad"
                 costo_promedio_origen = a_float(origen[4])
                 costo_total = (costo_promedio_origen * cantidad_origen) + costo_insumos_extra
                 costo_unitario_resultado = (
@@ -4986,14 +4864,7 @@ def produccion():
                 usuario_id = session.get("usuario_id")
                 nuevo_stock_origen = float(origen[2] or 0) - cantidad_origen
 
-                cursor.execute(
-                    """
-                    UPDATE inventario
-                    SET stock_actual=?
-                    WHERE id=?
-                    """,
-                    (nuevo_stock_origen, origen[0]),
-                )
+                actualizar_stock_inventario(cursor, origen[0], nuevo_stock_origen)
 
                 sumar_inventario_con_costo(
                     cursor,
@@ -5003,31 +4874,21 @@ def produccion():
                     costo_total,
                 )
 
-                cursor.execute(
-                    """
-                    INSERT INTO producciones (
-                        producto_origen, cantidad_origen, producto_resultado,
-                        cantidad_resultado, costo_total, fecha, usuario_id,
-                        merma, porcentaje_merma, costo_unitario_resultado,
-                        insumos_extra, costo_insumos_extra, porciones_detalle
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        producto_origen,
-                        cantidad_origen,
-                        producto_resultado,
-                        cantidad_resultado,
-                        costo_total,
-                        fecha,
-                        usuario_id,
-                        merma,
-                        porcentaje_merma,
-                        costo_unitario_resultado,
-                        insumos_extra,
-                        costo_insumos_extra,
-                        porciones_detalle,
-                    ),
+                crear_produccion_en_bd(
+                    cursor,
+                    producto_origen,
+                    cantidad_origen,
+                    producto_resultado,
+                    cantidad_resultado,
+                    costo_total,
+                    fecha,
+                    usuario_id,
+                    merma,
+                    porcentaje_merma,
+                    costo_unitario_resultado,
+                    insumos_extra,
+                    costo_insumos_extra,
+                    porciones_detalle,
                 )
 
                 conn.commit()
@@ -5036,18 +4897,7 @@ def produccion():
                     return redirect("/produccion")
                 return redirect("/inventario")
 
-    cursor.execute(
-        """
-        SELECT producto_origen, cantidad_origen, producto_resultado, cantidad_resultado,
-               costo_total, fecha, COALESCE(merma, 0), COALESCE(porcentaje_merma, 0),
-               COALESCE(costo_unitario_resultado, 0), COALESCE(insumos_extra, ''),
-               COALESCE(costo_insumos_extra, 0), COALESCE(porciones_detalle, '')
-        FROM producciones
-        ORDER BY id DESC
-        LIMIT 20
-        """
-    )
-    historial = cursor.fetchall()
+    historial = listar_producciones_recientes(cursor)
     conn.close()
 
     html = """
