@@ -1507,7 +1507,7 @@ def barra_superior(extra_links=""):
     usuario_id = session.get("usuario_id")
     campana_html = ""
     if usuario_id:
-        campana_html = """
+        campana_html = f"""
         <div class="campana-wrap" style="position:relative;">
             <button type="button" id="campanaNotifBtn" style="background:none;border:none;font-size:20px;cursor:pointer;position:relative;color:inherit;">
                 🔔<span id="campanaNotifContador" style="display:none;position:absolute;top:-6px;right:-8px;background:#ef4444;color:white;border-radius:999px;font-size:10px;font-weight:800;padding:2px 5px;">0</span>
@@ -3010,7 +3010,7 @@ def index():
                     <label style="font-size:13px;font-weight:700;color:#6b7280;">¿Quién hará el delivery?</label>
                     <input type="hidden" name="delivery_driver_choice" id="deliveryDriverChoice" value="needs_driver">
                     <div style="display:flex; gap:8px; margin-bottom:8px;">
-                        """ + (f'''<button type="button" class="btn-conductor" data-choice="default" style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--borde);background:var(--panel-secundario);color:var(--texto);font-weight:800;cursor:pointer;">🛵 {conductor_default_nombre.upper()}</button>''' if conductor_default_nombre else '') + """
+                        """ + (f'''<button type="button" class="btn-conductor" data-choice="default" style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--borde);background:var(--panel-secundario);color:var(--texto);font-weight:800;cursor:pointer;">🛵 {conductor_default_nombre.upper()}</button>''' if conductor_default_nombre else '') + f"""
                         <button type="button" class="btn-conductor activo" data-choice="needs_driver" style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--verde-neko);background:var(--verde-neko);color:#0F1115;font-weight:800;cursor:pointer;">🔎 BUSCAR CONDUCTOR</button>
                     </div>
                 </div>

@@ -2817,6 +2817,29 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertIn("💰 Cuentas por cobrar".encode(), response.data)
         self.assertNotIn(b'href="/clientes"', response.data)
 
+    def test_home_page_renders_without_literal_placeholders(self):
+        """Regresion: dos bloques de web_app.py (el panel izquierdo de
+        index() y campana_html dentro de barra_superior()) se
+        concatenaban con una cadena triple-comilla sin el prefijo `f`,
+        asi que
+        {boton_cerrar_jornada}/{boton_ordenes_listas}/{panel_izq_extra}
+        aparecian como texto literal en Inicio, y el <script> de la
+        campana de notificaciones (con `{{`/`}}` pensados como escape
+        de f-string) quedaba con doble llave literal -- JS invalido en
+        CUALQUIER pagina, no solo Inicio."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        for placeholder in ("{boton_cerrar_jornada}", "{boton_ordenes_listas}", "{panel_izq_extra}"):
+            self.assertNotIn(placeholder, html)
+        self.assertNotIn("{{", html)
+        self.assertNotIn("}}", html)
+        # Controles reales deben seguir apareciendo para el rol master.
+        self.assertIn('href="/cerrar_jornada" class="btn-cierre-jornada"', html)
+        self.assertIn('href="/ordenes_listas" class="btn-cierre-jornada"', html)
+        self.assertIn("Accesos rápidos", html)
+        self.assertIn("campanaNotifBtn", html)
+
     def test_admin_client_edit_does_not_change_receivable_snapshot(self):
         cliente_id = self._create_client("Nombre Historico")
         orden_id = self._create_order(price=20.0)
