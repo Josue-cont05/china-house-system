@@ -55,6 +55,7 @@ from app.domain.sales.item_builder import (
 )
 from app.domain.sales.order_states import (
     orden_archivada,
+    puede_agregar_item_orden,
     puede_editar_indicacion_item,
     puede_eliminar_orden,
     puede_modificar_orden as puede_modificar_estado_orden,
@@ -8192,7 +8193,7 @@ def agregar(orden_id, producto_id):
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
+    cursor.execute("SELECT estado, cierre_id, despachado_at FROM ordenes WHERE id=?", (orden_id,))
     row = cursor.fetchone()
     if not row:
         conn.close()
@@ -8203,9 +8204,13 @@ def agregar(orden_id, producto_id):
         return "No puedes modificar una orden archivada en cierre de jornada"
 
     edicion_emergencia_activa = emergencia_activa(orden_id)
-    if not puede_modificar_estado_orden(row[0], row[1], edicion_emergencia_activa):
+    # Agregar un item NUEVO (para enviar a cocina) esta permitido aunque
+    # la orden ya este cobrada (estado='cerrada'), mientras Monica
+    # todavia no la haya despachado fisicamente -- CERRADA != ENTREGADA
+    # (mision Despacho). Ver puede_agregar_item_orden.
+    if not puede_agregar_item_orden(row[1], row[2], edicion_emergencia_activa):
         conn.close()
-        return "No puedes agregar productos a una orden cerrada"
+        return "No puedes agregar productos a una orden ya entregada"
 
     cursor.execute(
         """

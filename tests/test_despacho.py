@@ -792,5 +792,355 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         self.assertEqual(existe, 0)
 
 
+class IncrementalKitchenRegressionTest(DespachoRoutesTest):
+    """Regresion real detectada antes del push: una vez que una mesa
+    quedaba COBRADA (estado='cerrada'), /agregar (y el equivalente de
+    self-ordering) rechazaban cualquier producto nuevo con "orden
+    cerrada" -- una regla que tenia sentido ANTES de Despacho (cerrada
+    significaba "terminada"), pero que nunca se actualizo cuando la
+    mision Despacho redefinio CERRADA != ENTREGADA. El sintoma
+    reportado ("Plato B no llega a cocina, no se imprime, no aparece en
+    Despacho, pero una bebida agregada despues SI genera alerta") se
+    explica exactamente asi: si la mesa NO estaba cobrada, agregar y
+    enviar funcionaba siempre (bebida incluida); si SI estaba cobrada,
+    /agregar rechazaba el plato ANTES de que llegara a orden_items, por
+    lo que jamas habia nada que enviar.
+
+    Fix real: app/domain/sales/order_states.py::puede_agregar_item_orden
+    -- agregar un item NUEVO solo se bloquea por orden archivada o ya
+    despachada, nunca solo por estar cobrada. Aplicado en /agregar
+    (web_app.py) y en self-ordering (_revalidar_destino /
+    _validar_orden_mesa_abierta)."""
+
+    def setUp(self):
+        super().setUp()
+        web_app.asegurar_menu_neko_wok()
+        web_app.desactivar_menu_china_house()
+
+    def _producto_id(self, nombre):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM productos WHERE nombre=? ORDER BY id LIMIT 1", (nombre,))
+        row = cursor.fetchone()
+        conn.close()
+        self.assertIsNotNone(row, nombre)
+        return row[0]
+
+    def _comandas(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, secuencia FROM orden_comandas WHERE orden_id=? ORDER BY secuencia",
+            (orden_id,),
+        )
+        filas = cursor.fetchall()
+        conn.close()
+        return filas
+
+    def _items_de_comanda(self, comanda_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT oi.producto FROM orden_comanda_items ci "
+            "JOIN orden_items oi ON oi.id = ci.orden_item_id "
+            "WHERE ci.comanda_id=? ORDER BY oi.id",
+            (comanda_id,),
+        )
+        filas = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        return filas
+
+    def _print_job_event_keys(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT event_key FROM print_jobs WHERE required_role='COCINA'")
+        filas = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        return filas
+
+    # --- 1-10: ciclo de vida seq0 -> seq1 -> seq2, Despacho acumulado ---
+
+    def test_primer_envio_crea_secuencia_cero_con_plato_a(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual([c[1] for c in comandas], [0])
+        self.assertEqual(self._items_de_comanda(comandas[0][0]), ["Plato A"])
+
+    def test_plato_agregado_pero_no_enviado_no_aparece_en_despacho(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._agregar_item(orden_id, producto="Plato B")
+
+        html = self._despacho_html()
+        inicio = html.find(f'data-orden-id="{orden_id}"')
+        fin = html.find("pedido-acciones", inicio)
+        tarjeta = html[inicio:fin]
+        self.assertIn("Plato A", tarjeta)
+        self.assertNotIn("Plato B", tarjeta)
+
+    def test_enviar_plato_b_crea_secuencia_uno_solo_con_plato_b(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato B")
+
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual([c[1] for c in comandas], [0, 1])
+        self.assertEqual(self._items_de_comanda(comandas[1][0]), ["Plato B"])
+
+    def test_secuencia_uno_crea_print_job_cocina(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato B")
+
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual(len(self._print_job_event_keys()), 2)
+        self.assertIn(f"comanda-{comandas[1][0]}-base", self._print_job_event_keys())
+
+    def test_despacho_tras_secuencia_uno_muestra_a_y_b(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato B")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        html = self._despacho_html()
+        inicio = html.find(f'data-orden-id="{orden_id}"')
+        fin = html.find("pedido-acciones", inicio)
+        tarjeta = html[inicio:fin]
+        self.assertIn("Plato A", tarjeta)
+        self.assertIn("Plato B", tarjeta)
+
+    def test_agregar_plato_c_crea_secuencia_dos(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato B")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato C")
+
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual([c[1] for c in comandas], [0, 1, 2])
+        self.assertEqual(self._items_de_comanda(comandas[2][0]), ["Plato C"])
+
+    def test_despacho_tras_secuencia_dos_muestra_a_b_c(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato B")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato C")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        html = self._despacho_html()
+        inicio = html.find(f'data-orden-id="{orden_id}"')
+        fin = html.find("pedido-acciones", inicio)
+        tarjeta = html[inicio:fin]
+        for nombre in ("Plato A", "Plato B", "Plato C"):
+            self.assertIn(nombre, tarjeta)
+
+    def test_event_keys_de_seq0_seq1_seq2_son_distintos(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato B")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._agregar_item(orden_id, producto="Plato C")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        claves = self._print_job_event_keys()
+        self.assertEqual(len(claves), len(set(claves)))
+        self.assertEqual(len(claves), 3)
+
+    # --- Caso plato + bebida en el mismo lote ---
+
+    def test_plato_y_bebida_en_mismo_lote_no_pierde_el_plato(self):
+        orden_id = self._crear_orden()
+        self._crear_producto("Coca-Cola", "Bebidas")
+        self._agregar_item(orden_id, producto="Arroz Chino")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._agregar_item(orden_id, producto="Chop Suey")
+        self._agregar_item(orden_id, producto="Coca-Cola")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual(len(comandas), 2)
+        items_lote2 = self._items_de_comanda(comandas[1][0])
+        self.assertIn("Chop Suey", items_lote2)
+        self.assertIn("Coca-Cola", items_lote2)
+        self.assertEqual(len(self._print_job_event_keys()), 2)
+
+    def test_bebida_incremental_no_interrumpe_el_flujo_normal(self):
+        # Antes del fix, cualquier excepcion en la evaluacion de la
+        # alerta habria revertido tambien la comanda/print_job. Se
+        # verifica que agregar una bebida junto con un plato produce
+        # AMBOS: comanda normal + alerta, uno no reemplaza al otro.
+        orden_id = self._crear_orden()
+        self._crear_producto("Cerveza", "Bebidas")
+        self._agregar_item(orden_id, producto="Arroz Chino")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        self._agregar_item(orden_id, producto="Lumpia")
+        self._agregar_item(orden_id, producto="Cerveza")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual(len(comandas), 2)
+        self.assertIn("Lumpia", self._items_de_comanda(comandas[1][0]))
+        alertas = self._alertas_pendientes()
+        self.assertEqual(len(alertas), 1)
+        self.assertEqual(alertas[0]["payload"]["items"], ["1x Cerveza"])
+
+    # --- Polling no muta estado ---
+
+    def test_polling_de_despacho_no_modifica_estado_de_envio(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        for _ in range(5):
+            self.client.get("/api/despacho/estado")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual([c[1] for c in comandas], [0])
+
+    # --- LA REGRESION REAL: cobrar entre envios ---
+
+    def test_cobrar_entre_envios_permite_agregar_y_enviar_incremental(self):
+        """Reproduce EXACTAMENTE el bug reportado, usando la ruta REAL
+        /agregar (no el atajo de test _agregar_item): Plato A se envia,
+        la mesa se cobra (estado='cerrada') SIN estar despachada
+        todavia, y despues se intenta agregar Plato B. Antes del fix,
+        /agregar devolvia "No puedes agregar productos a una orden
+        cerrada" y Plato B jamas llegaba a orden_items -- por lo que
+        /enviar_cocina no tenia nada que enviar."""
+        orden_id = self._crear_orden()
+        producto_a = self._producto_id("Neko Clan Triple")
+        self.client.get(f"/agregar/{orden_id}/{producto_a}")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+
+        producto_b = self._producto_id("Chop Suey de Pollo")
+        respuesta = self.client.get(f"/agregar/{orden_id}/{producto_b}")
+        self.assertEqual(respuesta.status_code, 302)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        comandas = self._comandas(orden_id)
+        self.assertEqual([c[1] for c in comandas], [0, 1])
+        self.assertIn("Chop Suey de Pollo", self._items_de_comanda(comandas[1][0]))
+        self.assertEqual(len(self._print_job_event_keys()), 2)
+        html = self._despacho_html()
+        inicio = html.find(f'data-orden-id="{orden_id}"')
+        fin = html.find("pedido-acciones", inicio)
+        tarjeta = html[inicio:fin]
+        self.assertIn("Neko Clan Triple", tarjeta)
+        self.assertIn("Chop Suey de Pollo", tarjeta)
+
+    def test_agregar_via_ruta_real_tras_cobrar_ya_no_se_rechaza(self):
+        orden_id = self._crear_orden()
+        producto_id = self._producto_id("Neko Clan Triple")
+        self.client.get(f"/agregar/{orden_id}/{producto_id}")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+
+        respuesta = self.client.get(f"/agregar/{orden_id}/{producto_id}")
+
+        self.assertEqual(respuesta.status_code, 302)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+        total = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(total, 2)
+
+    def test_agregar_bloqueado_tras_entregado(self):
+        orden_id = self._crear_orden()
+        producto_id = self._producto_id("Neko Clan Triple")
+        self.client.get(f"/agregar/{orden_id}/{producto_id}")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+        self.client.post(f"/despacho/{orden_id}/entregado")
+
+        respuesta = self.client.get(f"/agregar/{orden_id}/{producto_id}")
+
+        self.assertIn("No puedes agregar productos", respuesta.get_data(as_text=True))
+
+    def test_agregar_sigue_bloqueado_para_orden_archivada(self):
+        orden_id = self._crear_orden()
+        producto_id = self._producto_id("Neko Clan Triple")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET cierre_id=1 WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        respuesta = self.client.get(f"/agregar/{orden_id}/{producto_id}")
+
+        self.assertIn("archivada", respuesta.get_data(as_text=True))
+
+    # --- Self-ordering: misma regresion, mismo fix ---
+
+    def test_self_ordering_cobrar_entre_envios_permite_incremental(self):
+        orden_id = self._crear_orden(referencia="mesa:1")
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+
+        link = self.client.post(f"/orden/{orden_id}/self-ordering/link").get_json()["link"]
+        token = link["token"]
+        catalogo = web_app.app.test_client().get(f"/self-order/{token}")
+        self.assertNotIn(b"Mesa no habilitada", catalogo.data)
+
+        producto_id = self._producto_id("Neko Clan Triple")
+        respuesta = web_app.app.test_client().post(
+            f"/self-order/{token}/submit",
+            json={
+                "submission_id": "regresion-cobrar-1",
+                "items": [
+                    {
+                        "producto_id": producto_id,
+                        "cantidad": 1,
+                        "configuracion": [],
+                        "indicacion": "",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        comandas = self._comandas(orden_id)
+        self.assertEqual([c[1] for c in comandas], [0, 1])
+
+    def test_self_ordering_bloqueado_tras_entregado(self):
+        orden_id = self._crear_orden(referencia="mesa:1")
+        self._agregar_item(orden_id, producto="Plato A")
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        link = self.client.post(f"/orden/{orden_id}/self-ordering/link").get_json()["link"]
+        token = link["token"]
+
+        self._marcar_cobrada(orden_id)
+        self.client.post(f"/despacho/{orden_id}/entregado")
+
+        catalogo = web_app.app.test_client().get(f"/self-order/{token}")
+        self.assertIn(b"Mesa no habilitada", catalogo.data)
+
+        nuevo_link = self.client.post(f"/orden/{orden_id}/self-ordering/link")
+        self.assertEqual(nuevo_link.status_code, 409)
+
+
 if __name__ == "__main__":
     unittest.main()

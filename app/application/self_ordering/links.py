@@ -6,6 +6,7 @@ from typing import Callable, Optional, Protocol
 import pytz
 
 from app.application.self_ordering.mesas import MesaSelfOrderingInvalida, normalizar_mesa_clave
+from app.domain.sales.order_states import puede_agregar_item_orden
 
 
 CANALES_SELF_ORDERING = frozenset(("mesa", "pickup", "delivery", "whatsapp"))
@@ -335,11 +336,15 @@ def _validar_orden_mesa_abierta(repository: SelfOrderLinkRepository, orden_id: i
     if orden is None:
         raise OrdenSelfOrderingNoExiste("La orden indicada no existe.")
 
-    estado, cierre_id = orden
+    _estado, cierre_id, despachado_at = orden
     if cierre_id is not None:
         raise OrdenSelfOrderingArchivada("No se puede usar self-ordering en una orden archivada.")
-    if estado == "cerrada":
-        raise OrdenSelfOrderingCerrada("No se puede usar self-ordering en una orden cerrada.")
+    # CERRADA (cobrada) != ENTREGADA (mision Despacho): una mesa ya
+    # cobrada pero que Monica todavia no ha despachado fisicamente sigue
+    # activa para self-ordering (el cliente puede seguir pidiendo). Solo
+    # se bloquea una vez que la orden ya fue despachada.
+    if not puede_agregar_item_orden(cierre_id, despachado_at):
+        raise OrdenSelfOrderingCerrada("No se puede usar self-ordering en una orden ya entregada.")
 
 
 def _orden_esta_activa(repository: SelfOrderLinkRepository, orden_id: Optional[int]) -> bool:
@@ -348,7 +353,7 @@ def _orden_esta_activa(repository: SelfOrderLinkRepository, orden_id: Optional[i
     orden = repository.obtener_estado_orden(orden_id)
     if orden is None:
         return False
-    estado, cierre_id = orden
+    estado, cierre_id, _despachado_at = orden
     return estado == "abierta" and cierre_id is None
 
 

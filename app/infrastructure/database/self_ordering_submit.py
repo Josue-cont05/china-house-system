@@ -3,6 +3,7 @@ from app.application.self_ordering.submit import (
     RequestItemPreparado,
     ResultadoSubmitSelfOrdering,
 )
+from app.domain.sales.order_states import puede_agregar_item_orden
 from app.infrastructure.database.kitchen_comandas import crear_comanda_en_cursor
 
 
@@ -43,7 +44,10 @@ class SqlSelfOrderingSubmitRepository:
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=? LIMIT 1", (orden_id,))
+            cursor.execute(
+                "SELECT estado, cierre_id, despachado_at FROM ordenes WHERE id=? LIMIT 1",
+                (orden_id,),
+            )
             return cursor.fetchone()
         finally:
             conn.close()
@@ -248,9 +252,16 @@ class SqlSelfOrderingSubmitRepository:
         if link is None or link[0] != orden_id or link[1] != "mesa" or link[2] != "activo":
             raise SubmitSelfOrderingAtomicoError("Enlace no disponible.")
 
-        cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=? LIMIT 1", (orden_id,))
+        cursor.execute(
+            "SELECT estado, cierre_id, despachado_at FROM ordenes WHERE id=? LIMIT 1",
+            (orden_id,),
+        )
         orden = cursor.fetchone()
-        if orden is None or orden[0] == "cerrada" or orden[1] is not None:
+        # Una mesa ya cobrada (estado='cerrada') pero todavia NO
+        # despachada fisicamente sigue activa para self-ordering:
+        # CERRADA != ENTREGADA (mision Despacho). Solo se rechaza si la
+        # orden esta archivada o ya fue entregada.
+        if orden is None or not puede_agregar_item_orden(orden[1], orden[2]):
             raise SubmitSelfOrderingAtomicoError("Mesa no habilitada.")
 
     def _numero_si_hace_falta(self, cursor, orden_id):

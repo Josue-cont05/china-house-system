@@ -24,7 +24,10 @@ class SqlSelfOrderLinkRepository:
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=? LIMIT 1", (orden_id,))
+            cursor.execute(
+                "SELECT estado, cierre_id, despachado_at FROM ordenes WHERE id=? LIMIT 1",
+                (orden_id,),
+            )
             return cursor.fetchone()
         finally:
             conn.close()

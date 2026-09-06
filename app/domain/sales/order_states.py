@@ -31,3 +31,17 @@ def puede_eliminar_orden(estado, cierre_id):
         ESTADO_ABIERTA,
         ESTADO_EN_COCINA,
     )
+
+
+def puede_agregar_item_orden(cierre_id, despachado_at, emergencia_activa=False):
+    # Agregar un item NUEVO (para enviar a cocina) es distinto de editar
+    # precios/descuentos/items existentes (ver puede_modificar_orden /
+    # puede_editar_indicacion_item, que si deben seguir bloqueados tras
+    # cobrar salvo emergencia -- eso es correccion financiera). Una
+    # orden ya cobrada (estado='cerrada') pero que todavia no fue
+    # despachada fisicamente (despachado_at IS NULL) sigue siendo una
+    # mesa operativamente activa: el cliente puede seguir pidiendo
+    # mientras espera su comida o su cuenta. CERRADA != ENTREGADA.
+    if orden_archivada(cierre_id):
+        return False
+    return despachado_at is None or bool(emergencia_activa)

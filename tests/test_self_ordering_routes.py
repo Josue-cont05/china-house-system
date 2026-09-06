@@ -141,13 +141,15 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         conn.close()
         return row
 
-    def _update_order(self, orden_id, estado=None, cierre_id=None):
+    def _update_order(self, orden_id, estado=None, cierre_id=None, despachado_at=None):
         conn = self._conn()
         cursor = conn.cursor()
         if estado is not None:
             cursor.execute("UPDATE ordenes SET estado=? WHERE id=?", (estado, orden_id))
         if cierre_id is not None:
             cursor.execute("UPDATE ordenes SET cierre_id=? WHERE id=?", (cierre_id, orden_id))
+        if despachado_at is not None:
+            cursor.execute("UPDATE ordenes SET despachado_at=? WHERE id=?", (despachado_at, orden_id))
         conn.commit()
         conn.close()
 
@@ -335,7 +337,10 @@ class SelfOrderingRoutesTest(unittest.TestCase):
     def test_table_three_reuses_permanent_qr_for_future_order(self):
         first_order = self._create_order(referencia="mesa:3")
         first = self.client.post(f"/orden/{first_order}/self-ordering/link").get_json()["link"]
-        self._update_order(first_order, estado="cerrada")
+        # cerrada YA NO basta para dar por terminada la mesa (CERRADA !=
+        # ENTREGADA); para reusar el QR en una orden nueva, la anterior
+        # debe estar realmente despachada.
+        self._update_order(first_order, estado="cerrada", despachado_at="2026-09-06 20:00:00")
 
         closed_response = web_app.app.test_client().get(f"/self-order/{first['token']}")
         self.assertEqual(closed_response.status_code, 200)
@@ -356,7 +361,9 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         first_order = self._create_order(referencia="mesa:5")
         first = self.client.post(f"/orden/{first_order}/self-ordering/link").get_json()["link"]
         token = first["token"]
-        self._update_order(first_order, estado="cerrada")
+        # cerrada YA NO basta (CERRADA != ENTREGADA); la orden anterior
+        # debe estar realmente despachada para reasignar el QR.
+        self._update_order(first_order, estado="cerrada", despachado_at="2026-09-06 20:00:00")
 
         closed_response = web_app.app.test_client().get(f"/self-order/{token}")
         self.assertEqual(closed_response.status_code, 200)
@@ -555,8 +562,19 @@ class SelfOrderingRoutesTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    def test_closed_order_is_rejected(self):
+    def test_closed_but_undelivered_order_still_allows_link(self):
+        # CERRADA (cobrada) != ENTREGADA (mision Despacho): la mesa
+        # sigue activa para self-ordering mientras Monica no la haya
+        # despachado fisicamente, aunque ya este cobrada.
         orden_id = self._create_order(estado="cerrada")
+
+        response = self.client.post(f"/orden/{orden_id}/self-ordering/link")
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_despachada_order_is_rejected(self):
+        orden_id = self._create_order(estado="cerrada")
+        self._update_order(orden_id, despachado_at="2026-09-06 20:00:00")
 
         response = self.client.post(f"/orden/{orden_id}/self-ordering/link")
 
@@ -683,10 +701,24 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertNotIn(b"Mesa 1", response.data)
         self.assertNotIn(b"Cliente", response.data)
 
-    def test_public_catalog_blocks_table_link_when_order_is_closed_after_qr(self):
+    def test_public_catalog_stays_open_when_order_is_closed_but_not_dispatched(self):
+        # CERRADA (cobrada) != ENTREGADA: el cliente puede seguir
+        # pidiendo por QR aunque la mesa ya haya sido cobrada, mientras
+        # Monica no la haya despachado fisicamente.
         orden_id = self._create_order()
         link = self.client.post(f"/orden/{orden_id}/self-ordering/link").get_json()["link"]
         self._update_order(orden_id, estado="cerrada")
+        anon_client = web_app.app.test_client()
+
+        response = anon_client.get(f"/self-order/{link['token']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"Mesa no habilitada", response.data)
+
+    def test_public_catalog_blocks_table_link_when_order_is_dispatched_after_qr(self):
+        orden_id = self._create_order()
+        link = self.client.post(f"/orden/{orden_id}/self-ordering/link").get_json()["link"]
+        self._update_order(orden_id, estado="cerrada", despachado_at="2026-09-06 20:00:00")
         anon_client = web_app.app.test_client()
 
         response = anon_client.get(f"/self-order/{link['token']}")
@@ -2199,10 +2231,25 @@ class SelfOrderingRoutesTest(unittest.TestCase):
         self.assertNotEqual(first.get_json()["request_id"], second.get_json()["request_id"])
         self.assertEqual(self._table_counts(orden_id), (2, 2, 2))
 
-    def test_public_submit_closed_order_is_blocked_without_mutation(self):
+    def test_public_submit_closed_but_undelivered_order_still_accepts_items(self):
+        # CERRADA (cobrada) != ENTREGADA: el envio incremental por
+        # self-ordering debe seguir funcionando aunque la mesa ya este
+        # cobrada, mientras Monica no la haya despachado (regresion
+        # real detectada: bloquear aqui impedia que items agregados
+        # despues de cobrar llegaran a cocina).
         orden_id = self._create_order()
         token = self._link_token_for_order(orden_id)
         self._update_order(orden_id, estado="cerrada")
+
+        response = self._post_submit(token, self._submit_payload([self._simple_item_payload()]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._table_counts(orden_id), (1, 1, 1))
+
+    def test_public_submit_dispatched_order_is_blocked_without_mutation(self):
+        orden_id = self._create_order()
+        token = self._link_token_for_order(orden_id)
+        self._update_order(orden_id, estado="cerrada", despachado_at="2026-09-06 20:00:00")
 
         response = self._post_submit(token, self._submit_payload([self._simple_item_payload()]))
 

@@ -622,17 +622,29 @@ def crear_comanda_en_cursor(
         fecha=fecha,
     )
 
-    _evaluar_alerta_servicio(
-        cursor,
-        orden_id=orden_id,
-        numero_orden=int(numero_orden),
-        referencia=referencia,
-        tipo_orden=tipo,
-        secuencia=secuencia,
-        comanda_id=comanda_id,
-        items_crudos=payload["items_crudos"],
-        fecha=fecha,
-    )
+    # La alerta de servicio es un EFECTO ADICIONAL (mision Despacho,
+    # seccion "bebidas": nunca debe sustituir ni condicionar la comanda
+    # normal). Se aisla en su propio try/except a proposito: un fallo
+    # aqui (dato inesperado, condicion de carrera, lo que sea) NUNCA
+    # debe poder deshacer la comanda/print_job de cocina que YA se creo
+    # arriba -- perder la alerta es tolerable, perder el plato no.
+    try:
+        _evaluar_alerta_servicio(
+            cursor,
+            orden_id=orden_id,
+            numero_orden=int(numero_orden),
+            referencia=referencia,
+            tipo_orden=tipo,
+            secuencia=secuencia,
+            comanda_id=comanda_id,
+            items_crudos=payload["items_crudos"],
+            fecha=fecha,
+        )
+    except Exception as exc:
+        print(
+            f"ADVERTENCIA: no se pudo evaluar/crear alerta de servicio "
+            f"para comanda {comanda_id} (orden {orden_id}): {exc}"
+        )
 
     return ResultadoComanda(
         comanda_id=comanda_id,
