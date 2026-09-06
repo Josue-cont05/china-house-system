@@ -174,6 +174,25 @@ class DespachoRoutesTest(unittest.TestCase):
         return self.client.get("/api/despacho/estado").get_json()
 
 
+class PermisosDespachoTest(DespachoRoutesTest):
+    """/despacho debe exigir el mismo permiso que tomar ordenes (mision
+    "DESPACHO para Monica"): un rol que no puede tomar ordenes (cocina,
+    cocina_reportes) recibe 403, no el HTML de la pantalla. Regresion
+    real encontrada en refactor/division-clases-completa: el
+    before_request central (`proteger_sistema`) filtraba por el string
+    plano "despacho", que nunca coincidio con el endpoint real de la
+    ruta (`pantalla_despacho`), asi que /despacho quedaba abierto a
+    cualquier rol autenticado."""
+
+    def test_rol_cocina_no_puede_ver_despacho(self):
+        self._login(rol="cocina")
+        self.assertEqual(self.client.get("/despacho").status_code, 403)
+
+    def test_rol_mesonera_puede_ver_despacho(self):
+        self._login(rol="mesonera")
+        self.assertEqual(self.client.get("/despacho").status_code, 200)
+
+
 class VisibilidadPedidosTest(DespachoRoutesTest):
     def test_orden_recien_enviada_a_cocina_aparece_en_despacho(self):
         orden_id = self._crear_orden()
