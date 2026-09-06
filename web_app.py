@@ -139,6 +139,13 @@ from app.application.delivery.assignment import (
     asignar_conductor_interno,
     marcar_conductor_externo,
 )
+from app.application.notifications.events import (
+    notificar_delivery_asignado as _notificar_delivery_asignado,
+    notificar_delivery_conductor_asignado_posteriormente as _notificar_delivery_conductor_asignado_posteriormente,
+    notificar_delivery_listo,
+    notificar_delivery_necesita_conductor as _notificar_delivery_necesita_conductor,
+    notificar_orden_lista_para_retirar as _notificar_orden_lista_para_retirar,
+)
 from app.domain.delivery.rules import (
     ESTADO_DELIVERY_ASIGNADO_INTERNO,
     ESTADO_DELIVERY_EXTERNO,
@@ -152,7 +159,6 @@ from app.infrastructure.database.delivery import (
     detalle_delivery_repartidor,
     insertar_cargo_delivery,
     listar_conductores_delivery_activos,
-    listar_coordinadores_delivery,
     listar_repartidores,
     obtener_conductor_delivery_por_defecto,
     obtener_repartidor,
@@ -1237,6 +1243,10 @@ def _notificaciones_repo():
 
 
 def _crear_notificacion(event_key, usuario_destino_id, tipo, titulo, mensaje, orden_id=None, datos=None):
+    """Wrapper de bajo nivel usado directamente por tests (crear una
+    notificacion arbitraria sin pasar por un evento de negocio
+    especifico) ademas de por los casos de uso de
+    app.application.notifications.events."""
     return crear_notificacion(
         get_connection,
         event_key=event_key,
@@ -1251,70 +1261,24 @@ def _crear_notificacion(event_key, usuario_destino_id, tipo, titulo, mensaje, or
 
 
 def notificar_orden_lista_para_retirar(orden_id, usuario_destino_id, tipo_orden, numero_orden, referencia, cliente):
-    """ORDER_READY_FOR_HANDOFF (mision seccion 26/27/28): Monica termino
-    de armar el pedido en Despacho. NUNCA dice "entregado" -- el
-    responsable todavia debe retirarlo (mesonero) o avisar al cliente
-    (Pick Up)."""
-    if not usuario_destino_id:
-        return
-    tipo_normalizado = (tipo_orden or "").strip().lower()
-    numero_texto = texto_numero_orden(numero_orden)
-    if tipo_normalizado == "mesa":
-        titulo = f"🍜 {html_lib.escape(referencia or 'MESA')} — PEDIDO LISTO"
-        mensaje = f"El pedido {numero_texto} esta listo en Despacho. Retiralo para llevarlo a la mesa."
-    elif tipo_normalizado in ("para llevar", "pickup", "pick up"):
-        titulo = "🛍️ PICK UP LISTO"
-        mensaje = f"El pedido {numero_texto}" + (f" (Cliente: {cliente})" if cliente else "") + " esta listo. Puedes avisarle al cliente para retirar."
-    else:
-        titulo = f"🛵 DELIVERY {numero_texto} LISTO"
-        mensaje = "El pedido esta listo en Despacho. Ya puedes retirarlo para salir."
-
-    _crear_notificacion(
-        f"ORDER_READY_FOR_HANDOFF:{orden_id}",
-        usuario_destino_id,
-        "ORDER_READY_FOR_HANDOFF",
-        titulo,
-        mensaje,
-        orden_id=orden_id,
+    return _notificar_orden_lista_para_retirar(
+        get_connection, ahora_venezuela, texto_numero_orden,
+        orden_id, usuario_destino_id, tipo_orden, numero_orden, referencia, cliente,
     )
 
 
 def notificar_delivery_asignado(orden_id, conductor_user_id, numero_orden, cliente, referencia):
-    _crear_notificacion(
-        f"DELIVERY_CREATED_ASSIGNED:{orden_id}:{conductor_user_id}",
-        conductor_user_id,
-        "DELIVERY_CREATED_ASSIGNED",
-        "🛵 NUEVO DELIVERY ASIGNADO",
-        (
-            f"Pedido {texto_numero_orden(numero_orden)}"
-            + (f"\nCliente: {cliente}" if cliente else "")
-            + (f"\nReferencia/Zona: {referencia}" if referencia else "")
-            + "\n\nTienes asignado este delivery."
-        ),
-        orden_id=orden_id,
+    return _notificar_delivery_asignado(
+        get_connection, ahora_venezuela, texto_numero_orden,
+        orden_id, conductor_user_id, numero_orden, cliente, referencia,
     )
 
 
 def notificar_delivery_necesita_conductor(cursor, orden_id, numero_orden, cliente, referencia):
-    mensaje = (
-        f"Pedido {texto_numero_orden(numero_orden)}"
-        + (f"\nCliente: {cliente}" if cliente else "")
-        + (f"\nReferencia/Zona: {referencia}" if referencia else "")
-        + "\n\nEntro un delivery y hay que conseguir conductor."
+    return _notificar_delivery_necesita_conductor(
+        cursor, get_connection, ahora_venezuela, texto_numero_orden,
+        orden_id, numero_orden, cliente, referencia,
     )
-    coordinadores = listar_coordinadores_delivery(cursor)
-    if not coordinadores:
-        print(f"ADVERTENCIA: Delivery {orden_id} quedo NEEDS_DRIVER pero no hay coordinadores configurados.")
-        return
-    for coordinador_id, _nombre in coordinadores:
-        _crear_notificacion(
-            f"DELIVERY_NEEDS_DRIVER:{orden_id}:{coordinador_id}",
-            coordinador_id,
-            "DELIVERY_NEEDS_DRIVER",
-            "⚠️ NUEVO DELIVERY — CONDUCTOR PENDIENTE",
-            mensaje,
-            orden_id=orden_id,
-        )
 
 
 def _render_panel_conductor_delivery(orden_id, info, conductores_activos):
@@ -1357,18 +1321,9 @@ def _render_panel_conductor_delivery(orden_id, info, conductores_activos):
 
 
 def notificar_delivery_conductor_asignado_posteriormente(orden_id, conductor_user_id, numero_orden, cliente, referencia):
-    _crear_notificacion(
-        f"DELIVERY_DRIVER_ASSIGNED:{orden_id}:{conductor_user_id}",
-        conductor_user_id,
-        "DELIVERY_DRIVER_ASSIGNED",
-        "🛵 NUEVO DELIVERY ASIGNADO",
-        (
-            f"Pedido {texto_numero_orden(numero_orden)}"
-            + (f"\nCliente: {cliente}" if cliente else "")
-            + (f"\nReferencia/Zona: {referencia}" if referencia else "")
-            + "\n\nTienes asignado este delivery."
-        ),
-        orden_id=orden_id,
+    return _notificar_delivery_conductor_asignado_posteriormente(
+        get_connection, ahora_venezuela, texto_numero_orden,
+        orden_id, conductor_user_id, numero_orden, cliente, referencia,
     )
 
 
@@ -10511,13 +10466,8 @@ def _notificar_listo_para_retirar(orden_id):
         tipo, numero_orden, referencia, cliente, usuario_id, driver_id, driver_status = row
         if (tipo or "").strip().lower() == "delivery":
             if driver_status == ESTADO_DELIVERY_ASIGNADO_INTERNO and driver_id:
-                _crear_notificacion(
-                    f"DELIVERY_READY:{orden_id}",
-                    driver_id,
-                    "DELIVERY_READY",
-                    f"🛵 DELIVERY {texto_numero_orden(numero_orden)} LISTO",
-                    "El pedido esta listo en Despacho. Ya puedes retirarlo para salir.",
-                    orden_id=orden_id,
+                notificar_delivery_listo(
+                    get_connection, ahora_venezuela, texto_numero_orden, orden_id, driver_id, numero_orden
                 )
             # NEEDS_DRIVER/EXTERNAL: no se inventa un conductor -- ver
             # mision seccion 35 (deja de notificarse esta etapa hasta
