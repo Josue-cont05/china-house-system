@@ -79,7 +79,7 @@ def quitar_prefijo_cantidad_visual(texto):
         texto = limpio.strip()
 
 
-def _separar_prefijo_cantidad(producto):
+def separar_prefijo_cantidad(producto):
     producto = quitar_prefijo_cantidad_visual(producto)
     match = re.match(r"^(\d+)x\s+(.+)$", producto, flags=re.IGNORECASE)
     if not match:
@@ -91,7 +91,7 @@ def _separar_prefijo_cantidad(producto):
 
 
 def producto_sin_prefijo_cantidad(producto):
-    _, producto_limpio = _separar_prefijo_cantidad(producto)
+    _, producto_limpio = separar_prefijo_cantidad(producto)
     return producto_limpio
 
 
@@ -243,7 +243,7 @@ def agrupar_items_recibo(items):
     indices = {}
 
     for producto, precio, *_resto in items:
-        cantidad_producto, nombre = _separar_prefijo_cantidad(producto)
+        cantidad_producto, nombre = separar_prefijo_cantidad(producto)
         precio = _a_float(precio)
 
         if nombre not in indices:

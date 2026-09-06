@@ -42,6 +42,7 @@ from app.domain.sales.item_descriptions import (
     normalizar_indicacion_item,
     producto_sin_prefijo_cantidad,
     quitar_prefijo_cantidad_visual,
+    separar_prefijo_cantidad,
     texto_descripcion_combo_cocina,
     texto_descripcion_combo_factura,
     texto_descripcion_combo_orden,
@@ -142,6 +143,10 @@ from app.application.delivery.assignment import (
 )
 from app.infrastructure.database.reports import construir_reporte_rango
 from app.infrastructure.database.cierre import construir_resumen_cierre, ejecutar_cierre_jornada
+from app.infrastructure.database.inventario import (
+    crear_datos_base_inventario,
+    crear_tablas_inventario,
+)
 from app.infrastructure.database.usuarios import (
     actualizar_usuario,
     alternar_activo_usuario,
@@ -521,18 +526,6 @@ def a_float(valor, default=0.0):
 
 def es_combo_con_favorito(nombre):
     return (nombre or "").strip() in COMBOS_CON_FAVORITO
-
-
-def separar_prefijo_cantidad(producto):
-    producto = quitar_prefijo_cantidad_visual(producto)
-    match = re.match(r"^(\d+)x\s+(.+)$", producto, flags=re.IGNORECASE)
-    if not match:
-        return 1, producto
-
-    cantidad = int(match.group(1))
-    producto_limpio = match.group(2).strip()
-    return max(cantidad, 1), producto_limpio
-
 
 
 def indicacion_operativa_cocina(producto, indicacion):
@@ -1060,103 +1053,6 @@ def crear_usuarios_iniciales():
     conn.close()
 
 
-def crear_tablas_inventario():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS inventario (
-            id {pk_autoincrement_sql()},
-            nombre TEXT,
-            stock_actual REAL,
-            unidad TEXT
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS compras (
-            id {pk_autoincrement_sql()},
-            producto TEXT,
-            cantidad REAL,
-            precio_total REAL,
-            proveedor TEXT,
-            fecha TEXT,
-            usuario_id INTEGER
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS producciones (
-            id {pk_autoincrement_sql()},
-            producto_origen TEXT,
-            cantidad_origen REAL,
-            producto_resultado TEXT,
-            cantidad_resultado REAL,
-            costo_total REAL,
-            fecha TEXT,
-            usuario_id INTEGER
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS proveedores (
-            id {pk_autoincrement_sql()},
-            nombre TEXT
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS productos_base (
-            id {pk_autoincrement_sql()},
-            nombre TEXT,
-            unidad TEXT
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS recetas (
-            id {pk_autoincrement_sql()},
-            producto_menu TEXT,
-            insumo TEXT,
-            cantidad REAL,
-            unidad TEXT
-        )
-        """
-    )
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS movimientos_inventario (
-            id {pk_autoincrement_sql()},
-            producto TEXT,
-            tipo TEXT,
-            cantidad REAL,
-            stock_anterior REAL,
-            stock_nuevo REAL,
-            costo_promedio REAL,
-            referencia TEXT,
-            usuario TEXT,
-            fecha TEXT,
-            observacion TEXT
-        )
-        """
-    )
-
-    conn.commit()
-    conn.close()
-
-
 def usuario_activo():
     return session.get("usuario_nombre", "")
 
@@ -1549,79 +1445,6 @@ def descontar_inventario_por_orden(cursor, orden_id):
         """,
         (orden_id,),
     )
-
-
-def crear_datos_base_inventario():
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    productos_base = [
-        ("Pollo", "kg"),
-        ("Cerdo", "kg"),
-        ("Camaron", "kg"),
-        ("Arroz", "kg"),
-        ("Lumpias", "unidad"),
-        ("Salsa", "lt"),
-        ("Refresco", "unidad"),
-    ]
-
-    for nombre, unidad in productos_base:
-        cursor.execute(
-            "SELECT id FROM productos_base WHERE lower(nombre)=lower(?)",
-            (nombre,),
-        )
-        if not cursor.fetchone():
-            cursor.execute(
-                """
-                INSERT INTO productos_base (nombre, unidad)
-                VALUES (?, ?)
-                """,
-                (nombre, unidad),
-            )
-
-    conn.commit()
-    conn.close()
-
-
-def obtener_costo_promedio_producto(cursor, producto):
-    cursor.execute(
-        """
-        SELECT costo_promedio
-        FROM inventario
-        WHERE lower(nombre) = lower(?)
-        LIMIT 1
-        """,
-        (producto,),
-    )
-    row = cursor.fetchone()
-    if row and row[0]:
-        return float(row[0])
-
-    cursor.execute(
-        """
-        SELECT COALESCE(SUM(precio_total), 0), COALESCE(SUM(cantidad), 0)
-        FROM compras
-        WHERE lower(producto) = lower(?)
-        """,
-        (producto,),
-    )
-    total, cantidad = cursor.fetchone()
-    if cantidad and cantidad > 0:
-        return float(total or 0) / float(cantidad)
-
-    cursor.execute(
-        """
-        SELECT COALESCE(SUM(costo_total), 0), COALESCE(SUM(cantidad_resultado), 0)
-        FROM producciones
-        WHERE lower(producto_resultado) = lower(?)
-        """,
-        (producto,),
-    )
-    total, cantidad = cursor.fetchone()
-    if cantidad and cantidad > 0:
-        return float(total or 0) / float(cantidad)
-
-    return 0.0
 
 
 def calcular_costo_promedio_ponderado(stock_anterior, costo_anterior, cantidad, costo_nuevo):
@@ -2472,7 +2295,7 @@ def init_db():
     crear_tabla_print_jobs(get_connection, pk_autoincrement_sql)
     crear_tabla_service_alerts(get_connection, pk_autoincrement_sql)
     crear_tablas_self_ordering()
-    crear_tablas_inventario()
+    crear_tablas_inventario(get_connection, pk_autoincrement_sql)
     asegurar_columna("inventario", "costo_promedio", "REAL DEFAULT 0")
     asegurar_columna("producciones", "merma", "REAL DEFAULT 0")
     asegurar_columna("producciones", "porcentaje_merma", "REAL DEFAULT 0")
@@ -2481,7 +2304,7 @@ def init_db():
     asegurar_columna("producciones", "costo_insumos_extra", "REAL DEFAULT 0")
     asegurar_columna("producciones", "porciones_detalle", "TEXT")
     crear_usuarios_iniciales()
-    crear_datos_base_inventario()
+    crear_datos_base_inventario(get_connection)
     asegurar_columna("categorias", "activo", "INTEGER DEFAULT 1")
     asegurar_columna("productos", "activo", "INTEGER DEFAULT 1")
     # Columnas HISTORICAS -- mision "correccion semantica de Despacho":
