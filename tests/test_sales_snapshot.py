@@ -3155,6 +3155,35 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self.client.get("/clientes").status_code, 403)
         self.assertEqual(self.client.get("/cuentas_por_cobrar").status_code, 403)
 
+    def test_toma_ordenes_gate_covers_cobrar_pendiente_y_asignar_conductor(self):
+        """Regresion: /orden/<id>/cobrar_pendiente y
+        /orden/<id>/delivery_conductor no tenian NINGUN chequeo de rol
+        (ni antes de la ruta ni dentro de ella) -- un rol "cocina"
+        (fuera de toma_ordenes) podia cobrar saldos pendientes o
+        reasignar el conductor de un delivery, algo que sus hermanos
+        directos "cobrar" y "actualizar_delivery" si bloqueaban. El
+        before_request corre antes que la vista, asi que un orden_id
+        inexistente ya basta para probar el gate de rol."""
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO usuarios (nombre, pin, rol, activo) VALUES (?, ?, ?, 1)",
+            ("Cocina Test", "0000", "cocina"),
+        )
+        usuario_id = web_app.obtener_ultimo_id(cursor, "usuarios")
+        conn.commit()
+        conn.close()
+        with self.client.session_transaction() as sess:
+            sess["usuario_id"] = usuario_id
+            sess["usuario_nombre"] = "Cocina Test"
+            sess["usuario"] = "Cocina Test"
+            sess["usuario_rol"] = "cocina"
+        self.assertEqual(self.client.get("/orden/999999/cobrar_pendiente").status_code, 403)
+        self.assertEqual(
+            self.client.post("/orden/999999/delivery_conductor", data={"modo": "externo"}).status_code,
+            403,
+        )
+
 
 class PostCobroIncrementalTest(unittest.TestCase):
     """Mision "seguridad financiera de agregados post-cobro" (secciones
