@@ -52,13 +52,10 @@ from app.domain.sales.item_descriptions import (
 )
 from app.domain.sales.item_builder import (
     ErrorConstruccionItem,
-    construir_items_orden,
     es_producto_refresco,
 )
 from app.domain.sales.order_states import (
     orden_archivada,
-    puede_agregar_item_orden,
-    puede_editar_indicacion_item,
     puede_eliminar_orden,
     puede_modificar_orden as puede_modificar_estado_orden,
 )
@@ -141,6 +138,11 @@ from app.infrastructure.database.payments import calcular_pendiente_post_cobro
 from app.application.payments.pendiente import dejar_pendiente_a_cliente, pagar_pendiente_ahora
 from app.application.payments.checkout import OrdenYaCerradaOArchivadaError, ejecutar_cobro
 from app.application.payments.receipts import crear_print_job_recibo, obtener_facturas_pendientes
+from app.application.orders.items import (
+    actualizar_indicacion_de_item,
+    agregar_item_a_orden,
+    eliminar_item_de_orden,
+)
 
 CLAVE_SUPERVISOR = "0102"
 VENEZUELA_TZ = pytz.timezone("America/Caracas")
@@ -8110,48 +8112,11 @@ def asignar_conductor_delivery(orden_id):
 def agregar(orden_id, producto_id):
     conn = get_connection()
     cursor = conn.cursor()
-
-    cursor.execute("SELECT estado, cierre_id, listo_despacho_at FROM ordenes WHERE id=?", (orden_id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return "Orden no encontrada"
-
-    if orden_archivada(row[1]):
-        conn.close()
-        return "No puedes modificar una orden archivada en cierre de jornada"
-
-    edicion_emergencia_activa = emergencia_activa(orden_id)
-    # Agregar un item NUEVO (para enviar a cocina) esta permitido aunque
-    # la orden ya este cobrada (estado='cerrada'), mientras Monica
-    # todavia no la haya marcado LISTA PARA RETIRAR -- CERRADA != LISTA
-    # PARA RETIRAR (mision Despacho). Ver puede_agregar_item_orden.
-    if not puede_agregar_item_orden(row[1], row[2], edicion_emergencia_activa):
-        conn.close()
-        return "No puedes agregar productos a una orden ya lista para retirar"
-
-    cursor.execute(
-        """
-        SELECT p.nombre, p.precio, c.nombre
-        FROM productos p
-        LEFT JOIN categorias c ON p.categoria_id = c.id
-        WHERE p.id=?
-        """,
-        (producto_id,),
-    )
-    p = cursor.fetchone()
-    if not p:
-        conn.close()
-        return "Producto no encontrado"
-
-    cursor.execute("SELECT COALESCE(delivery_usd, 0) FROM ordenes WHERE id=?", (orden_id,))
-    delivery_actual = a_float(cursor.fetchone()[0])
     try:
-        items_construidos = construir_items_orden(
-            producto_nombre=p[0],
-            producto_precio=p[1],
-            categoria_nombre=p[2],
-            delivery_actual=delivery_actual,
+        agregar_item_a_orden(
+            cursor,
+            orden_id=orden_id,
+            producto_id=producto_id,
             sabor=request.args.get("sabor"),
             acompanantes=request.args.getlist("acompanante"),
             bebida=request.args.get("bebida"),
@@ -8169,45 +8134,15 @@ def agregar(orden_id, producto_id):
             arroces_promocion=ARROCES_PROMOCION,
             promo_extra_lumpias_nombre=PROMO_EXTRA_LUMPIAS_NOMBRE,
             promo_extra_lumpias_precio=PROMO_EXTRA_LUMPIAS_PRECIO,
+            emergencia_activa=emergencia_activa,
+            registrar_auditoria_emergencia=registrar_auditoria_emergencia,
         )
     except ErrorConstruccionItem as exc:
         conn.close()
         return exc.mensaje, exc.status_code
-
-    # Un agregado a una orden YA cobrada (estado='cerrada') es consumo
-    # post-cobro todavia no liquidado: arranca fuera del snapshot oficial
-    # (incluido_en_snapshot=0) hasta que se cobre/liquide (ver
-    # marcar_items_incluidos_en_snapshot). Si la orden sigue abierta, es
-    # consumo normal que sera parte del proximo cobro de todos modos.
-    incluido_en_snapshot = 0 if row[0] == "cerrada" else 1
-    cursor.execute(
-        """
-        INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            orden_id,
-            items_construidos.item_principal.producto,
-            items_construidos.item_principal.precio,
-            items_construidos.item_principal.indicacion,
-            incluido_en_snapshot,
-        ),
-    )
-    for item_extra in items_construidos.items_extra:
-        cursor.execute(
-            """
-            INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (orden_id, item_extra.producto, item_extra.precio, item_extra.indicacion, incluido_en_snapshot),
-        )
-    if row[0] == "cerrada" and edicion_emergencia_activa:
-        registrar_auditoria_emergencia(
-            cursor,
-            orden_id,
-            "agregar_producto_emergencia",
-            f"Producto agregado: {items_construidos.item_principal.producto} - ${items_construidos.item_principal.precio}",
-        )
+    except ValueError as exc:
+        conn.close()
+        return str(exc)
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -8298,44 +8233,17 @@ def eliminar_item(item_id, orden_id):
 
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
-    row = cursor.fetchone()
-
-    if not row:
-        conn.close()
-        return "Orden no encontrada"
-
-    if orden_archivada(row[1]):
-        conn.close()
-        return "Orden archivada, no se puede modificar"
-
-    estado = row[0]
-    edicion_emergencia_activa = emergencia_activa(orden_id)
-    if not puede_modificar_estado_orden(estado, row[1], edicion_emergencia_activa):
-        conn.close()
-        return "Orden cerrada, no se puede modificar"
-
-    cursor.execute(
-        """
-        SELECT id, producto, precio
-        FROM orden_items
-        WHERE id=? AND orden_id=?
-        """,
-        (item_id, orden_id),
-    )
-    item_row = cursor.fetchone()
-    if not item_row:
-        conn.close()
-        return "Producto no encontrado en esta orden"
-
-    cursor.execute("DELETE FROM orden_items WHERE id=? AND orden_id=?", (item_id, orden_id))
-    if estado == "cerrada" and edicion_emergencia_activa:
-        registrar_auditoria_emergencia(
+    try:
+        eliminar_item_de_orden(
             cursor,
-            orden_id,
-            "eliminar_producto_emergencia",
-            f"Producto eliminado: {item_row[1]} - ${item_row[2]}",
+            item_id=item_id,
+            orden_id=orden_id,
+            emergencia_activa=emergencia_activa,
+            registrar_auditoria_emergencia=registrar_auditoria_emergencia,
         )
+    except ValueError as exc:
+        conn.close()
+        return str(exc)
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
@@ -8343,57 +8251,20 @@ def eliminar_item(item_id, orden_id):
 
 @app.route("/actualizar_indicacion_item/<int:item_id>/<int:orden_id>", methods=["POST"])
 def actualizar_indicacion_item(item_id, orden_id):
-    indicacion = normalizar_indicacion_item(request.form.get("indicacion", ""))
-
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT estado, cierre_id FROM ordenes WHERE id=?", (orden_id,))
-    row = cursor.fetchone()
-
-    if not row:
-        conn.close()
-        return "Orden no encontrada"
-
-    estado, cierre_id = row
-    if orden_archivada(cierre_id):
-        conn.close()
-        return "Orden archivada, no se puede modificar"
-
-    edicion_emergencia_activa = emergencia_activa(orden_id)
-    if not puede_editar_indicacion_item(estado, cierre_id, edicion_emergencia_activa):
-        conn.close()
-        return "Orden cerrada, no se puede modificar"
-
-    cursor.execute(
-        """
-        SELECT id, producto
-        FROM orden_items
-        WHERE id=? AND orden_id=?
-        """,
-        (item_id, orden_id),
-    )
-    item_row = cursor.fetchone()
-    if not item_row:
-        conn.close()
-        return "Producto no encontrado en esta orden"
-
-    cursor.execute(
-        """
-        UPDATE orden_items
-        SET indicacion=?
-        WHERE id=? AND orden_id=?
-        """,
-        (indicacion, item_id, orden_id),
-    )
-
-    if estado == "cerrada" and edicion_emergencia_activa:
-        registrar_auditoria_emergencia(
+    try:
+        actualizar_indicacion_de_item(
             cursor,
-            orden_id,
-            "editar_indicacion_emergencia",
-            f"Indicacion actualizada para {item_row[1]}: {indicacion}",
+            item_id=item_id,
+            orden_id=orden_id,
+            indicacion=request.form.get("indicacion", ""),
+            emergencia_activa=emergencia_activa,
+            registrar_auditoria_emergencia=registrar_auditoria_emergencia,
         )
-
+    except ValueError as exc:
+        conn.close()
+        return str(exc)
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
