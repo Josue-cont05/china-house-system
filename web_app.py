@@ -2838,9 +2838,7 @@ def index():
         """
     )
     ordenes = cursor.fetchall()
-    conductor_default = obtener_conductor_delivery_por_defecto(cursor)
     conn.close()
-    conductor_default_nombre = html_lib.escape(conductor_default[1]) if conductor_default else ""
 
     html = """
     <html>
@@ -3006,14 +3004,6 @@ def index():
                     <label style="font-size:13px;font-weight:700;color:#6b7280;">Referencia</label>
                     <input name="referencia" id="referenciaLibreOrden" placeholder="Nombre, telefono o referencia">
                 </div>
-                <div id="grupoConductorDelivery" style="display:none;">
-                    <label style="font-size:13px;font-weight:700;color:#6b7280;">¿Quién hará el delivery?</label>
-                    <input type="hidden" name="delivery_driver_choice" id="deliveryDriverChoice" value="needs_driver">
-                    <div style="display:flex; gap:8px; margin-bottom:8px;">
-                        """ + (f'''<button type="button" class="btn-conductor" data-choice="default" style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--borde);background:var(--panel-secundario);color:var(--texto);font-weight:800;cursor:pointer;">🛵 {conductor_default_nombre.upper()}</button>''' if conductor_default_nombre else '') + f"""
-                        <button type="button" class="btn-conductor activo" data-choice="needs_driver" style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--verde-neko);background:var(--verde-neko);color:#0F1115;font-weight:800;cursor:pointer;">🔎 BUSCAR CONDUCTOR</button>
-                    </div>
-                </div>
                 <label style="font-size:13px;font-weight:700;color:#6b7280;">👤 Cliente</label>
                 <input name="cliente" placeholder="Nombre del cliente">
                 <button class="btn-nueva-orden" type="submit">➕ Crear orden</button>
@@ -3023,35 +3013,16 @@ def index():
                 const tipo = document.getElementById("tipoOrden");
                 const mesa = document.getElementById("grupoMesaOrden");
                 const referencia = document.getElementById("grupoReferenciaOrden");
-                const conductorGrupo = document.getElementById("grupoConductorDelivery");
-                const conductorChoice = document.getElementById("deliveryDriverChoice");
                 const mesaSelect = document.getElementById("referenciaMesaOrden");
                 const referenciaInput = document.getElementById("referenciaLibreOrden");
                 function actualizarReferenciaOrden() {{
                     const esMesa = tipo.value === "Mesa";
-                    const esDelivery = tipo.value === "Delivery";
                     mesa.style.display = esMesa ? "" : "none";
                     referencia.style.display = esMesa ? "none" : "";
-                    conductorGrupo.style.display = esDelivery ? "" : "none";
                     mesaSelect.required = esMesa;
                     referenciaInput.required = !esMesa;
                 }}
                 tipo.addEventListener("change", actualizarReferenciaOrden);
-                conductorGrupo.querySelectorAll(".btn-conductor").forEach(function(btn) {{
-                    btn.addEventListener("click", function() {{
-                        conductorGrupo.querySelectorAll(".btn-conductor").forEach(function(b) {{
-                            b.classList.remove("activo");
-                            b.style.borderColor = "var(--borde)";
-                            b.style.background = "var(--panel-secundario)";
-                            b.style.color = "var(--texto)";
-                        }});
-                        btn.classList.add("activo");
-                        btn.style.borderColor = "var(--verde-neko)";
-                        btn.style.background = "var(--verde-neko)";
-                        btn.style.color = "#0F1115";
-                        conductorChoice.value = btn.dataset.choice;
-                    }});
-                }});
                 actualizarReferenciaOrden();
             }})();
             </script>

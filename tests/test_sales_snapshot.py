@@ -2840,6 +2840,60 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertIn("Accesos rápidos", html)
         self.assertIn("campanaNotifBtn", html)
 
+    def test_home_new_order_panel_has_no_conductor_picker(self):
+        """UX: el panel "Nueva orden" de Inicio NO debe ofrecer elegir
+        conductor de delivery -- esa gestion vive exclusivamente en
+        /orden/<id> (tarjeta "Conductor de Delivery"), que resuelve
+        conductor DESPUES de creada la orden. El control "BUSCAR
+        CONDUCTOR" volvio a aparecer visualmente al reparar el bug del
+        f-string (estaba oculto por el propio bug), pero nunca debio
+        estar en esta pantalla."""
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+        for texto in (
+            "BUSCAR CONDUCTOR",
+            "Quién hará el delivery",
+            "grupoConductorDelivery",
+            "deliveryDriverChoice",
+            "conductorGrupo",
+            "conductorChoice",
+            "btn-conductor",
+        ):
+            self.assertNotIn(texto, html)
+        # El resto del formulario de creacion de orden sigue intacto.
+        self.assertIn('id="grupoMesaOrden"', html)
+        self.assertIn('id="grupoReferenciaOrden"', html)
+        self.assertIn('name="cliente"', html)
+        self.assertIn("➕ Crear orden", html)
+
+    def test_delivery_order_can_be_created_without_driver_and_stays_needs_driver(self):
+        """La orden Delivery debe poder crearse SIN elegir conductor
+        (mismo POST que ahora envia el formulario de Inicio, sin el
+        campo delivery_driver_choice) y quedar en NEEDS_DRIVER, igual
+        que antes de quitar el selector de la pantalla."""
+        response = self.client.post(
+            "/crear_orden",
+            data={"tipo": "Delivery", "referencia": "Casa 42", "cliente": "Cliente Delivery UX"},
+            follow_redirects=False,
+        )
+        self.assertEqual(response.status_code, 302)
+        orden_id = int(response.headers["Location"].rsplit("/", 1)[-1])
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT tipo, delivery_driver_user_id, delivery_driver_status FROM ordenes WHERE id=?",
+            (orden_id,),
+        )
+        tipo, driver_id, driver_status = cursor.fetchone()
+        conn.close()
+        self.assertEqual(tipo, "Delivery")
+        self.assertIsNone(driver_id)
+        self.assertEqual(driver_status, "NEEDS_DRIVER")
+
+        detalle = self.client.get(f"/orden/{orden_id}")
+        self.assertIn(b"Conductor de Delivery", detalle.data)
+
     def test_admin_client_edit_does_not_change_receivable_snapshot(self):
         cliente_id = self._create_client("Nombre Historico")
         orden_id = self._create_order(price=20.0)
