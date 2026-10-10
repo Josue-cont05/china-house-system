@@ -41,6 +41,8 @@ from app.domain.sales.item_descriptions import (
     separar_prefijo_cantidad,
     texto_descripcion_combo_cocina,
     texto_descripcion_combo_factura,
+    texto_descripcion_modificador_cocina,
+    texto_descripcion_modificador_factura,
     texto_descripcion_promocion_cocina,
     texto_descripcion_promocion_factura,
     texto_item_con_indicacion,
@@ -105,12 +107,30 @@ from app.infrastructure.database.cxc import (
     validar_recobro_cxc,
 )
 from app.infrastructure.database.payments import calcular_pendiente_post_cobro
+from app.infrastructure.database.modifiers import (
+    actualizar_grupo_modificador,
+    actualizar_opcion_modificador,
+    alternar_activa_opcion_modificador,
+    alternar_activo_grupo_modificador,
+    alternar_disponible_opcion_modificador,
+    asociar_grupo_a_producto,
+    crear_grupo_modificador,
+    crear_opcion_modificador,
+    crear_tablas_modificadores,
+    desasociar_grupo_de_producto,
+    listar_grupos_de_producto,
+    listar_grupos_de_producto_admin,
+    listar_grupos_modificadores_admin,
+    listar_grupos_por_producto_ids,
+    listar_opciones_de_grupo_admin,
+)
 from app.application.payments.pendiente import dejar_pendiente_a_cliente, pagar_pendiente_ahora
 from app.application.payments.checkout import OrdenYaCerradaOArchivadaError, ejecutar_cobro
 from app.application.payments.receipts import crear_print_job_recibo, obtener_facturas_pendientes
 from app.application.orders.items import (
     actualizar_indicacion_de_item,
     agregar_item_a_orden,
+    agregar_item_con_modificadores_a_orden,
     eliminar_item_de_orden,
 )
 from app.application.orders.lifecycle import eliminar_orden_completa
@@ -365,6 +385,10 @@ def indicacion_operativa_cocina(producto, indicacion):
     if not indicacion:
         return ""
 
+    descripcion_modificador = texto_descripcion_modificador_cocina(indicacion)
+    if descripcion_modificador:
+        return descripcion_modificador
+
     partes = [parte.strip() for parte in indicacion.split(";") if parte.strip()]
 
     if producto in COMBOS_PERSONALES:
@@ -519,6 +543,7 @@ def agrupar_items_factura(items):
         descripcion = (
             texto_descripcion_combo_factura(grupo["producto"], grupo["indicacion"])
             or texto_descripcion_promocion_factura(grupo["producto"], grupo["indicacion"])
+            or texto_descripcion_modificador_factura(grupo["indicacion"])
         )
         if descripcion:
             texto = f"{grupo['cantidad']}x {producto_sin_prefijo_cantidad(grupo['producto'])}\n{descripcion}"
@@ -1775,6 +1800,13 @@ def proteger_sistema():
         "agregar_producto",
         "eliminar_producto",
         "editar_producto",
+        "menu_modificadores",
+        "menu_modificadores_editar_grupo",
+        "menu_modificadores_alternar_activo",
+        "menu_modificadores_crear_opcion",
+        "menu_modificadores_editar_opcion",
+        "menu_modificadores_alternar_activa_opcion",
+        "menu_modificadores_alternar_disponible_opcion",
         "reimprimir_cocina",
         "reimprimir_comanda",
         "cambiar_tasa",
@@ -1815,6 +1847,7 @@ def proteger_sistema():
         "nueva_orden",
         "orden",
         "agregar",
+        "agregar_con_modificadores",
         "enviar_cocina",
         "activar_factura",
         "reimprimir_factura",
@@ -2097,6 +2130,7 @@ def init_db():
     crear_tablas_cierre_jornada()
     crear_tablas_cuentas_por_cobrar(get_connection, pk_autoincrement_sql, asegurar_columna)
     crear_tablas_delivery(get_connection, pk_autoincrement_sql, asegurar_columna)
+    crear_tablas_modificadores(get_connection, pk_autoincrement_sql)
     crear_tablas_comandas()
     crear_tabla_print_jobs(get_connection, pk_autoincrement_sql)
     crear_tabla_service_alerts(get_connection, pk_autoincrement_sql)
@@ -3168,6 +3202,247 @@ def menu():
     return html
 
 
+@app.route("/menu/modificadores", methods=["GET", "POST"])
+def menu_modificadores():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        nombre = request.form.get("nombre", "").strip()
+        if not nombre:
+            conn.close()
+            return "Nombre requerido"
+        try:
+            minimo = int(request.form.get("minimo", "1"))
+            maximo = int(request.form.get("maximo", "1"))
+            orden = int(request.form.get("orden", "0") or "0")
+        except ValueError:
+            conn.close()
+            return "Datos invalidos"
+        crear_grupo_modificador(
+            cursor,
+            obtener_ultimo_id,
+            nombre=nombre,
+            obligatorio=request.form.get("obligatorio") == "1",
+            seleccion_multiple=request.form.get("seleccion_multiple") == "1",
+            minimo=minimo,
+            maximo=maximo,
+            orden=orden,
+        )
+        conn.commit()
+        conn.close()
+        return redirect("/menu/modificadores")
+
+    grupos = listar_grupos_modificadores_admin(cursor)
+    grupos_html = ""
+    for grupo_id, nombre, activo, obligatorio, seleccion_multiple, minimo, maximo, orden in grupos:
+        opciones = listar_opciones_de_grupo_admin(cursor, grupo_id)
+        opciones_html = ""
+        for opcion_id, o_nombre, o_activa, o_disponible, o_precio, o_orden in opciones:
+            estado_activa = "Activa" if o_activa else "Inactiva"
+            estado_disponible = "Disponible" if o_disponible else "Agotada"
+            opciones_html += f"""
+            <div class="opcion-fila">
+                <form method="post" action="/menu/modificadores/opciones/{opcion_id}/editar" class="opcion-editar">
+                    <input name="nombre" value="{html_lib.escape(o_nombre, quote=True)}">
+                    <input name="precio_adicional" type="number" step="0.01" value="{o_precio or 0}">
+                    <input name="orden" type="number" value="{o_orden}">
+                    <button>💾</button>
+                </form>
+                <form method="post" action="/menu/modificadores/opciones/{opcion_id}/activa">
+                    <input type="hidden" name="activa" value="{0 if o_activa else 1}">
+                    <button class="btn-toggle">{estado_activa}</button>
+                </form>
+                <form method="post" action="/menu/modificadores/opciones/{opcion_id}/disponible">
+                    <input type="hidden" name="disponible" value="{0 if o_disponible else 1}">
+                    <button class="btn-toggle">{estado_disponible}</button>
+                </form>
+            </div>
+            """
+
+        estado_grupo = "Activo" if activo else "Inactivo"
+        grupos_html += f"""
+        <div class="card">
+            <form method="post" action="/menu/modificadores/{grupo_id}/editar" class="grupo-editar">
+                <input name="nombre" value="{html_lib.escape(nombre, quote=True)}">
+                <label><input type="checkbox" name="obligatorio" value="1" {"checked" if obligatorio else ""}> Obligatorio</label>
+                <label><input type="checkbox" name="seleccion_multiple" value="1" {"checked" if seleccion_multiple else ""}> Seleccion multiple</label>
+                Minimo <input name="minimo" type="number" value="{minimo}">
+                Maximo <input name="maximo" type="number" value="{maximo}">
+                Orden <input name="orden" type="number" value="{orden}">
+                <button>💾 Guardar grupo</button>
+            </form>
+            <form method="post" action="/menu/modificadores/{grupo_id}/activo" style="display:inline;">
+                <input type="hidden" name="activo" value="{0 if activo else 1}">
+                <button class="btn-toggle">{estado_grupo}</button>
+            </form>
+            <h4>Opciones</h4>
+            {opciones_html or "<p>Sin opciones todavia.</p>"}
+            <form method="post" action="/menu/modificadores/{grupo_id}/opciones/crear" class="opcion-crear">
+                <input name="nombre" placeholder="Nueva opcion" required>
+                <input name="precio_adicional" type="number" step="0.01" placeholder="+precio" value="0">
+                <input name="orden" type="number" placeholder="Orden" value="0">
+                <button>➕ Agregar opcion</button>
+            </form>
+        </div>
+        """
+
+    conn.close()
+
+    html = """
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    """ + estilos_base() + """
+    body { margin: 0; }
+    .contenido { padding: 18px; max-width: 760px; margin: 0 auto; }
+    .card { background: var(--tarjeta); color: var(--texto); padding: 16px; margin-bottom: 14px; border-radius: 14px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); }
+    .card input, .card select { padding: 8px 10px; margin: 4px 4px 4px 0; border-radius: 8px; border: 1.5px solid var(--borde); font-size: 14px; background: var(--panel-secundario); color: var(--texto); width: auto; display:inline-block; }
+    .card label { font-size: 13px; margin-right: 8px; }
+    .card button { padding: 8px 14px; border: none; border-radius: 8px; background: var(--verde-neko); color: #0F1115; cursor: pointer; font-weight: 700; }
+    .btn-toggle { background: var(--panel-secundario) !important; color: var(--texto) !important; border: 1px solid var(--borde) !important; }
+    .grupo-editar, .opcion-crear { margin-bottom: 8px; }
+    .opcion-fila { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+    .opcion-editar { display: inline-flex; gap: 4px; }
+    .page-title { font-size: 22px; font-weight: 900; color: var(--texto); margin: 0 0 18px; }
+    </style>
+    </head>
+    <body>
+    """
+
+    html += barra_superior('<a href="/menu">🍜 Menú</a>')
+    html += f"""
+    <div class="contenido">
+    <div class="page-title">🧩 Modificadores</div>
+    <div class="card">
+        <h3>➕ Nuevo grupo de modificadores</h3>
+        <form method="post">
+            <input name="nombre" placeholder="Nombre (ej. Sabor, Azucar)" required>
+            <label><input type="checkbox" name="obligatorio" value="1" checked> Obligatorio</label>
+            <label><input type="checkbox" name="seleccion_multiple" value="1"> Seleccion multiple</label>
+            Minimo <input name="minimo" type="number" value="1">
+            Maximo <input name="maximo" type="number" value="1">
+            Orden <input name="orden" type="number" value="0">
+            <button>➕ Crear grupo</button>
+        </form>
+    </div>
+    {grupos_html}
+    <a href="/menu" class="volver" style="display:inline-block;margin-top:8px;padding:12px 16px;background:#1a6b4a;color:white;text-decoration:none;border-radius:10px;font-weight:700;">🏠 Volver a Menú</a>
+    </div>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route("/menu/modificadores/<int:grupo_id>/editar", methods=["POST"])
+def menu_modificadores_editar_grupo(grupo_id):
+    try:
+        minimo = int(request.form.get("minimo", "1"))
+        maximo = int(request.form.get("maximo", "1"))
+        orden = int(request.form.get("orden", "0") or "0")
+    except ValueError:
+        return "Datos invalidos"
+    nombre = request.form.get("nombre", "").strip()
+    if not nombre:
+        return "Nombre requerido"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    actualizar_grupo_modificador(
+        cursor,
+        grupo_id,
+        nombre=nombre,
+        obligatorio=request.form.get("obligatorio") == "1",
+        seleccion_multiple=request.form.get("seleccion_multiple") == "1",
+        minimo=minimo,
+        maximo=maximo,
+        orden=orden,
+    )
+    conn.commit()
+    conn.close()
+    return redirect("/menu/modificadores")
+
+
+@app.route("/menu/modificadores/<int:grupo_id>/activo", methods=["POST"])
+def menu_modificadores_alternar_activo(grupo_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    alternar_activo_grupo_modificador(cursor, grupo_id, request.form.get("activo") == "1")
+    conn.commit()
+    conn.close()
+    return redirect("/menu/modificadores")
+
+
+@app.route("/menu/modificadores/<int:grupo_id>/opciones/crear", methods=["POST"])
+def menu_modificadores_crear_opcion(grupo_id):
+    nombre = request.form.get("nombre", "").strip()
+    if not nombre:
+        return "Nombre requerido"
+    try:
+        precio_adicional = float(request.form.get("precio_adicional", "0") or "0")
+        orden = int(request.form.get("orden", "0") or "0")
+    except ValueError:
+        return "Datos invalidos"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    crear_opcion_modificador(
+        cursor,
+        obtener_ultimo_id,
+        grupo_id=grupo_id,
+        nombre=nombre,
+        precio_adicional=precio_adicional,
+        orden=orden,
+    )
+    conn.commit()
+    conn.close()
+    return redirect("/menu/modificadores")
+
+
+@app.route("/menu/modificadores/opciones/<int:opcion_id>/editar", methods=["POST"])
+def menu_modificadores_editar_opcion(opcion_id):
+    nombre = request.form.get("nombre", "").strip()
+    if not nombre:
+        return "Nombre requerido"
+    try:
+        precio_adicional = float(request.form.get("precio_adicional", "0") or "0")
+        orden = int(request.form.get("orden", "0") or "0")
+    except ValueError:
+        return "Datos invalidos"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    actualizar_opcion_modificador(
+        cursor, opcion_id, nombre=nombre, precio_adicional=precio_adicional, orden=orden
+    )
+    conn.commit()
+    conn.close()
+    return redirect("/menu/modificadores")
+
+
+@app.route("/menu/modificadores/opciones/<int:opcion_id>/activa", methods=["POST"])
+def menu_modificadores_alternar_activa_opcion(opcion_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    alternar_activa_opcion_modificador(cursor, opcion_id, request.form.get("activa") == "1")
+    conn.commit()
+    conn.close()
+    return redirect("/menu/modificadores")
+
+
+@app.route("/menu/modificadores/opciones/<int:opcion_id>/disponible", methods=["POST"])
+def menu_modificadores_alternar_disponible_opcion(opcion_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    alternar_disponible_opcion_modificador(cursor, opcion_id, request.form.get("disponible") == "1")
+    conn.commit()
+    conn.close()
+    return redirect("/menu/modificadores")
+
+
 @app.route("/inventario")
 def inventario():
     conn = get_connection()
@@ -4173,12 +4448,49 @@ def editar_producto(id):
             return "Datos invalidos"
 
         catalog_repo.actualizar_producto(id, nombre, precio, categoria_id)
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        grupos_marcados = {int(v) for v in request.form.getlist("grupo_modificador")}
+        grupos_asociados_actuales = {
+            fila[0] for fila in listar_grupos_de_producto_admin(cursor, id)
+        }
+        for grupo_id in grupos_marcados - grupos_asociados_actuales:
+            asociar_grupo_a_producto(cursor, id, grupo_id)
+        for grupo_id in grupos_asociados_actuales - grupos_marcados:
+            desasociar_grupo_de_producto(cursor, id, grupo_id)
+        conn.commit()
+        conn.close()
+
         return redirect("/menu")
 
     p = catalog_repo.obtener_producto(id)
 
     if not p:
         return "Producto no encontrado"
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    todos_los_grupos = listar_grupos_modificadores_admin(cursor)
+    grupos_asociados = {fila[0] for fila in listar_grupos_de_producto_admin(cursor, id)}
+    conn.close()
+
+    grupos_checkboxes = ""
+    for grupo_id, grupo_nombre, grupo_activo, *_resto in todos_los_grupos:
+        checked = "checked" if grupo_id in grupos_asociados else ""
+        etiqueta = html_lib.escape(grupo_nombre)
+        if not grupo_activo:
+            etiqueta += " (inactivo)"
+        grupos_checkboxes += (
+            f'<label style="display:block;font-weight:400;">'
+            f'<input type="checkbox" name="grupo_modificador" value="{grupo_id}" {checked} '
+            f'style="width:auto;display:inline;margin-right:6px;">{etiqueta}</label>'
+        )
+    if not grupos_checkboxes:
+        grupos_checkboxes = (
+            '<p style="color:#666;">No hay grupos de modificadores creados todavia. '
+            'Puedes crearlos en <a href="/menu/modificadores">Modificadores</a>.</p>'
+        )
 
     html = f"""
     <html>
@@ -4207,8 +4519,11 @@ def editar_producto(id):
         selected = "selected" if c[0] == p[2] else ""
         html += f"<option value='{c[0]}' {selected}>{c[1]}</option>"
 
-    html += """
+    html += f"""
         </select><br><br>
+        Grupos de modificadores (sabor, azucar, etc.):
+        {grupos_checkboxes}
+        <br>
         <button>💾 Guardar</button>
     </form>
     <a href="/menu">🏠 Volver</a>
@@ -4694,6 +5009,7 @@ def orden(orden_id):
             "nombre": driver_nombre,
         }
         conductores_delivery_activos = listar_conductores_delivery_activos(cursor)
+    modificadores_por_producto = listar_grupos_por_producto_ids(cursor, [p[0] for p in productos])
     conn.close()
 
     delivery_usd = a_float(o[11])
@@ -4765,6 +5081,7 @@ def orden(orden_id):
         usuario_es_admin_cierre=usuario_es_admin_cierre,
         usuario_puede_reimprimir_cocina=usuario_puede_reimprimir_cocina,
         _render_panel_conductor_delivery=_render_panel_conductor_delivery,
+        modificadores_por_producto=modificadores_por_producto,
     )
 
 
@@ -4820,6 +5137,48 @@ def asignar_conductor_delivery(orden_id):
     conn.close()
     if modo == "interno":
         notificar_delivery_conductor_asignado_posteriormente(orden_id, conductor_id, numero_orden, cliente, referencia)
+    return redirect(f"/orden/{orden_id}")
+
+
+@app.route("/agregar_con_modificadores/<int:orden_id>/<int:producto_id>")
+def agregar_con_modificadores(orden_id, producto_id):
+    """Agrega un producto con grupos de modificadores configurados desde
+    Menu (caso inicial: Jugo Natural -> Sabor + Azucar). `grupo_<id>` se
+    repite por cada opcion elegida de ese grupo (igual convencion que
+    `acompanante`/`arroz` en /agregar), para soportar tanto seleccion
+    unica como multiple sin parsear un formato propio."""
+    seleccion = {}
+    for clave in request.args:
+        if not clave.startswith("grupo_"):
+            continue
+        try:
+            grupo_id = int(clave[len("grupo_"):])
+        except ValueError:
+            continue
+        seleccion[grupo_id] = request.args.getlist(clave)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        agregar_item_con_modificadores_a_orden(
+            cursor,
+            orden_id=orden_id,
+            producto_id=producto_id,
+            seleccion=seleccion,
+            nota=request.args.get("nota", ""),
+            cantidad=request.args.get("cantidad", "1"),
+            listar_grupos_de_producto=listar_grupos_de_producto,
+            emergencia_activa=emergencia_activa,
+            registrar_auditoria_emergencia=registrar_auditoria_emergencia,
+        )
+    except ErrorConstruccionItem as exc:
+        conn.close()
+        return exc.mensaje, exc.status_code
+    except ValueError as exc:
+        conn.close()
+        return str(exc)
+    conn.commit()
+    conn.close()
     return redirect(f"/orden/{orden_id}")
 
 

@@ -33,6 +33,7 @@ DELIVERY_MONTO_MAXIMO) se importan directo, sin inyeccion.
 """
 
 import html as html_lib
+import json
 from collections import defaultdict
 
 from app.domain.sales.calculations import (
@@ -43,6 +44,7 @@ from app.domain.sales.calculations import (
 from app.domain.sales.item_builder import MAX_CANTIDAD_ITEM, es_producto_refresco
 from app.domain.sales.item_descriptions import (
     texto_descripcion_combo_orden,
+    texto_descripcion_modificador_orden,
     texto_descripcion_promocion_orden,
 )
 
@@ -86,7 +88,9 @@ def render_detalle_orden(
     usuario_es_admin_cierre,
     usuario_puede_reimprimir_cocina,
     _render_panel_conductor_delivery,
+    modificadores_por_producto=None,
 ):
+    modificadores_por_producto = modificadores_por_producto or {}
     boton_reimprimir = ""
     if usuario_puede_reimprimir_cocina() and estado in ("en cocina", "listo", "cerrada"):
         boton_reimprimir = (
@@ -292,6 +296,34 @@ def render_detalle_orden(
                     </button>
                     </div>
                     """
+                elif modificadores_por_producto.get(p[0]):
+                    grupos_modificador_data = html_lib.escape(
+                        json.dumps(
+                            [
+                                {
+                                    "id": grupo.id,
+                                    "nombre": grupo.nombre,
+                                    "multiple": grupo.seleccion_multiple,
+                                    "minimo": grupo.minimo,
+                                    "maximo": grupo.maximo,
+                                    "opciones": [
+                                        {"nombre": opcion.nombre, "disponible": opcion.disponible}
+                                        for opcion in grupo.opciones
+                                    ],
+                                }
+                                for grupo in modificadores_por_producto[p[0]]
+                            ]
+                        ),
+                        quote=True,
+                    )
+                    html += f"""
+                    <div class="producto-item">
+                    {qty_stepper_html}
+                    <button class="btn btn-modificadores" type="button" data-url="/agregar_con_modificadores/{orden_id}/{p[0]}" data-producto="{producto_nombre_attr}" data-modificadores="{grupos_modificador_data}">
+                        {producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
+                    </button>
+                    </div>
+                    """
                 else:
                     html += f"""
                     <div class="producto-item">
@@ -409,6 +441,7 @@ def render_detalle_orden(
         descripcion_combo = (
             texto_descripcion_combo_orden(i[0], i[3])
             or texto_descripcion_promocion_orden(i[0], i[3])
+            or texto_descripcion_modificador_orden(i[3])
         )
         indicacion_html = ""
         if descripcion_combo:
@@ -842,24 +875,17 @@ def render_detalle_orden(
     function terminarConfiguracion() {{
         const destino = new URL(configuracionUrl, window.location.origin);
         seleccionesConfiguracion.forEach(function(seleccion) {{
-            destino.searchParams.append(seleccion.parametro, seleccion.valor);
+            const valores = Array.isArray(seleccion.valor) ? seleccion.valor : [seleccion.valor];
+            valores.forEach(function(valor) {{
+                destino.searchParams.append(seleccion.parametro, valor);
+            }});
         }});
+        destino.searchParams.append("cantidad", String(configuracionCantidad));
         window.location.href = destino.pathname + destino.search;
     }}
 
     function seleccionarOpcionConfiguracion(paso, valor) {{
-        let valorFinal = valor;
-        if (valor === "Otro") {{
-            valorFinal = prompt("Escribe el sabor del refresco");
-            if (valorFinal === null || !valorFinal.trim()) {{
-                return;
-            }}
-            valorFinal = valorFinal.trim();
-        }}
-        if (paso.parametro === "extra_lumpias") {{
-            valorFinal = valor.startsWith("Añadir") ? "1" : "0";
-        }}
-        seleccionesConfiguracion.push({{parametro: paso.parametro, valor: valorFinal}});
+        seleccionesConfiguracion.push({{parametro: paso.parametro, valor: valor}});
         pasoConfiguracionActual += 1;
         if (pasoConfiguracionActual >= pasosConfiguracion.length) {{
             terminarConfiguracion();
@@ -872,13 +898,55 @@ def render_detalle_orden(
         const paso = pasosConfiguracion[pasoConfiguracionActual];
         modalConfiguracionTitulo.textContent = paso.titulo;
         configuracionOpcionesGrid.innerHTML = "";
+
+        if (paso.multiple) {{
+            const seleccionadas = new Set();
+            paso.opciones.forEach(function(opcion) {{
+                const boton = document.createElement("button");
+                boton.type = "button";
+                const agotada = opcion.disponible === false;
+                boton.className = "sabor-btn" + (agotada ? " otro" : "");
+                boton.textContent = agotada ? opcion.nombre + " (Agotado)" : opcion.nombre;
+                boton.disabled = agotada;
+                boton.addEventListener("click", function() {{
+                    if (seleccionadas.has(opcion.nombre)) {{
+                        seleccionadas.delete(opcion.nombre);
+                        boton.classList.remove("activo");
+                    }} else {{
+                        if (seleccionadas.size >= paso.maximo) {{
+                            alert("Maximo " + paso.maximo + " opcion(es) para " + paso.titulo);
+                            return;
+                        }}
+                        seleccionadas.add(opcion.nombre);
+                        boton.classList.add("activo");
+                    }}
+                }});
+                configuracionOpcionesGrid.appendChild(boton);
+            }});
+            const continuar = document.createElement("button");
+            continuar.type = "button";
+            continuar.className = "sabor-btn combo-aceptar";
+            continuar.textContent = "Continuar";
+            continuar.addEventListener("click", function() {{
+                if (seleccionadas.size < paso.minimo) {{
+                    alert("Selecciona al menos " + paso.minimo + " opcion(es) para " + paso.titulo);
+                    return;
+                }}
+                seleccionarOpcionConfiguracion(paso, Array.from(seleccionadas));
+            }});
+            configuracionOpcionesGrid.appendChild(continuar);
+            return;
+        }}
+
         paso.opciones.forEach(function(opcion) {{
             const boton = document.createElement("button");
             boton.type = "button";
-            boton.className = "sabor-btn" + (opcion === "Otro" ? " otro" : "");
-            boton.textContent = opcion;
+            const agotada = opcion.disponible === false;
+            boton.className = "sabor-btn" + (agotada ? " otro" : "");
+            boton.textContent = agotada ? opcion.nombre + " (Agotado)" : opcion.nombre;
+            boton.disabled = agotada;
             boton.addEventListener("click", function() {{
-                seleccionarOpcionConfiguracion(paso, opcion);
+                seleccionarOpcionConfiguracion(paso, opcion.nombre);
             }});
             configuracionOpcionesGrid.appendChild(boton);
         }});
@@ -1010,51 +1078,32 @@ def render_detalle_orden(
 
     function abrirConfiguracion(btn) {{
         configuracionUrl = btn.dataset.url;
+        configuracionCantidad = obtenerCantidadDesdeBoton(btn);
         modalConfiguracionProducto.textContent = btn.dataset.producto || "Producto";
         pasosConfiguracion = [];
         seleccionesConfiguracion = [];
         pasoConfiguracionActual = 0;
         configuracionOpcionesGrid.className = "sabores-grid";
-        const sabores = saboresRefresco.slice();
 
-        if (btn.dataset.tipo === "combo") {{
-            abrirConfiguracionCombo(btn);
-            return;
-        }} else {{
-            const pollos = (btn.dataset.pollos || "").split("|").filter(Boolean);
-            const arroces = (btn.dataset.arroces || "").split("|").filter(Boolean);
-            const cantidadArroces = Number(btn.dataset.cantidadArroces || 0);
-            const cantidadRefrescos = Number(btn.dataset.cantidadRefrescos || 0);
-            if (pollos.length) {{
-                pasosConfiguracion.push({{
-                    titulo: "Tipo de pollo",
-                    parametro: "pollo",
-                    opciones: pollos
-                }});
-            }}
-            for (let i = 1; i <= cantidadArroces; i += 1) {{
-                pasosConfiguracion.push({{
-                    titulo: "Elige el arroz " + i + " de " + cantidadArroces,
-                    parametro: "arroz",
-                    opciones: arroces
-                }});
-            }}
-            for (let i = 1; i <= cantidadRefrescos; i += 1) {{
-                pasosConfiguracion.push({{
-                    titulo: "Sabor del " + (btn.dataset.refresco || "refresco") + " " + i + " de " + cantidadRefrescos,
-                    parametro: "sabor",
-                    opciones: sabores
-                }});
-            }}
-            pasosConfiguracion.push({{
-                titulo: "¿Añadir Ración de Lumpias por $3.00?",
-                parametro: "extra_lumpias",
-                opciones: ["Sin extra", "Añadir Ración de Lumpias (+$3.00)"]
-            }});
+        let grupos = [];
+        try {{
+            grupos = JSON.parse(btn.dataset.modificadores || "[]");
+        }} catch (error) {{
+            grupos = [];
         }}
+        grupos.forEach(function(grupo) {{
+            pasosConfiguracion.push({{
+                titulo: grupo.nombre,
+                parametro: "grupo_" + grupo.id,
+                opciones: grupo.opciones,
+                multiple: !!grupo.multiple,
+                minimo: grupo.minimo || 1,
+                maximo: grupo.maximo || 1
+            }});
+        }});
 
         if (!pasosConfiguracion.length) {{
-            window.location.href = configuracionUrl;
+            window.location.href = configuracionUrl + "?cantidad=" + configuracionCantidad;
             return;
         }}
         mostrarPasoConfiguracion();
@@ -1153,6 +1202,9 @@ def render_detalle_orden(
 
     document.querySelectorAll(".btn-configurable").forEach(function(btn) {{
         btn.addEventListener("click", function() {{ abrirConfiguracionSelect(btn); }});
+    }});
+    document.querySelectorAll(".btn-modificadores").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{ abrirConfiguracion(btn); }});
     }});
     cerrarModalConfiguracion.addEventListener("click", cerrarConfiguracion);
     modalConfiguracion.addEventListener("click", function(event) {{

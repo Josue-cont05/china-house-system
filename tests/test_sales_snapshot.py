@@ -3,6 +3,11 @@ import unittest
 from unittest import mock
 
 from app.domain.sales.item_descriptions import deserializar_indicacion
+from app.infrastructure.database.modifiers import (
+    listar_grupos_de_producto_admin,
+    listar_grupos_modificadores_admin,
+    listar_opciones_de_grupo_admin,
+)
 from tests.support_env import TEST_DB, cleanup_test_db, import_web_app
 
 
@@ -1479,6 +1484,400 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(indicaciones.count("Sabor: Fresa"), 3)
         self.assertEqual(indicaciones.count("Sabor: Parchita"), 2)
         self.assertEqual(len(indicaciones), 5)
+
+    # ---- sistema general de modificadores (Jugo Natural: Sabor + Azucar) ----
+
+    def _crear_grupo_jugo_natural(self, producto_id):
+        """Crea los 2 grupos del caso inicial de la mision (Sabor,
+        Azucar) y los asocia al producto dado, via las mismas funciones
+        que usa la administracion desde /menu/modificadores (no SQL
+        directo), para que el test ejercite el mismo codigo que un
+        admin real usaria."""
+        conn = self._conn()
+        cursor = conn.cursor()
+
+        grupo_sabor = web_app.crear_grupo_modificador(
+            cursor, web_app.obtener_ultimo_id,
+            nombre="Sabor", obligatorio=True, seleccion_multiple=False, minimo=1, maximo=1,
+        )
+        for nombre in ("Fresa", "Mora", "Guanábana", "Parchita"):
+            web_app.crear_opcion_modificador(
+                cursor, web_app.obtener_ultimo_id, grupo_id=grupo_sabor, nombre=nombre
+            )
+
+        grupo_azucar = web_app.crear_grupo_modificador(
+            cursor, web_app.obtener_ultimo_id,
+            nombre="Azúcar", obligatorio=True, seleccion_multiple=False, minimo=1, maximo=1,
+        )
+        for nombre in ("Con azúcar", "Sin azúcar", "Bajo de azúcar", "Mucha azúcar"):
+            web_app.crear_opcion_modificador(
+                cursor, web_app.obtener_ultimo_id, grupo_id=grupo_azucar, nombre=nombre
+            )
+
+        web_app.asociar_grupo_a_producto(cursor, producto_id, grupo_sabor)
+        web_app.asociar_grupo_a_producto(cursor, producto_id, grupo_azucar)
+        conn.commit()
+        conn.close()
+        return grupo_sabor, grupo_azucar
+
+    def _opcion_id(self, grupo_id, nombre):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM opciones_modificador WHERE grupo_id=? AND nombre=?",
+            (grupo_id, nombre),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0]
+
+    def test_agregar_con_modificadores_creates_item_with_selection_and_correct_price(self):
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+
+        response = self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[
+                (f"grupo_{grupo_sabor}", "Parchita"),
+                (f"grupo_{grupo_azucar}", "Sin azúcar"),
+            ],
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT producto, precio, indicacion FROM orden_items WHERE orden_id=?", (orden_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        self.assertEqual(row[0], "Jugo Natural")
+        self.assertEqual(row[1], 2.0)
+        datos = deserializar_indicacion(row[2])
+        self.assertEqual(datos["tipo"], "modificador")
+        self.assertEqual(
+            datos["grupos"],
+            [
+                {"grupo_id": grupo_sabor, "nombre": "Sabor", "opciones": ["Parchita"]},
+                {"grupo_id": grupo_azucar, "nombre": "Azúcar", "opciones": ["Sin azúcar"]},
+            ],
+        )
+
+    def test_agregar_con_modificadores_rejects_missing_required_group(self):
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, _grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+
+        response = self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[(f"grupo_{grupo_sabor}", "Parchita")],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Debes seleccionar".encode(), response.data)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+        total = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(total, 0)
+
+    def test_agregar_con_modificadores_rejects_sold_out_option(self):
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+        mora_id = self._opcion_id(grupo_sabor, "Mora")
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        web_app.alternar_disponible_opcion_modificador(cursor, mora_id, False)
+        conn.commit()
+        conn.close()
+
+        response = self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[
+                (f"grupo_{grupo_sabor}", "Mora"),
+                (f"grupo_{grupo_azucar}", "Sin azúcar"),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("agotado".encode(), response.data)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+        total = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(total, 0)
+
+    def test_agregar_con_modificadores_still_allows_other_flavors_when_one_sold_out(self):
+        """Mora agotada -> Jugo Natural sigue disponible, cualquier otro
+        sabor activo (ej. Fresa) debe poder seleccionarse sin problema."""
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+        mora_id = self._opcion_id(grupo_sabor, "Mora")
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        web_app.alternar_disponible_opcion_modificador(cursor, mora_id, False)
+        conn.commit()
+        conn.close()
+
+        response = self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[
+                (f"grupo_{grupo_sabor}", "Fresa"),
+                (f"grupo_{grupo_azucar}", "Sin azúcar"),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 302)
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+        total = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(total, 1)
+
+    def test_agregar_con_modificadores_option_surcharge_adds_to_price(self):
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+        parchita_id = self._opcion_id(grupo_sabor, "Parchita")
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        web_app.actualizar_opcion_modificador(
+            cursor, parchita_id, nombre="Parchita", precio_adicional=0.5, orden=0
+        )
+        conn.commit()
+        conn.close()
+
+        self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[
+                (f"grupo_{grupo_sabor}", "Parchita"),
+                (f"grupo_{grupo_azucar}", "Sin azúcar"),
+            ],
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT precio FROM orden_items WHERE orden_id=?", (orden_id,))
+        precio = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(precio, 2.5)
+
+    def test_agregar_con_modificadores_cantidad_creates_that_many_identical_rows(self):
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+
+        self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[
+                ("cantidad", "3"),
+                (f"grupo_{grupo_sabor}", "Parchita"),
+                (f"grupo_{grupo_azucar}", "Sin azúcar"),
+            ],
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT producto, precio, indicacion FROM orden_items WHERE orden_id=?", (orden_id,)
+        )
+        filas = cursor.fetchall()
+        conn.close()
+        self.assertEqual(len(filas), 3)
+        self.assertEqual(len({fila[2] for fila in filas}), 1)  # misma indicacion en las 3
+
+    def test_modificador_selection_persists_through_reload_kitchen_and_factura(self):
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+
+        self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[
+                (f"grupo_{grupo_sabor}", "Parchita"),
+                (f"grupo_{grupo_azucar}", "Sin azúcar"),
+            ],
+        )
+
+        pagina = self.client.get(f"/orden/{orden_id}")
+        html = pagina.get_data(as_text=True)
+        self.assertEqual(pagina.status_code, 200)
+        self.assertIn("Parchita", html)
+        self.assertIn("Sin az", html)  # "Sin azúcar" (evita problemas de encoding en el assert)
+        self.assertNotIn('"tipo":"modificador"', html)
+        self.assertNotIn("{&#34;version&#34;", html)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT producto, precio, indicacion FROM orden_items WHERE orden_id=?", (orden_id,))
+        producto, precio, indicacion = cursor.fetchone()
+        conn.close()
+
+        texto_cocina = web_app.indicacion_operativa_cocina(producto, indicacion)
+        self.assertIn("Parchita", texto_cocina)
+        self.assertIn("Sin az", texto_cocina)
+
+        texto_factura = web_app.agrupar_items_factura([(producto, precio, indicacion)])
+        self.assertIn("Parchita", texto_factura[0]["texto"])
+        self.assertIn("Sin az", texto_factura[0]["texto"])
+
+    def test_deactivating_option_after_use_does_not_corrupt_historical_order(self):
+        """Desactivar/agotar una opcion DESPUES de usada en una orden no
+        debe alterar esa orden historica -- la seleccion ya quedo
+        serializada como snapshot en orden_items.indicacion, inmune a
+        cambios posteriores del catalogo de modificadores."""
+        orden_id = self._create_empty_order()
+        jugo_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        grupo_sabor, grupo_azucar = self._crear_grupo_jugo_natural(jugo_id)
+        mora_id = self._opcion_id(grupo_sabor, "Mora")
+
+        self.client.get(
+            f"/agregar_con_modificadores/{orden_id}/{jugo_id}",
+            query_string=[
+                (f"grupo_{grupo_sabor}", "Mora"),
+                (f"grupo_{grupo_azucar}", "Sin azúcar"),
+            ],
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        web_app.alternar_activa_opcion_modificador(cursor, mora_id, False)
+        web_app.alternar_disponible_opcion_modificador(cursor, mora_id, False)
+        conn.commit()
+        conn.close()
+
+        pagina = self.client.get(f"/orden/{orden_id}")
+        self.assertEqual(pagina.status_code, 200)
+        self.assertIn("Mora", pagina.get_data(as_text=True))
+
+    def test_menu_modificadores_admin_routes_require_master_role(self):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO usuarios (nombre, pin, rol, activo) VALUES (?, ?, ?, 1)",
+            ("Mesonera Modificadores", "0000", "mesonera"),
+        )
+        usuario_id = web_app.obtener_ultimo_id(cursor, "usuarios")
+        conn.commit()
+        conn.close()
+        with self.client.session_transaction() as sess:
+            sess["usuario_id"] = usuario_id
+            sess["usuario_nombre"] = "Mesonera Modificadores"
+            sess["usuario"] = "Mesonera Modificadores"
+            sess["usuario_rol"] = "mesonera"
+
+        self.assertEqual(self.client.get("/menu/modificadores").status_code, 403)
+
+    def test_menu_modificadores_crud_flow(self):
+        response = self.client.post(
+            "/menu/modificadores",
+            data={"nombre": "Topping", "minimo": "0", "maximo": "2", "orden": "0"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        grupos = listar_grupos_modificadores_admin(cursor)
+        conn.close()
+        grupo = next(g for g in grupos if g[1] == "Topping")
+        grupo_id = grupo[0]
+        self.assertEqual(grupo[2], 1)  # activo
+        self.assertEqual(grupo[3], 0)  # obligatorio=False (no se marco el checkbox)
+
+        self.assertEqual(
+            self.client.post(
+                f"/menu/modificadores/{grupo_id}/opciones/crear",
+                data={"nombre": "Perlas", "precio_adicional": "0.5", "orden": "0"},
+            ).status_code,
+            302,
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        opciones = listar_opciones_de_grupo_admin(cursor, grupo_id)
+        conn.close()
+        self.assertEqual(len(opciones), 1)
+        opcion_id = opciones[0][0]
+        self.assertEqual(opciones[0][1], "Perlas")
+
+        self.assertEqual(
+            self.client.post(
+                f"/menu/modificadores/opciones/{opcion_id}/activa", data={"activa": "0"}
+            ).status_code,
+            302,
+        )
+        conn = self._conn()
+        cursor = conn.cursor()
+        opciones = listar_opciones_de_grupo_admin(cursor, grupo_id)
+        conn.close()
+        self.assertEqual(opciones[0][2], 0)  # activa=False
+
+        self.assertEqual(
+            self.client.post(
+                f"/menu/modificadores/{grupo_id}/activo", data={"activo": "0"}
+            ).status_code,
+            302,
+        )
+        conn = self._conn()
+        cursor = conn.cursor()
+        grupos = listar_grupos_modificadores_admin(cursor)
+        conn.close()
+        grupo = next(g for g in grupos if g[0] == grupo_id)
+        self.assertEqual(grupo[2], 0)  # activo=False
+
+    def test_editar_producto_associates_and_disassociates_modifier_groups(self):
+        producto_id = self._insert_product("Jugo Natural", 2.0, "Bebidas")
+        conn = self._conn()
+        cursor = conn.cursor()
+        categoria_id = cursor.execute(
+            "SELECT categoria_id FROM productos WHERE id=?", (producto_id,)
+        ).fetchone()[0]
+        grupo_id = web_app.crear_grupo_modificador(
+            cursor, web_app.obtener_ultimo_id, nombre="Sabor", minimo=1, maximo=1
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.client.post(
+            f"/editar_producto/{producto_id}",
+            data={
+                "nombre": "Jugo Natural",
+                "precio": "2.0",
+                "categoria_id": str(categoria_id),
+                "grupo_modificador": str(grupo_id),
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        asociados = listar_grupos_de_producto_admin(cursor, producto_id)
+        conn.close()
+        self.assertEqual([a[0] for a in asociados], [grupo_id])
+
+        response = self.client.post(
+            f"/editar_producto/{producto_id}",
+            data={"nombre": "Jugo Natural", "precio": "2.0", "categoria_id": str(categoria_id)},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        asociados = listar_grupos_de_producto_admin(cursor, producto_id)
+        conn.close()
+        self.assertEqual(asociados, [])
 
     def test_delivery_legacy_products_are_preserved_hidden_and_blocked_for_new_adds(self):
         delivery_id = self._delivery_product_id("Delivery 3")

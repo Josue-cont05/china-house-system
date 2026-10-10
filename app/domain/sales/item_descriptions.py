@@ -218,6 +218,64 @@ def texto_descripcion_promocion_factura(producto, indicacion):
     return "\n".join(f"• {linea}" for linea in promocion["lineas"])
 
 
+def datos_modificador_desde_indicacion(indicacion):
+    datos = deserializar_indicacion(indicacion)
+    if not datos or datos.get("tipo") != "modificador":
+        return None
+    grupos = datos.get("grupos")
+    if not isinstance(grupos, list):
+        return None
+    return datos
+
+
+def texto_descripcion_modificador_orden(indicacion):
+    datos = datos_modificador_desde_indicacion(indicacion)
+    if not datos:
+        return ""
+    lineas = [
+        f"• {opcion}"
+        for grupo in datos.get("grupos", [])
+        for opcion in grupo.get("opciones", [])
+        if str(opcion).strip()
+    ]
+    nota = (datos.get("nota") or "").strip()
+    if nota:
+        lineas.append(f"• Nota: {nota}")
+    return "\n".join(lineas)
+
+
+def texto_descripcion_modificador_cocina(indicacion):
+    datos = datos_modificador_desde_indicacion(indicacion)
+    if not datos:
+        return ""
+    lineas = [
+        f"    - {opcion}"
+        for grupo in datos.get("grupos", [])
+        for opcion in grupo.get("opciones", [])
+        if str(opcion).strip()
+    ]
+    nota = (datos.get("nota") or "").strip()
+    if nota:
+        lineas.append(f"    Nota: {nota}")
+    return "\n".join(lineas)
+
+
+def texto_descripcion_modificador_factura(indicacion):
+    datos = datos_modificador_desde_indicacion(indicacion)
+    if not datos:
+        return ""
+    lineas = [
+        f"• {opcion}"
+        for grupo in datos.get("grupos", [])
+        for opcion in grupo.get("opciones", [])
+        if str(opcion).strip()
+    ]
+    nota = (datos.get("nota") or "").strip()
+    if nota:
+        lineas.append(f"• Nota: {nota}")
+    return "\n".join(lineas)
+
+
 def texto_item_con_indicacion(producto, indicacion):
     producto = producto_sin_prefijo_cantidad(producto)
     indicacion = normalizar_indicacion_item(indicacion)

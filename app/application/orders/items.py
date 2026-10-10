@@ -25,13 +25,41 @@ ordenes) para no crear un import circular."""
 
 from app.domain.sales.calculations import _a_float as a_float
 from app.domain.sales.item_builder import construir_items_orden, validar_cantidad_item
-from app.domain.sales.item_descriptions import normalizar_indicacion_item
+from app.domain.sales.item_descriptions import normalizar_indicacion_item, serializar_indicacion
+from app.domain.sales.modifiers import validar_seleccion_modificadores
 from app.domain.sales.order_states import (
     orden_archivada,
     puede_agregar_item_orden,
     puede_editar_indicacion_item,
     puede_modificar_orden,
 )
+
+
+def _validar_orden_puede_recibir_item_nuevo(cursor, orden_id, emergencia_activa):
+    """Guard compartido por agregar_item_a_orden y
+    agregar_item_con_modificadores_a_orden: ambas rutas de "agregar
+    producto a una orden ya creada" exigen exactamente las mismas
+    reglas de estado. Devuelve (estado, cierre_id, edicion_emergencia_activa)."""
+    cursor.execute(
+        "SELECT estado, cierre_id, listo_despacho_at FROM ordenes WHERE id=?", (orden_id,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError("Orden no encontrada")
+    estado, cierre_id, listo_despacho_at = row
+
+    if orden_archivada(cierre_id):
+        raise ValueError("No puedes modificar una orden archivada en cierre de jornada")
+
+    edicion_emergencia_activa = emergencia_activa(orden_id)
+    # Agregar un item NUEVO (para enviar a cocina) esta permitido aunque
+    # la orden ya este cobrada (estado='cerrada'), mientras todavia no
+    # se haya marcado LISTA PARA RETIRAR -- CERRADA != LISTA PARA
+    # RETIRAR (mision Despacho). Ver puede_agregar_item_orden.
+    if not puede_agregar_item_orden(cierre_id, listo_despacho_at, edicion_emergencia_activa):
+        raise ValueError("No puedes agregar productos a una orden ya lista para retirar")
+
+    return estado, cierre_id, edicion_emergencia_activa
 
 
 def agregar_item_a_orden(
@@ -61,25 +89,9 @@ def agregar_item_a_orden(
     cantidad=1,
 ):
     cantidad = validar_cantidad_item(cantidad)
-
-    cursor.execute(
-        "SELECT estado, cierre_id, listo_despacho_at FROM ordenes WHERE id=?", (orden_id,)
+    estado, _cierre_id, edicion_emergencia_activa = _validar_orden_puede_recibir_item_nuevo(
+        cursor, orden_id, emergencia_activa
     )
-    row = cursor.fetchone()
-    if not row:
-        raise ValueError("Orden no encontrada")
-    estado, cierre_id, listo_despacho_at = row
-
-    if orden_archivada(cierre_id):
-        raise ValueError("No puedes modificar una orden archivada en cierre de jornada")
-
-    edicion_emergencia_activa = emergencia_activa(orden_id)
-    # Agregar un item NUEVO (para enviar a cocina) esta permitido aunque
-    # la orden ya este cobrada (estado='cerrada'), mientras todavia no
-    # se haya marcado LISTA PARA RETIRAR -- CERRADA != LISTA PARA
-    # RETIRAR (mision Despacho). Ver puede_agregar_item_orden.
-    if not puede_agregar_item_orden(cierre_id, listo_despacho_at, edicion_emergencia_activa):
-        raise ValueError("No puedes agregar productos a una orden ya lista para retirar")
 
     cursor.execute(
         """
@@ -163,6 +175,69 @@ def agregar_item_a_orden(
             orden_id,
             "agregar_producto_emergencia",
             f"Producto agregado: {prefijo_cantidad}{items_construidos.item_principal.producto} - ${items_construidos.item_principal.precio}",
+        )
+
+
+def agregar_item_con_modificadores_a_orden(
+    cursor,
+    *,
+    orden_id,
+    producto_id,
+    seleccion,
+    nota,
+    cantidad,
+    listar_grupos_de_producto,
+    emergencia_activa,
+    registrar_auditoria_emergencia,
+):
+    """Analogo a agregar_item_a_orden, pero para productos con grupos de
+    modificadores configurados desde Menu (caso inicial: Jugo Natural ->
+    Sabor + Azucar) en vez de los combos/promociones hardcodeados en
+    web_app.py. `seleccion`: dict {grupo_id: [nombre_opcion, ...]}.
+    `listar_grupos_de_producto` se recibe inyectado (misma razon que
+    emergencia_activa/registrar_auditoria_emergencia: evitar un import
+    circular con app.infrastructure.database.modifiers via web_app.py)."""
+    cantidad = validar_cantidad_item(cantidad)
+    estado, _cierre_id, edicion_emergencia_activa = _validar_orden_puede_recibir_item_nuevo(
+        cursor, orden_id, emergencia_activa
+    )
+
+    cursor.execute("SELECT nombre, precio FROM productos WHERE id=?", (producto_id,))
+    p = cursor.fetchone()
+    if not p:
+        raise ValueError("Producto no encontrado")
+    producto_nombre, producto_precio = p
+
+    grupos = listar_grupos_de_producto(cursor, producto_id)
+    grupos_resultado, precio_adicional = validar_seleccion_modificadores(grupos, seleccion)
+
+    nota = normalizar_indicacion_item(nota)
+    indicacion = ""
+    if grupos_resultado or nota:
+        datos_indicacion = {"tipo": "modificador", "grupos": grupos_resultado}
+        if nota:
+            datos_indicacion["nota"] = nota
+        indicacion = serializar_indicacion(datos_indicacion)
+
+    precio_final = round(a_float(producto_precio) + precio_adicional, 2)
+    incluido_en_snapshot = 0 if estado == "cerrada" else 1
+
+    for _ in range(cantidad):
+        cursor.execute(
+            """
+            INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (orden_id, producto_nombre, precio_final, indicacion, incluido_en_snapshot),
+        )
+
+    if estado == "cerrada" and edicion_emergencia_activa:
+        prefijo_cantidad = f"{cantidad}x " if cantidad > 1 else ""
+        registrar_auditoria_emergencia(
+            cursor,
+            orden_id,
+            "agregar_producto_emergencia",
+            f"Producto agregado: {prefijo_cantidad}{producto_nombre} - ${precio_final}",
         )
 
 
