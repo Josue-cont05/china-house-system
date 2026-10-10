@@ -3811,6 +3811,191 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self.client.get("/clientes").status_code, 403)
         self.assertEqual(self.client.get("/cuentas_por_cobrar").status_code, 403)
 
+    # ---- cobro masivo de CxC (un pago -> varias cuentas del mismo cliente) ----
+
+    def _crear_cuenta_credito(self, cliente_id, price):
+        """Crea una orden a credito completo para `cliente_id`, generando
+        una cuenta por cobrar pendiente por el total de la orden."""
+        orden_id = self._create_order(price=price)
+        respuesta = self._charge(orden_id, "", 0, modo_cobro="credito", cliente_id=cliente_id)
+        self.assertEqual(respuesta.status_code, 302)
+        return self._cuenta_por_orden(orden_id)
+
+    def test_pago_masivo_admin_routes_require_master_role(self):
+        cliente_id = self._create_client("Cliente Pago Masivo Permiso")
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO usuarios (nombre, pin, rol, activo) VALUES (?, ?, ?, 1)",
+            ("Mesonera Pago Masivo", "0000", "mesonera"),
+        )
+        usuario_id = web_app.obtener_ultimo_id(cursor, "usuarios")
+        conn.commit()
+        conn.close()
+        with self.client.session_transaction() as sess:
+            sess["usuario_id"] = usuario_id
+            sess["usuario_nombre"] = "Mesonera Pago Masivo"
+            sess["usuario"] = "Mesonera Pago Masivo"
+            sess["usuario_rol"] = "mesonera"
+
+        self.assertEqual(
+            self.client.get(f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo").status_code, 403
+        )
+
+    def test_pago_masivo_automatico_applies_oldest_debt_first_with_partial_remainder(self):
+        """Ejemplo exacto de la mision: ordenes de 8/12/20 y un pago de
+        25 -> la mas antigua primero, la ultima queda con abono parcial."""
+        cliente_id = self._create_client("Cliente Pago Masivo Auto")
+        cuenta_301 = self._crear_cuenta_credito(cliente_id, 8.0)
+        cuenta_305 = self._crear_cuenta_credito(cliente_id, 12.0)
+        cuenta_309 = self._crear_cuenta_credito(cliente_id, 20.0)
+
+        response = self.client.post(
+            f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo",
+            data={"modo": "automatico", "metodo_pago": "usd", "monto": "25"},
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_301[0],)
+        )
+        fila_301 = cursor.fetchone()
+        cursor.execute(
+            "SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_305[0],)
+        )
+        fila_305 = cursor.fetchone()
+        cursor.execute(
+            "SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_309[0],)
+        )
+        fila_309 = cursor.fetchone()
+        conn.close()
+
+        self.assertEqual(fila_301, (0.0, "pagada"))
+        self.assertEqual(fila_305, (0.0, "pagada"))
+        self.assertEqual(fila_309, (15.0, "pendiente"))
+
+    def test_pago_masivo_manual_applies_only_selected_amounts(self):
+        cliente_id = self._create_client("Cliente Pago Masivo Manual")
+        cuenta_a = self._crear_cuenta_credito(cliente_id, 10.0)
+        cuenta_b = self._crear_cuenta_credito(cliente_id, 10.0)
+
+        response = self.client.post(
+            f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo",
+            data={
+                "modo": "manual",
+                "metodo_pago": "usd",
+                "monto": "7",
+                "cuenta_seleccionada": [str(cuenta_a[0])],
+                f"monto_{cuenta_a[0]}": "7",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_a[0],))
+        fila_a = cursor.fetchone()
+        cursor.execute("SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_b[0],))
+        fila_b = cursor.fetchone()
+        conn.close()
+
+        self.assertEqual(fila_a, (3.0, "pendiente"))
+        self.assertEqual(fila_b, (10.0, "pendiente"))  # no seleccionada, intacta
+
+    def test_pago_masivo_rejects_manual_total_exceeding_payment_without_writes(self):
+        cliente_id = self._create_client("Cliente Pago Masivo Exceso")
+        cuenta_a = self._crear_cuenta_credito(cliente_id, 10.0)
+
+        response = self.client.post(
+            f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo",
+            data={
+                "modo": "manual",
+                "metodo_pago": "usd",
+                "monto": "5",
+                "cuenta_seleccionada": [str(cuenta_a[0])],
+                f"monto_{cuenta_a[0]}": "10",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("supera el pago recibido".encode(), response.data)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_a[0],))
+        fila_a = cursor.fetchone()
+        conn.close()
+        self.assertEqual(fila_a, (10.0, "pendiente"))  # intacta
+
+    def test_pago_masivo_rejects_when_client_has_no_pending_accounts(self):
+        cliente_id = self._create_client("Cliente Pago Masivo Sin Deuda")
+
+        response = self.client.post(
+            f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo",
+            data={"modo": "automatico", "metodo_pago": "usd", "monto": "25"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("No hay cuentas pendientes".encode(), response.data)
+
+    def test_pago_masivo_atomicity_rolls_back_everything_on_second_account_failure(self):
+        cliente_id = self._create_client("Cliente Pago Masivo Atomico")
+        cuenta_a = self._crear_cuenta_credito(cliente_id, 8.0)
+        cuenta_b = self._crear_cuenta_credito(cliente_id, 12.0)
+
+        with mock.patch(
+            "app.application.cxc.abonos.actualizar_saldo_cxc",
+            side_effect=[None, RuntimeError("fallo pago masivo")],
+        ):
+            response = self.client.post(
+                f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo",
+                data={"modo": "automatico", "metodo_pago": "usd", "monto": "20"},
+            )
+        self.assertEqual(response.status_code, 500)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_a[0],))
+        fila_a = cursor.fetchone()
+        cursor.execute("SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE id=?", (cuenta_b[0],))
+        fila_b = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) FROM pagos_masivos_cxc WHERE cliente_id=?", (cliente_id,))
+        total_pagos_masivos = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM cuentas_por_cobrar_movimientos WHERE cuenta_id IN (?, ?) AND tipo='abono'",
+            (cuenta_a[0], cuenta_b[0]),
+        )
+        total_movimientos_abono = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertEqual(fila_a, (8.0, "pendiente"))  # ninguna cuenta quedo parcialmente abonada
+        self.assertEqual(fila_b, (12.0, "pendiente"))
+        self.assertEqual(total_pagos_masivos, 0)
+        self.assertEqual(total_movimientos_abono, 0)
+
+    def test_pago_masivo_result_page_shows_distribution_per_order(self):
+        cliente_id = self._create_client("Cliente Pago Masivo Resultado")
+        cuenta_a = self._crear_cuenta_credito(cliente_id, 8.0)
+        self._crear_cuenta_credito(cliente_id, 12.0)
+
+        response = self.client.post(
+            f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo",
+            data={"modo": "automatico", "metodo_pago": "usd", "monto": "25"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("Monto aplicado", html)
+        self.assertIn("20.00", html)  # 8 + 12 aplicados de los 25 recibidos
+        self.assertIn("5.00", html)  # sobrante
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT orden_id FROM cuentas_por_cobrar WHERE id=?", (cuenta_a[0],))
+        orden_a = cursor.fetchone()[0]
+        conn.close()
+        self.assertIn(f"#{orden_a}", html)
+
     def test_toma_ordenes_gate_covers_cobrar_pendiente_y_asignar_conductor(self):
         """Regresion: /orden/<id>/cobrar_pendiente y
         /orden/<id>/delivery_conductor no tenian NINGUN chequeo de rol

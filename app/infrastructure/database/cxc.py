@@ -83,6 +83,30 @@ def crear_tablas_cuentas_por_cobrar(get_connection, pk_autoincrement_sql, asegur
         """
     )
 
+    # Cabecera de un pago que se distribuye entre varias cuentas del
+    # mismo cliente (cobro masivo de CxC) -- cada abono resultante queda
+    # enlazado a esta fila via cuentas_por_cobrar_movimientos.referencia_externa_id
+    # ('pago_masivo'), para poder explicar despues como se distribuyo.
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS pagos_masivos_cxc (
+            id {pk_autoincrement_sql()},
+            cliente_id INTEGER NOT NULL,
+            metodo_pago TEXT,
+            moneda_pago TEXT,
+            monto_pago REAL,
+            tasa_movimiento REAL,
+            referencia TEXT,
+            observacion TEXT,
+            fecha TEXT,
+            usuario_id INTEGER,
+            monto_total_usd REAL DEFAULT 0,
+            monto_aplicado_usd REAL DEFAULT 0,
+            monto_sobrante_usd REAL DEFAULT 0
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -293,7 +317,15 @@ def insertar_movimiento_abono_cxc(
     fecha,
     usuario_id,
     observacion,
+    referencia_externa_tipo=None,
+    referencia_externa_id=None,
 ):
+    """`referencia_externa_tipo`/`referencia_externa_id` enlazan este
+    movimiento a una entidad externa (ej. 'pago_masivo' + el id de la
+    cabecera en pagos_masivos_cxc cuando este abono es parte de un pago
+    que se distribuyo entre varias cuentas) -- columnas que ya existian
+    en el esquema sin usar todavia. NULL (comportamiento por defecto,
+    sin cambios) para un abono individual normal."""
     cursor.execute(
         """
         INSERT INTO cuentas_por_cobrar_movimientos (
@@ -302,7 +334,7 @@ def insertar_movimiento_abono_cxc(
             usuario_id, observacion, movimiento_revertido_id,
             referencia_externa_tipo, referencia_externa_id
         )
-        VALUES (?, 'abono', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        VALUES (?, 'abono', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
         """,
         (
             cuenta_id,
@@ -315,6 +347,8 @@ def insertar_movimiento_abono_cxc(
             fecha,
             usuario_id,
             observacion,
+            referencia_externa_tipo,
+            referencia_externa_id,
         ),
     )
 
@@ -407,3 +441,99 @@ def agregar_cargo_cuenta_existente(cursor, cuenta_id, monto_cargo, fecha, usuari
         (nuevo_saldo, cuenta_id),
     )
     return nuevo_saldo
+
+
+# ---- pago masivo (un pago -> distribuido entre varias cuentas) --------
+
+
+def listar_cuentas_pendientes_cliente(cursor, cliente_id):
+    """Cuentas pendientes de un cliente, de la MAS ANTIGUA a la MAS
+    RECIENTE (fecha_generacion ASC) -- orden que necesita la
+    distribucion automatica de un pago masivo (deuda mas antigua
+    primero)."""
+    cursor.execute(
+        """
+        SELECT id, saldo_pendiente
+        FROM cuentas_por_cobrar
+        WHERE cliente_id=? AND estado='pendiente' AND saldo_pendiente > 0
+        ORDER BY fecha_generacion ASC, id ASC
+        """,
+        (cliente_id,),
+    )
+    return cursor.fetchall()
+
+
+def crear_pago_masivo_cxc(
+    cursor,
+    obtener_ultimo_id,
+    *,
+    cliente_id,
+    metodo_pago,
+    moneda_pago,
+    monto_pago,
+    tasa_movimiento,
+    referencia,
+    observacion,
+    fecha,
+    usuario_id,
+    monto_total_usd,
+):
+    cursor.execute(
+        """
+        INSERT INTO pagos_masivos_cxc (
+            cliente_id, metodo_pago, moneda_pago, monto_pago, tasa_movimiento,
+            referencia, observacion, fecha, usuario_id, monto_total_usd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            cliente_id,
+            metodo_pago,
+            moneda_pago,
+            monto_pago,
+            tasa_movimiento,
+            referencia,
+            observacion,
+            fecha,
+            usuario_id,
+            monto_total_usd,
+        ),
+    )
+    return obtener_ultimo_id(cursor, "pagos_masivos_cxc")
+
+
+def actualizar_totales_pago_masivo_cxc(cursor, pago_masivo_id, *, monto_aplicado_usd, monto_sobrante_usd):
+    cursor.execute(
+        "UPDATE pagos_masivos_cxc SET monto_aplicado_usd=?, monto_sobrante_usd=? WHERE id=?",
+        (monto_aplicado_usd, monto_sobrante_usd, pago_masivo_id),
+    )
+
+
+def obtener_pago_masivo_cxc(cursor, pago_masivo_id):
+    cursor.execute(
+        """
+        SELECT id, cliente_id, metodo_pago, moneda_pago, monto_pago, tasa_movimiento,
+               referencia, observacion, fecha, usuario_id, monto_total_usd,
+               monto_aplicado_usd, monto_sobrante_usd
+        FROM pagos_masivos_cxc WHERE id=?
+        """,
+        (pago_masivo_id,),
+    )
+    return cursor.fetchone()
+
+
+def listar_movimientos_de_pago_masivo(cursor, pago_masivo_id):
+    """Para poder "explicar despues como se distribuyo cada pago": los
+    movimientos de cuentas_por_cobrar_movimientos enlazados a este pago
+    masivo via referencia_externa_tipo/referencia_externa_id, con el
+    orden_id de la cuenta afectada por cada uno."""
+    cursor.execute(
+        """
+        SELECT m.id, m.cuenta_id, cx.orden_id, m.monto_saldo, m.fecha
+        FROM cuentas_por_cobrar_movimientos m
+        JOIN cuentas_por_cobrar cx ON cx.id = m.cuenta_id
+        WHERE m.referencia_externa_tipo='pago_masivo' AND m.referencia_externa_id=?
+        ORDER BY m.id
+        """,
+        (pago_masivo_id,),
+    )
+    return cursor.fetchall()

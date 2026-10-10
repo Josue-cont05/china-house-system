@@ -1822,6 +1822,8 @@ def proteger_sistema():
         "cxc.cuentas_por_cobrar_admin",
         "cxc.detalle_cuenta_por_cobrar",
         "cxc.registrar_abono_cxc",
+        "cxc.pago_masivo_cliente",
+        "cxc.resultado_pago_masivo",
         "delivery_admin",
         "delivery_repartidor_detalle",
         "registrar_pago_delivery",

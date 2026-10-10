@@ -25,7 +25,7 @@ from flask import Blueprint, redirect, request, session
 
 from app.domain.sales.calculations import TOLERANCIA_COBRO, etiqueta_metodo_pago
 from app.shared.constants.system import METODOS_PAGO_VALIDOS
-from app.application.cxc.abonos import registrar_abono_cuenta
+from app.application.cxc.abonos import registrar_abono_cuenta, registrar_pago_masivo_cliente
 from app.infrastructure.database.clientes import (
     actualizar_cliente,
     alternar_activo_cliente,
@@ -37,7 +37,9 @@ from app.infrastructure.database.clientes import (
 )
 from app.infrastructure.database.cxc import (
     listar_cuentas_por_cobrar_admin,
+    listar_movimientos_de_pago_masivo,
     obtener_detalle_cuenta_cxc,
+    obtener_pago_masivo_cxc,
     resumen_cuentas_por_cobrar,
 )
 
@@ -266,6 +268,135 @@ def crear_cxc_blueprint(
         </body></html>
         """
 
+    def render_form_pago_masivo(cliente, cuentas_pendientes, error="", valores=None):
+        valores = valores or {}
+        cliente_id = cliente[0]
+        total_pendiente = round(sum(a_float(c[5]) for c in cuentas_pendientes), 2)
+
+        filas = ""
+        for cuenta in cuentas_pendientes:
+            cuenta_id, orden_id, numero, fecha, _original, saldo, _estado, _snapshot = cuenta
+            filas += f"""
+            <tr>
+                <td><label><input type="checkbox" name="cuenta_seleccionada" value="{cuenta_id}"> #{html_lib.escape(str(numero or orden_id))}</label></td>
+                <td>{texto_fecha_corta(fecha)}</td>
+                <td class="monto">{formato_usd(saldo)}</td>
+                <td><input name="monto_{cuenta_id}" type="number" step="0.01" min="0" placeholder="0.00" class="monto-manual"></td>
+            </tr>
+            """
+        if not filas:
+            filas = '<tr><td colspan="4">Este cliente no tiene cuentas pendientes.</td></tr>'
+
+        metodo = valores.get("metodo_pago") or "usd"
+        monto_val = valores.get("monto") or ""
+        referencia = valores.get("referencia") or ""
+        observacion = valores.get("observacion") or ""
+        modo = valores.get("modo") or "automatico"
+
+        return f"""
+        <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>{estilos_base()}{estilos_admin_cxc()}
+        .modo-pago-masivo {{ display:flex; gap:16px; margin-bottom:12px; }}
+        .monto-manual {{ width:100px; }}
+        </style></head>
+        <body>
+        {barra_superior('<a href="/cuentas_por_cobrar">Cuentas por cobrar</a><a href="/">Inicio</a>')}
+        <div class="contenido">
+            <h1>Cuentas por cobrar</h1>
+            {tabs_cuentas_por_cobrar("clientes")}
+            <h2>Pago masivo - {html_lib.escape(cliente[1] or '')}</h2>
+            {"<div class='error'>" + html_lib.escape(error) + "</div>" if error else ""}
+            <div class="metricas">
+                <div class="metrica"><small>Saldo pendiente total</small><b>{formato_usd(total_pendiente)}</b></div>
+                <div class="metrica"><small>Cuentas pendientes</small><b>{len(cuentas_pendientes)}</b></div>
+            </div>
+            <div class="card-admin">
+                <form method="post" id="formPagoMasivo">
+                    <div class="modo-pago-masivo">
+                        <label><input type="radio" name="modo" value="automatico" {"checked" if modo == "automatico" else ""}> Automatico (deuda mas antigua primero)</label>
+                        <label><input type="radio" name="modo" value="manual" {"checked" if modo == "manual" else ""}> Seleccion manual</label>
+                    </div>
+                    <div class="form-grid">
+                        <div>
+                            <label>Metodo de pago</label>
+                            <select name="metodo_pago">{opciones_metodos_abono(metodo)}</select>
+                        </div>
+                        <div>
+                            <label>Monto recibido (total del pago)</label>
+                            <input name="monto" type="number" step="0.01" min="0.01" value="{html_lib.escape(str(monto_val), quote=True)}" required>
+                        </div>
+                        <div>
+                            <label>Referencia</label>
+                            <input name="referencia" value="{html_lib.escape(referencia, quote=True)}">
+                        </div>
+                        <div>
+                            <label>Observaci&oacute;n</label>
+                            <input name="observacion" value="{html_lib.escape(observacion, quote=True)}">
+                        </div>
+                    </div>
+                    <table>
+                        <thead><tr><th>Cuenta</th><th>Generada</th><th>Pendiente</th><th>Monto a aplicar (modo manual)</th></tr></thead>
+                        <tbody>{filas}</tbody>
+                    </table>
+                    <div class="acciones full" style="margin-top:12px;">
+                        <button type="submit">Confirmar pago masivo</button>
+                        <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/clientes/{cliente_id}">Cancelar</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script>
+        const radiosModo = document.querySelectorAll('input[name="modo"]');
+        function actualizarModoPagoMasivo() {{
+            const manual = document.querySelector('input[name="modo"]:checked').value === "manual";
+            document.querySelectorAll('.monto-manual').forEach(function(input) {{ input.disabled = !manual; }});
+        }}
+        radiosModo.forEach(function(radio) {{ radio.addEventListener("change", actualizarModoPagoMasivo); }});
+        actualizarModoPagoMasivo();
+        </script>
+        </body></html>
+        """
+
+    def render_resultado_pago_masivo(pago_masivo, movimientos):
+        (
+            pago_id, _cliente_id, metodo_pago, _moneda_pago, _monto_pago, _tasa,
+            referencia, observacion, fecha, _usuario_id, monto_total, monto_aplicado, monto_sobrante,
+        ) = pago_masivo
+
+        filas = "".join(
+            f"<tr><td>#{html_lib.escape(str(orden_id))}</td><td class='monto'>{formato_usd(-monto_saldo)}</td><td>{texto_fecha_corta(mov_fecha)}</td></tr>"
+            for _mov_id, _cuenta_id, orden_id, monto_saldo, mov_fecha in movimientos
+        )
+
+        return f"""
+        <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>{estilos_base()}{estilos_admin_cxc()}</style></head>
+        <body>
+        {barra_superior('<a href="/cuentas_por_cobrar">Cuentas por cobrar</a><a href="/">Inicio</a>')}
+        <div class="contenido">
+            <h1>Cuentas por cobrar</h1>
+            {tabs_cuentas_por_cobrar("clientes")}
+            <h2>Pago masivo #{pago_id} registrado</h2>
+            <div class="metricas">
+                <div class="metrica"><small>Metodo</small><b>{html_lib.escape(etiqueta_metodo_pago(metodo_pago))}</b></div>
+                <div class="metrica"><small>Monto total recibido</small><b>{formato_usd(monto_total)}</b></div>
+                <div class="metrica"><small>Monto aplicado</small><b>{formato_usd(monto_aplicado)}</b></div>
+                <div class="metrica"><small>Sobrante no aplicado</small><b>{formato_usd(monto_sobrante)}</b></div>
+            </div>
+            <div class="card-admin">
+                <p><b>Referencia:</b> {html_lib.escape(referencia or '-')}</p>
+                <p><b>Observaci&oacute;n:</b> {html_lib.escape(observacion or '-')}</p>
+                <p><b>Fecha:</b> {texto_fecha_corta(fecha)}</p>
+                <h3>Distribucion por cuenta</h3>
+                <table>
+                    <thead><tr><th>Orden</th><th>Monto aplicado</th><th>Fecha</th></tr></thead>
+                    <tbody>{filas or "<tr><td colspan='3'>Sin movimientos.</td></tr>"}</tbody>
+                </table>
+            </div>
+            <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/clientes">Volver a cartera</a>
+        </div></body></html>
+        """
+
     @blueprint.route("/clientes")
     @blueprint.route("/cuentas_por_cobrar/clientes")
     def clientes():
@@ -400,6 +531,7 @@ def crear_cxc_blueprint(
             <h1>{html_lib.escape(cliente[1] or '')}</h1>
             <div class="acciones" style="margin-bottom:12px;">
                 <a class="btn-mini" href="/cuentas_por_cobrar/clientes/{cliente_id}/editar">Editar cliente</a>
+                {f'<a class="btn-mini" href="/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo">Pago masivo</a>' if resumen["cuentas_pendientes"] else ""}
                 <a class="btn-mini btn-sec" href="/cuentas_por_cobrar?cliente_id={cliente_id}&estado=todas">Ver sus cuentas</a>
                 <a class="btn-mini btn-sec" href="/cuentas_por_cobrar/clientes">Volver a cartera</a>
             </div>
@@ -425,6 +557,93 @@ def crear_cxc_blueprint(
             </div>
         </div></body></html>
         """
+
+    def _cuentas_pendientes_cliente_ordenadas(cursor, cliente_id):
+        cuentas = [c for c in listar_cuentas_cliente(cursor, cliente_id) if c[6] == "pendiente" and a_float(c[5]) > 0]
+        cuentas.sort(key=lambda c: (c[3] or "", c[0]))
+        return cuentas
+
+    @blueprint.route("/clientes/<int:cliente_id>/pago_masivo", methods=["GET", "POST"])
+    @blueprint.route("/cuentas_por_cobrar/clientes/<int:cliente_id>/pago_masivo", methods=["GET", "POST"])
+    def pago_masivo_cliente(cliente_id):
+        if request.path.startswith("/clientes/"):
+            return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo")
+
+        conn = connection_factory()
+        cursor = conn.cursor()
+        cliente = obtener_cliente_admin(cursor, cliente_id)
+        if not cliente:
+            conn.close()
+            return "Cliente no encontrado", 404
+
+        if request.method == "GET":
+            cuentas_pendientes = _cuentas_pendientes_cliente_ordenadas(cursor, cliente_id)
+            conn.close()
+            return render_form_pago_masivo(cliente, cuentas_pendientes)
+
+        modo = request.form.get("modo", "automatico")
+        cuentas_manual = []
+        if modo == "manual":
+            for cuenta_id_str in request.form.getlist("cuenta_seleccionada"):
+                monto_str = request.form.get(f"monto_{cuenta_id_str}", "")
+                if not monto_str:
+                    continue
+                try:
+                    cuentas_manual.append((int(cuenta_id_str), a_float(monto_str)))
+                except ValueError:
+                    continue
+
+        valores = {
+            "metodo_pago": request.form.get("metodo_pago", ""),
+            "monto": request.form.get("monto", ""),
+            "referencia": request.form.get("referencia", ""),
+            "observacion": request.form.get("observacion", ""),
+            "modo": modo,
+        }
+        try:
+            resultado = registrar_pago_masivo_cliente(
+                cursor,
+                cliente_id=cliente_id,
+                metodo_pago=valores["metodo_pago"],
+                monto_recibido=valores["monto"],
+                modo=modo,
+                cuentas_manual=cuentas_manual,
+                referencia=valores["referencia"],
+                observacion=valores["observacion"],
+                usuario_id=session.get("usuario_id"),
+                obtener_tasa_cobro=obtener_tasa_cobro,
+                ahora_venezuela=ahora_venezuela,
+                formato_usd=formato_usd,
+                obtener_ultimo_id=last_id_getter,
+            )
+            conn.commit()
+            conn.close()
+            return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo/{resultado['pago_masivo_id']}")
+        except ValueError as exc:
+            conn.rollback()
+            cuentas_pendientes = _cuentas_pendientes_cliente_ordenadas(cursor, cliente_id)
+            conn.close()
+            return render_form_pago_masivo(cliente, cuentas_pendientes, error=str(exc), valores=valores), 400
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+
+    @blueprint.route("/clientes/<int:cliente_id>/pago_masivo/<int:pago_masivo_id>")
+    @blueprint.route("/cuentas_por_cobrar/clientes/<int:cliente_id>/pago_masivo/<int:pago_masivo_id>")
+    def resultado_pago_masivo(cliente_id, pago_masivo_id):
+        if request.path.startswith("/clientes/"):
+            return redirect(f"/cuentas_por_cobrar/clientes/{cliente_id}/pago_masivo/{pago_masivo_id}")
+
+        conn = connection_factory()
+        cursor = conn.cursor()
+        pago_masivo = obtener_pago_masivo_cxc(cursor, pago_masivo_id)
+        if not pago_masivo or pago_masivo[1] != cliente_id:
+            conn.close()
+            return "Pago masivo no encontrado", 404
+        movimientos = listar_movimientos_de_pago_masivo(cursor, pago_masivo_id)
+        conn.close()
+        return render_resultado_pago_masivo(pago_masivo, movimientos)
 
     @blueprint.route("/clientes/<int:cliente_id>/editar", methods=["GET", "POST"])
     @blueprint.route("/cuentas_por_cobrar/clientes/<int:cliente_id>/editar", methods=["GET", "POST"])
