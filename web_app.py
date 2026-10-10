@@ -3217,7 +3217,7 @@ def inventario():
     html += barra_superior(
         f'{inventario_links}{produccion_link}'
     )
-    html += """
+    html += f"""
     <div class="contenido">
         <h1>📦 Inventario</h1>
         <div class="accesos">

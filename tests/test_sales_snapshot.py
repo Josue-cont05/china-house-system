@@ -2954,6 +2954,32 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertIn("Accesos rápidos", html)
         self.assertIn("campanaNotifBtn", html)
 
+    def test_inventario_page_renders_computed_total_not_literal_placeholder(self):
+        """Regresion de la misma clase de bug que
+        test_home_page_renders_without_literal_placeholders (prefijo `f`
+        perdido en un literal triple-comilla): en inventario() el bloque
+        que arma el resumen de "Valor total inventario" se concatenaba
+        sin `f`, asi que se imprimia literalmente el texto
+        "{round(valor_total_inventario, 2)}" en vez del monto calculado."""
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(SUM(stock_actual * costo_promedio), 0) FROM inventario")
+        total_previo = cursor.fetchone()[0] or 0
+        cursor.execute(
+            "INSERT INTO inventario (nombre, stock_actual, unidad, costo_promedio) VALUES (?, ?, ?, ?)",
+            ("Pollo Regresion Total Inventario", 10.0, "kg", 2.5),
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.client.get("/inventario")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertNotIn("{round(valor_total_inventario, 2)}", html)
+        total_esperado = round(total_previo + 25.0, 2)
+        self.assertIn(f"Valor total inventario: $ {total_esperado}", html)
+
     def test_home_new_order_panel_has_no_conductor_picker(self):
         """UX: el panel "Nueva orden" de Inicio NO debe ofrecer elegir
         conductor de delivery -- esa gestion vive exclusivamente en
