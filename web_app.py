@@ -2235,21 +2235,13 @@ def asegurar_menu_neko_wok():
     cursor.execute("SELECT id, nombre FROM categorias")
     cat_dict = {nombre: cat_id for cat_id, nombre in cursor.fetchall()}
 
-    categorias_menu_controlado = [
-        "Neko Combos", "Promociones Neko", "Neko Dúo", "Neko Clan",
-        "Favoritos de Neko", "Bebidas",
-    ]
-    placeholders = ",".join("?" * len(categorias_menu_controlado))
-    cursor.execute(
-        f"""
-        UPDATE productos SET activo=0
-        WHERE categoria_id IN (
-            SELECT id FROM categorias WHERE nombre IN ({placeholders})
-        )
-        """,
-        categorias_menu_controlado,
-    )
-
+    # NO desactivar en bloque los productos de estas categorias: hacerlo
+    # apagaba (para siempre, en cada arranque) cualquier producto agregado
+    # desde el admin de Menu cuyo nombre no estuviera en PRODUCTOS_MENU_NEKO,
+    # aunque el admin lo marcara activo (bug real reportado: producto nuevo
+    # desaparece del selector de nueva orden tras un deploy). El upsert de
+    # abajo ya garantiza activo=1 para los productos del menu fijo; no hace
+    # falta tocar el resto.
     for nombre, precio, categoria in PRODUCTOS_MENU_NEKO:
         categoria_id = cat_dict.get(categoria)
         cursor.execute(

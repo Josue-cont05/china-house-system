@@ -126,6 +126,42 @@ class SalesCatalogRepositoryTest(unittest.TestCase):
     def test_listar_catalogo_activo_returns_empty_when_no_products(self):
         self.assertEqual(self.repository.listar_catalogo_activo(), [])
 
+    def test_admin_created_product_survives_menu_sync_on_restart(self):
+        """Regresion del bug reportado: un producto creado desde el admin de
+        Menu (crear_producto) en una categoria del menu Neko Wok (ej.
+        "Bebidas") debe seguir visible en el selector de nueva orden
+        despues de un reinicio del proceso -- que ejecuta
+        asegurar_menu_neko_wok() en cada arranque (ver web_app.py, bootstrap
+        a nivel de modulo). Antes del fix, esa funcion desactivaba en
+        bloque TODOS los productos de esas categorias y solo reactivaba
+        los nombres de la lista fija PRODUCTOS_MENU_NEKO, dejando cualquier
+        producto custom con activo=0 de forma permanente."""
+        categoria_id = self._create_category("Bebidas")
+        self.repository.crear_producto("Jugo Casero de la Casa", 3.0, categoria_id)
+
+        web_app.asegurar_menu_neko_wok()
+
+        nombres = [p[1] for p in self.repository.listar_catalogo_activo()]
+        self.assertIn("Jugo Casero de la Casa", nombres)
+
+    def test_admin_created_product_survives_repeated_restarts(self):
+        categoria_id = self._create_category("Bebidas")
+        self.repository.crear_producto("Jugo Casero de la Casa", 3.0, categoria_id)
+
+        web_app.asegurar_menu_neko_wok()
+        web_app.asegurar_menu_neko_wok()
+        web_app.asegurar_menu_neko_wok()
+
+        nombres = [p[1] for p in self.repository.listar_catalogo_activo()]
+        self.assertIn("Jugo Casero de la Casa", nombres)
+
+    def test_fixed_menu_products_still_synced_active_after_menu_sync(self):
+        web_app.asegurar_menu_neko_wok()
+
+        nombres = [p[1] for p in self.repository.listar_catalogo_activo()]
+        self.assertIn("Neko Combo 1", nombres)
+        self.assertIn("Refresco 1 Lt", nombres)
+
 
 if __name__ == "__main__":
     unittest.main()
