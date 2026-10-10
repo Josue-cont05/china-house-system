@@ -40,7 +40,7 @@ from app.domain.sales.calculations import (
     TOLERANCIA_COBRO,
     es_producto_delivery_legacy,
 )
-from app.domain.sales.item_builder import es_producto_refresco
+from app.domain.sales.item_builder import MAX_CANTIDAD_ITEM, es_producto_refresco
 from app.domain.sales.item_descriptions import (
     texto_descripcion_combo_orden,
     texto_descripcion_promocion_orden,
@@ -116,6 +116,12 @@ def render_detalle_orden(
     .btn:hover {{ background:#252A32; border-color:rgba(61,220,132,0.38); }}
     .categoria {{ font-weight: 800; margin-top: 14px; background: var(--panel-secundario) !important; color: var(--texto-secundario); padding: 8px 12px; border-radius: 999px; font-size: 13px; letter-spacing: 0.5px; border: 1px solid var(--borde); display:inline-flex; }}
     .grid-productos {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }}
+    .producto-item {{ display: flex; flex-direction: column; }}
+    .producto-item .btn {{ margin-bottom: 4px; }}
+    .qty-stepper {{ display: flex; align-items: center; justify-content: center; gap: 6px; margin: 0 0 6px; }}
+    .qty-btn {{ width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--borde); background: var(--panel-secundario); color: var(--texto); font-weight: 800; font-size: 16px; cursor: pointer; line-height: 1; }}
+    .qty-btn:hover {{ border-color: rgba(61,220,132,0.38); }}
+    .qty-input {{ width: 46px; height: 30px; text-align: center; border-radius: 8px; border: 1px solid var(--borde); background: var(--tarjeta); color: var(--texto); font-weight: 800; font-size: 14px; }}
     .acciones-superiores {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }}
     .btn-accion {{ display: block; padding: 14px 12px; margin: 5px 0; text-align: center; color: white; text-decoration: none; border-radius: 10px; font-weight: 800; font-size: 15px; }}
     .cocina {{ background: var(--naranja); color:#0F1115; border:none; }}
@@ -246,35 +252,52 @@ def render_detalle_orden(
                 precio_fmt = f"${p[2]:.2f}".rstrip("0").rstrip(".")
                 producto_nombre_html = html_lib.escape(p[1])
                 producto_nombre_attr = html_lib.escape(p[1], quote=True)
+                qty_stepper_html = f"""
+                <div class="qty-stepper">
+                    <button type="button" class="qty-btn qty-dec" aria-label="Menos">-</button>
+                    <input type="number" class="qty-input" min="1" max="{MAX_CANTIDAD_ITEM}" step="1" value="1" inputmode="numeric">
+                    <button type="button" class="qty-btn qty-inc" aria-label="Mas">+</button>
+                </div>
+                """
                 if es_producto_refresco(p[1]):
                     html += f"""
+                    <div class="producto-item">
+                    {qty_stepper_html}
                     <button class="btn btn-refresco" type="button" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{producto_nombre_attr}">
                         {producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
+                    </div>
                     """
                 elif p[1] in COMBOS_PERSONALES:
                     acompanantes_data = html_lib.escape("|".join(ACOMPANANTES_COMBO), quote=True)
                     bebidas_data = html_lib.escape("|".join(BEBIDAS_COMBO), quote=True)
                     cantidad_acompanantes = COMBOS_CANTIDAD_ACOMPANANTES.get(p[1], 1)
                     html += f"""
+                    <div class="producto-item">
+                    {qty_stepper_html}
                     <button class="btn btn-configurable" type="button" data-tipo="combo" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{producto_nombre_attr}" data-acompanantes="{acompanantes_data}" data-cantidad-acompanantes="{cantidad_acompanantes}" data-bebidas="{bebidas_data}">
                         {producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
+                    </div>
                     """
                 elif p[1] in PROMOCIONES_NEKO:
                     promo = PROMOCIONES_NEKO[p[1]]
                     pollos_data = html_lib.escape("|".join(POLLOS_PROMOCION if p[1] in PROMOCIONES_CON_POLLO else []), quote=True)
                     arroces_data = html_lib.escape("|".join(ARROCES_PROMOCION), quote=True)
                     html += f"""
+                    <div class="producto-item">
+                    {qty_stepper_html}
                     <button class="btn btn-configurable" type="button" data-tipo="promocion" data-url="/agregar/{orden_id}/{p[0]}" data-producto="{producto_nombre_attr}" data-pollos="{pollos_data}" data-arroces="{arroces_data}" data-cantidad-arroces="{promo['cantidad_arroces']}" data-cantidad-refrescos="{promo['cantidad_refrescos']}" data-refresco="{promo['refresco']}">
                         {producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span>
                     </button>
+                    </div>
                     """
                 else:
                     html += f"""
-                    <a href="/agregar/{orden_id}/{p[0]}">
-                        <button class="btn" type="button">{producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span></button>
-                    </a>
+                    <div class="producto-item">
+                    {qty_stepper_html}
+                    <button class="btn btn-simple" type="button" data-url="/agregar/{orden_id}/{p[0]}">{producto_nombre_html} <span style="opacity:0.75;font-size:13px;">{precio_fmt}</span></button>
+                    </div>
                     """
 
             html += "</div>"
@@ -571,6 +594,46 @@ def render_detalle_orden(
     const saboresRefrescoGrid = document.getElementById("sabores-refresco-grid");
     const cerrarModalRefresco = document.getElementById("cerrar-modal-refresco");
     let refrescoSeleccionadoUrl = "";
+    let refrescoSeleccionadoCantidad = 1;
+
+    function obtenerCantidadDesdeBoton(btn) {{
+        const contenedor = btn.closest(".producto-item");
+        const input = contenedor ? contenedor.querySelector(".qty-input") : null;
+        let valor = input ? parseInt(input.value, 10) : 1;
+        if (!valor || valor < 1) {{
+            valor = 1;
+        }}
+        if (valor > {MAX_CANTIDAD_ITEM}) {{
+            valor = {MAX_CANTIDAD_ITEM};
+        }}
+        return valor;
+    }}
+
+    document.querySelectorAll(".producto-item").forEach(function(item) {{
+        const input = item.querySelector(".qty-input");
+        if (!input) {{
+            return;
+        }}
+        const dec = item.querySelector(".qty-dec");
+        const inc = item.querySelector(".qty-inc");
+        if (dec) {{
+            dec.addEventListener("click", function() {{
+                input.value = Math.max(1, (parseInt(input.value, 10) || 1) - 1);
+            }});
+        }}
+        if (inc) {{
+            inc.addEventListener("click", function() {{
+                input.value = Math.min({MAX_CANTIDAD_ITEM}, (parseInt(input.value, 10) || 1) + 1);
+            }});
+        }}
+    }});
+
+    document.querySelectorAll(".btn-simple").forEach(function(btn) {{
+        btn.addEventListener("click", function() {{
+            const cantidad = obtenerCantidadDesdeBoton(btn);
+            window.location.href = btn.dataset.url + "?cantidad=" + cantidad;
+        }});
+    }});
     const deliveryMonto = document.getElementById("delivery_usd");
     const deliveryRepartidor = document.getElementById("delivery_repartidor_id");
     const nuevoRepartidorPanel = document.getElementById("nuevoRepartidorPanel");
@@ -649,7 +712,7 @@ def render_detalle_orden(
         if (!saborLimpio || !refrescoSeleccionadoUrl) {{
             return;
         }}
-        window.location.href = refrescoSeleccionadoUrl + "?sabor=" + encodeURIComponent(saborLimpio);
+        window.location.href = refrescoSeleccionadoUrl + "?sabor=" + encodeURIComponent(saborLimpio) + "&cantidad=" + refrescoSeleccionadoCantidad;
     }}
 
     function claseSaborRefresco(sabor) {{
@@ -665,6 +728,7 @@ def render_detalle_orden(
 
     function abrirSelectorRefresco(btn) {{
         refrescoSeleccionadoUrl = btn.dataset.url;
+        refrescoSeleccionadoCantidad = obtenerCantidadDesdeBoton(btn);
         modalRefrescoProducto.textContent = btn.dataset.producto || "Refresco";
         saboresRefrescoGrid.innerHTML = "";
 
@@ -761,6 +825,7 @@ def render_detalle_orden(
     const configuracionOpcionesGrid = document.getElementById("configuracion-opciones-grid");
     const cerrarModalConfiguracion = document.getElementById("cerrar-modal-configuracion");
     let configuracionUrl = "";
+    let configuracionCantidad = 1;
     let pasosConfiguracion = [];
     let pasoConfiguracionActual = 0;
     let seleccionesConfiguracion = [];
@@ -895,6 +960,7 @@ def render_detalle_orden(
 
     function abrirConfiguracionCombo(btn) {{
         configuracionUrl = btn.dataset.url;
+        configuracionCantidad = obtenerCantidadDesdeBoton(btn);
         const producto = btn.dataset.producto || "Combo";
         const acompanantes = (btn.dataset.acompanantes || "").split("|").filter(Boolean);
         const bebidas = (btn.dataset.bebidas || "").split("|").filter(Boolean);
@@ -933,6 +999,7 @@ def render_detalle_orden(
                 return;
             }}
             destino.searchParams.append("bebida", bebida.value);
+            destino.searchParams.append("cantidad", String(configuracionCantidad));
             window.location.href = destino.pathname + destino.search;
         }});
         configuracionOpcionesGrid.appendChild(aceptar);
@@ -1002,6 +1069,7 @@ def render_detalle_orden(
         }}
 
         configuracionUrl = btn.dataset.url;
+        configuracionCantidad = obtenerCantidadDesdeBoton(btn);
         modalConfiguracionTitulo.textContent = "Configurar promocion";
         modalConfiguracionProducto.textContent = btn.dataset.producto || "Producto";
         configuracionOpcionesGrid.innerHTML = "";
@@ -1074,6 +1142,7 @@ def render_detalle_orden(
 
             const extraLumpias = configuracionOpcionesGrid.querySelector('input[name="extra_lumpias"]');
             destino.searchParams.append("extra_lumpias", extraLumpias ? extraLumpias.value : "0");
+            destino.searchParams.append("cantidad", String(configuracionCantidad));
             window.location.href = destino.pathname + destino.search;
         }});
         configuracionOpcionesGrid.appendChild(aceptar);

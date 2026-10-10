@@ -38,6 +38,28 @@ class ErrorConstruccionItem(ValueError):
         self.status_code = status_code
 
 
+MAX_CANTIDAD_ITEM = 12  # mismo limite que self_ordering/submit.py::MAX_CANTIDAD_LINEA
+
+
+def validar_cantidad_item(valor):
+    """Valida la cantidad al agregar un producto a una orden (POS interno).
+
+    Mismo rango que ya se valida en el canal self-ordering
+    (app.application.self_ordering.submit._validar_cantidad): entero
+    positivo, tope MAX_CANTIDAD_ITEM para evitar que un error de captura
+    (ej. pegar un numero de telefono) genere miles de filas en
+    orden_items de una sola vez."""
+    try:
+        cantidad = int(valor)
+    except (TypeError, ValueError):
+        raise ErrorConstruccionItem("Cantidad invalida.")
+    if cantidad <= 0:
+        raise ErrorConstruccionItem("Cantidad invalida.")
+    if cantidad > MAX_CANTIDAD_ITEM:
+        raise ErrorConstruccionItem(f"Cantidad maxima permitida: {MAX_CANTIDAD_ITEM}.")
+    return cantidad
+
+
 def normalizar_sabor_refresco(sabor):
     sabor_limpio = (sabor or "").strip()
     if not sabor_limpio or len(sabor_limpio) > 40:

@@ -4851,6 +4851,7 @@ def agregar(orden_id, producto_id):
             promo_extra_lumpias_precio=PROMO_EXTRA_LUMPIAS_PRECIO,
             emergencia_activa=emergencia_activa,
             registrar_auditoria_emergencia=registrar_auditoria_emergencia,
+            cantidad=request.args.get("cantidad", "1"),
         )
     except ErrorConstruccionItem as exc:
         conn.close()

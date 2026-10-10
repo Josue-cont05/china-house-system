@@ -1366,6 +1366,120 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("validos para este combo".encode(), response.data)
 
+    def test_agregar_route_cantidad_creates_that_many_identical_rows(self):
+        orden_id = self._create_empty_order()
+        beer_id = self._insert_product("Cerveza Polar", 2.5, "Bebidas")
+
+        response = self.client.get(f"/agregar/{orden_id}/{beer_id}", query_string={"cantidad": "4"})
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT producto, precio, COALESCE(indicacion, '') FROM orden_items WHERE orden_id=? ORDER BY id",
+            (orden_id,),
+        )
+        items = cursor.fetchall()
+        conn.close()
+
+        self.assertEqual(items, [("Cerveza Polar", 2.5, "")] * 4)
+
+    def test_agregar_route_cantidad_multiplies_combo_including_extra_items(self):
+        orden_id = self._create_empty_order()
+        promo_id = self._delivery_product_id("Familiar")
+
+        response = self.client.get(
+            f"/agregar/{orden_id}/{promo_id}",
+            query_string=[
+                ("cantidad", "2"),
+                ("pollo", "Pollo BBQ/Agridulce"),
+                ("arroz", "Triple"),
+                ("sabor", "chinotto"),
+                ("extra_lumpias", "1"),
+            ],
+        )
+        self.assertEqual(response.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT producto FROM orden_items WHERE orden_id=? ORDER BY id",
+            (orden_id,),
+        )
+        productos = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        self.assertEqual(productos.count("Familiar"), 2)
+        self.assertEqual(productos.count("Promo extra: Ración de Lumpias"), 2)
+        self.assertEqual(len(productos), 4)
+
+    def test_agregar_route_rejects_invalid_cantidad_without_inserting_anything(self):
+        orden_id = self._create_empty_order()
+        beer_id = self._insert_product("Cerveza Polar", 2.5, "Bebidas")
+
+        for cantidad_invalida in ("0", "-1", "99", "abc"):
+            response = self.client.get(
+                f"/agregar/{orden_id}/{beer_id}", query_string={"cantidad": cantidad_invalida}
+            )
+            self.assertEqual(response.status_code, 200, cantidad_invalida)
+            self.assertIn(b"Cantidad", response.data)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+        total = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(total, 0)
+
+    def test_agregar_route_default_cantidad_is_one(self):
+        orden_id = self._create_empty_order()
+        beer_id = self._insert_product("Cerveza Polar", 2.5, "Bebidas")
+
+        self.assertEqual(self.client.get(f"/agregar/{orden_id}/{beer_id}").status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orden_items WHERE orden_id=?", (orden_id,))
+        total = cursor.fetchone()[0]
+        conn.close()
+        self.assertEqual(total, 1)
+
+    def test_agregar_route_different_configurations_stay_as_separate_lines(self):
+        """Dos adiciones del mismo producto con configuraciones distintas
+        (sabor/cantidad diferentes) nunca deben fusionarse en una sola
+        linea homogenea -- cada llamada a /agregar inserta sus propias
+        filas con su propia indicacion, sin tocar las filas previas."""
+        orden_id = self._create_empty_order()
+        refresco_id = self._delivery_product_id("Refresco 1 Lt")
+
+        self.assertEqual(
+            self.client.get(
+                f"/agregar/{orden_id}/{refresco_id}",
+                query_string={"cantidad": "3", "sabor": "Fresa"},
+            ).status_code,
+            302,
+        )
+        self.assertEqual(
+            self.client.get(
+                f"/agregar/{orden_id}/{refresco_id}",
+                query_string={"cantidad": "2", "sabor": "Parchita"},
+            ).status_code,
+            302,
+        )
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE(indicacion, '') FROM orden_items WHERE orden_id=? ORDER BY id",
+            (orden_id,),
+        )
+        indicaciones = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        self.assertEqual(indicaciones.count("Sabor: Fresa"), 3)
+        self.assertEqual(indicaciones.count("Sabor: Parchita"), 2)
+        self.assertEqual(len(indicaciones), 5)
+
     def test_delivery_legacy_products_are_preserved_hidden_and_blocked_for_new_adds(self):
         delivery_id = self._delivery_product_id("Delivery 3")
         self.assertIsNotNone(delivery_id)

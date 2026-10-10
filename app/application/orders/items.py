@@ -24,7 +24,7 @@ mision "edicion de emergencia", que toca varios dominios ademas de
 ordenes) para no crear un import circular."""
 
 from app.domain.sales.calculations import _a_float as a_float
-from app.domain.sales.item_builder import construir_items_orden
+from app.domain.sales.item_builder import construir_items_orden, validar_cantidad_item
 from app.domain.sales.item_descriptions import normalizar_indicacion_item
 from app.domain.sales.order_states import (
     orden_archivada,
@@ -58,7 +58,10 @@ def agregar_item_a_orden(
     promo_extra_lumpias_precio,
     emergencia_activa,
     registrar_auditoria_emergencia,
+    cantidad=1,
 ):
+    cantidad = validar_cantidad_item(cantidad)
+
     cursor.execute(
         "SELECT estado, cierre_id, listo_despacho_at FROM ordenes WHERE id=?", (orden_id,)
     )
@@ -125,34 +128,41 @@ def agregar_item_a_orden(
     # Si la orden sigue abierta, es consumo normal que sera parte del
     # proximo cobro de todos modos.
     incluido_en_snapshot = 0 if estado == "cerrada" else 1
-    cursor.execute(
-        """
-        INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            orden_id,
-            items_construidos.item_principal.producto,
-            items_construidos.item_principal.precio,
-            items_construidos.item_principal.indicacion,
-            incluido_en_snapshot,
-        ),
-    )
-    for item_extra in items_construidos.items_extra:
+    # Misma estrategia que self_ordering/submit.py para cantidad>1: NO se
+    # agrega columna `cantidad` a orden_items (cada fila sigue siendo 1
+    # unidad), se "explota" el mismo conjunto de items (principal + extras
+    # de combo/promocion) en N filas identicas -- precio/subtotal, cocina,
+    # inventario y edicion ya operan por fila sin cambios.
+    for _ in range(cantidad):
         cursor.execute(
             """
             INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (orden_id, item_extra.producto, item_extra.precio, item_extra.indicacion, incluido_en_snapshot),
+            (
+                orden_id,
+                items_construidos.item_principal.producto,
+                items_construidos.item_principal.precio,
+                items_construidos.item_principal.indicacion,
+                incluido_en_snapshot,
+            ),
         )
+        for item_extra in items_construidos.items_extra:
+            cursor.execute(
+                """
+                INSERT INTO orden_items (orden_id, producto, precio, indicacion, incluido_en_snapshot)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (orden_id, item_extra.producto, item_extra.precio, item_extra.indicacion, incluido_en_snapshot),
+            )
 
     if estado == "cerrada" and edicion_emergencia_activa:
+        prefijo_cantidad = f"{cantidad}x " if cantidad > 1 else ""
         registrar_auditoria_emergencia(
             cursor,
             orden_id,
             "agregar_producto_emergencia",
-            f"Producto agregado: {items_construidos.item_principal.producto} - ${items_construidos.item_principal.precio}",
+            f"Producto agregado: {prefijo_cantidad}{items_construidos.item_principal.producto} - ${items_construidos.item_principal.precio}",
         )
 
 

@@ -1,8 +1,10 @@
 import unittest
 
 from app.domain.sales.item_builder import (
+    MAX_CANTIDAD_ITEM,
     ErrorConstruccionItem,
     construir_items_orden,
+    validar_cantidad_item,
 )
 from app.domain.sales.item_descriptions import (
     deserializar_indicacion,
@@ -284,6 +286,37 @@ class ItemBuilderTest(unittest.TestCase):
         self.assertIn("Nota: sin cebolla por favor", texto)
         self.assertEqual(texto.count("Nota: sin cebolla por favor"), 1)
         self.assertEqual("\n".join(lineas).count("Nota: sin cebolla por favor"), 1)
+
+
+class ValidarCantidadItemTest(unittest.TestCase):
+    def test_accepts_one(self):
+        self.assertEqual(validar_cantidad_item(1), 1)
+
+    def test_accepts_string_digits(self):
+        self.assertEqual(validar_cantidad_item("4"), 4)
+
+    def test_accepts_max(self):
+        self.assertEqual(validar_cantidad_item(MAX_CANTIDAD_ITEM), MAX_CANTIDAD_ITEM)
+
+    def test_rejects_zero(self):
+        with self.assertRaises(ErrorConstruccionItem):
+            validar_cantidad_item(0)
+
+    def test_rejects_negative(self):
+        with self.assertRaises(ErrorConstruccionItem):
+            validar_cantidad_item(-1)
+
+    def test_rejects_above_max(self):
+        with self.assertRaises(ErrorConstruccionItem):
+            validar_cantidad_item(MAX_CANTIDAD_ITEM + 1)
+
+    def test_rejects_non_numeric(self):
+        with self.assertRaises(ErrorConstruccionItem):
+            validar_cantidad_item("abc")
+
+    def test_rejects_none(self):
+        with self.assertRaises(ErrorConstruccionItem):
+            validar_cantidad_item(None)
 
 
 if __name__ == "__main__":
