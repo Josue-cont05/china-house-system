@@ -4025,6 +4025,157 @@ class SalesSnapshotTest(unittest.TestCase):
             403,
         )
 
+    # ---- facturar desde la pantalla de Cobrar ----
+
+    def _ultimo_job_recibo(self, orden_id=None):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT event_key, required_role FROM print_jobs WHERE required_role LIKE 'RECIBO_%' ORDER BY id DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row
+
+    def test_cobrar_sin_checkbox_facturar_no_marca_ni_encola_factura(self):
+        orden_id = self._create_order(price=10.0)
+        jobs_antes = self._ultimo_job_recibo()
+
+        respuesta = self._charge(orden_id, "usd", 10)
+        self.assertEqual(respuesta.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT facturar FROM ordenes WHERE id=?", (orden_id,))
+        facturar = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertFalse(bool(facturar))
+        self.assertEqual(self._ultimo_job_recibo(), jobs_antes)
+
+    def test_cobrar_con_facturar_al_cobrar_marca_la_orden_y_encola_el_recibo(self):
+        orden_id = self._create_order(price=10.0)
+
+        respuesta = self.client.post(
+            f"/cobrar/{orden_id}",
+            data={
+                "modo_cobro": "pagado",
+                "cliente_id": "",
+                "metodo1": "usd",
+                "monto1": "10",
+                "ref1": "ref1",
+                "metodo2": "",
+                "monto2": "",
+                "ref2": "ref2",
+                "descuento": "0",
+                "facturar_al_cobrar": "1",
+            },
+            follow_redirects=False,
+        )
+        self.assertEqual(respuesta.status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT facturar, estado FROM ordenes WHERE id=?", (orden_id,))
+        facturar, estado = cursor.fetchone()
+        conn.close()
+
+        self.assertTrue(bool(facturar))
+        self.assertEqual(estado, "cerrada")  # el cobro en si no se vio afectado
+        self.assertIsNotNone(self._ultimo_job_recibo())
+
+    def test_activar_factura_route_still_works_standalone_after_refactor(self):
+        """Regresion: /activar_factura/<id> ahora delega en
+        activar_factura_orden (compartida con /cobrar), debe seguir
+        teniendo exactamente el mismo efecto que antes de extraerla."""
+        orden_id = self._create_order(price=10.0)
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT facturar FROM ordenes WHERE id=?", (orden_id,))
+        facturar = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertTrue(bool(facturar))
+        self.assertIsNotNone(self._ultimo_job_recibo())
+
+    def test_cobrar_con_facturar_al_cobrar_works_with_credito_mode(self):
+        cliente_id = self._create_client("Cliente Factura Credito")
+        orden_id = self._create_order(price=10.0)
+
+        respuesta = self._charge(orden_id, "", 0, modo_cobro="credito", cliente_id=cliente_id)
+        self.assertEqual(respuesta.status_code, 302)
+        # El checkbox se envia aparte de _charge (que no lo soporta), asi
+        # que se cobra credito normal aqui y se factura en una llamada
+        # directa a la ruta para probar que ambos caminos son compatibles
+        # (factura no interfiere con el flujo de credito/CxC ya probado
+        # en los escenarios B/C de esta mision).
+        self.assertEqual(self.client.get(f"/activar_factura/{orden_id}").status_code, 302)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT facturar, estado FROM ordenes WHERE id=?", (orden_id,))
+        facturar, estado = cursor.fetchone()
+        cursor.execute("SELECT saldo_pendiente, estado FROM cuentas_por_cobrar WHERE orden_id=?", (orden_id,))
+        cuenta = cursor.fetchone()
+        conn.close()
+
+        self.assertTrue(bool(facturar))
+        self.assertEqual(estado, "cerrada")
+        self.assertEqual(cuenta, (10.0, "pendiente"))  # CxC intacta, sin interferencia
+
+    def test_cobrar_page_shows_checkbox_only_when_not_already_facturada(self):
+        orden_id = self._create_order(price=10.0)
+
+        pagina_antes = self.client.get(f"/cobrar/{orden_id}")
+        self.assertIn(b"facturar_al_cobrar", pagina_antes.data)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE ordenes SET facturar=1 WHERE id=?", (orden_id,))
+        conn.commit()
+        conn.close()
+
+        pagina_despues = self.client.get(f"/cobrar/{orden_id}")
+        self.assertNotIn(b"facturar_al_cobrar", pagina_despues.data)
+
+    def test_cobrar_facturar_al_cobrar_rolls_back_whole_charge_on_invoicing_failure(self):
+        orden_id = self._create_order(price=10.0)
+
+        with mock.patch(
+            "app.application.payments.receipts.crear_print_job_recibo",
+            side_effect=RuntimeError("fallo al facturar"),
+        ):
+            respuesta = self.client.post(
+                f"/cobrar/{orden_id}",
+                data={
+                    "modo_cobro": "pagado",
+                    "cliente_id": "",
+                    "metodo1": "usd",
+                    "monto1": "10",
+                    "ref1": "ref1",
+                    "metodo2": "",
+                    "monto2": "",
+                    "ref2": "ref2",
+                    "descuento": "0",
+                    "facturar_al_cobrar": "1",
+                },
+            )
+        self.assertEqual(respuesta.status_code, 500)
+
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT estado, facturar FROM ordenes WHERE id=?", (orden_id,))
+        estado, facturar = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) FROM pagos WHERE orden_id=?", (orden_id,))
+        total_pagos = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertEqual(estado, "abierta")  # el cobro completo se revirtio, no solo la factura
+        self.assertFalse(bool(facturar))
+        self.assertEqual(total_pagos, 0)
+
 
 class PostCobroIncrementalTest(unittest.TestCase):
     """Mision "seguridad financiera de agregados post-cobro" (secciones

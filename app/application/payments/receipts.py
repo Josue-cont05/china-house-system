@@ -112,6 +112,25 @@ def crear_print_job_recibo(cursor, orden_id, token, fecha_evento, obtener_tasa_a
     return True
 
 
+def activar_factura_orden(cursor, orden_id, ahora_venezuela, obtener_tasa_actual):
+    """Marca una orden para facturar y encola la impresion del recibo
+    oficial -- la MISMA logica que ya usa la ruta /activar_factura/<id>
+    (web_app.py), extraida aqui para que /cobrar pueda facturar
+    directamente al cobrar ("FACTURAR Y CONTINUAR") sin duplicarla. El
+    UPDATE respeta la misma condicion que la ruta original
+    (`cierre_id IS NULL`: nunca factura una orden ya archivada), y se
+    llama ANTES del commit de /cobrar para que quede atomico con el
+    cobro -- si facturar fallara, todo el cobro se revierte, igual que
+    ya pasa hoy con CxC/delivery/inventario en esa misma ruta."""
+    cursor.execute(
+        "UPDATE ordenes SET facturar=1, factura_reimpresion_token=NULL WHERE id=? AND cierre_id IS NULL",
+        (orden_id,),
+    )
+    crear_print_job_recibo(
+        cursor, orden_id, None, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"), obtener_tasa_actual
+    )
+
+
 def obtener_facturas_pendientes(cursor, obtener_tasa_actual):
     """Caso de uso "preparar recibo provisional/oficial" para el polling
     legacy de /facturas_pendientes (red de seguridad para impresoras que

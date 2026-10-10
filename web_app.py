@@ -126,7 +126,11 @@ from app.infrastructure.database.modifiers import (
 )
 from app.application.payments.pendiente import dejar_pendiente_a_cliente, pagar_pendiente_ahora
 from app.application.payments.checkout import OrdenYaCerradaOArchivadaError, ejecutar_cobro
-from app.application.payments.receipts import crear_print_job_recibo, obtener_facturas_pendientes
+from app.application.payments.receipts import (
+    activar_factura_orden,
+    crear_print_job_recibo,
+    obtener_facturas_pendientes,
+)
 from app.application.orders.items import (
     actualizar_indicacion_de_item,
     agregar_item_a_orden,
@@ -5560,7 +5564,7 @@ def cobrar(orden_id):
         """
         SELECT o.id, o.numero_orden, o.fecha_hora, o.tipo, o.referencia, o.cliente,
                o.estado, o.observacion, o.descuento, u.nombre, o.cierre_id, o.cliente_id,
-               o.delivery_usd, o.delivery_repartidor_id
+               o.delivery_usd, o.delivery_repartidor_id, o.facturar
         FROM ordenes o
         LEFT JOIN usuarios u ON o.usuario_id = u.id
         WHERE o.id=?
@@ -5577,6 +5581,7 @@ def cobrar(orden_id):
     cierre_id = o[10]
     cliente_id_actual = o[11]
     delivery_orden_usd = a_float(o[12])
+    ya_facturada = bool(o[14])
     delivery_repartidor_id = o[13]
 
     if cierre_id is not None:
@@ -5800,6 +5805,15 @@ def cobrar(orden_id):
                     conn.rollback()
                     conn.close()
                     raise
+
+                if request.form.get("facturar_al_cobrar") == "1":
+                    try:
+                        activar_factura_orden(cursor, orden_id, ahora_venezuela, obtener_tasa_actual)
+                    except Exception:
+                        conn.rollback()
+                        conn.close()
+                        raise
+
                 conn.commit()
                 conn.close()
                 if estado == "cerrada":
@@ -5813,6 +5827,14 @@ def cobrar(orden_id):
         ensure_ascii=False,
     )
     modo_cobro_seguro = modo_cobro_val if modo_cobro_val in MODOS_COBRO_VALIDOS else "pagado"
+
+    checkbox_facturar_html = ""
+    if not ya_facturada:
+        checkbox_facturar_html = """
+        <label class="checkbox-facturar">
+            <input type="checkbox" name="facturar_al_cobrar" value="1"> 🧾 Facturar esta orden al cobrar
+        </label>
+        """
 
     return f"""
     <html>
@@ -5860,6 +5882,8 @@ def cobrar(orden_id):
     .accion-secundaria {{ background:#242424; color:var(--texto); border:1px solid var(--borde); }}
     .nuevo-cliente {{ margin-top:10px; }}
     .mensaje-ui {{ color:var(--texto-secundario); font-size:14px; min-height:18px; }}
+    .checkbox-facturar {{ display:flex; align-items:center; gap:8px; margin:12px 0; font-weight:700; }}
+    .checkbox-facturar input {{ width:auto; margin:0; }}
     @media (max-width: 520px) {{ .metodos-grid {{ grid-template-columns:1fr; }} }}
     @media (max-width: 520px) {{ .modo-grid, .saldo-panel {{ grid-template-columns:1fr; }} }}
     </style>
@@ -5958,6 +5982,7 @@ def cobrar(orden_id):
     <div class="sep"></div>
     <label>Descuento (Bs)</label>
     <input name="descuento" id="descuento" type="number" step="0.01" value="{descuento_val}">
+    {checkbox_facturar_html}
     <button class="btn confirmar">💵 Confirmar pago</button>
     </form>
     <a href="/orden/{orden_id}" class="volver">🏠 Volver</a>
@@ -8354,13 +8379,7 @@ def facturas_pendientes():
 def activar_factura(orden_id):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE ordenes SET facturar=1, factura_reimpresion_token=NULL WHERE id=? AND cierre_id IS NULL",
-        (orden_id,),
-    )
-    crear_print_job_recibo(
-        cursor, orden_id, None, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"), obtener_tasa_actual
-    )
+    activar_factura_orden(cursor, orden_id, ahora_venezuela, obtener_tasa_actual)
     conn.commit()
     conn.close()
     return redirect(f"/orden/{orden_id}")
