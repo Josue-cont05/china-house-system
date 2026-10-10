@@ -1,4 +1,3 @@
-from collections import defaultdict
 import datetime
 import html as html_lib
 import io
@@ -14,14 +13,9 @@ import pytz
 
 from app.infrastructure.database.schema import (
     CONFIG,
-    ConnectionWrapper,
-    CursorWrapper,
-    adaptar_query,
     asegurar_columna,
-    columna_existe,
     es_postgres,
     get_connection,
-    normalizar_database_url,
     obtener_ultimo_id,
     pk_autoincrement_sql,
 )
@@ -32,15 +26,10 @@ from app.shared.constants.system import (
     SABORES_REFRESCO,
 )
 from app.domain.sales.calculations import (
-    DELIVERY_MONTO_MAXIMO,
     MODOS_COBRO_VALIDOS,
     TOLERANCIA_COBRO,
-    calcular_totales_cobro,
     calcular_totales_financieros_delivery,
     convertir_pago_equivalente,
-    es_categoria_delivery,
-    es_producto_delivery_legacy,
-    etiqueta_metodo_pago,
     normalizar_metodo_pago,
     normalizar_modo_cobro,
 )
@@ -52,22 +41,19 @@ from app.domain.sales.item_descriptions import (
     separar_prefijo_cantidad,
     texto_descripcion_combo_cocina,
     texto_descripcion_combo_factura,
-    texto_descripcion_combo_orden,
     texto_descripcion_promocion_cocina,
     texto_descripcion_promocion_factura,
-    texto_descripcion_promocion_orden,
     texto_item_con_indicacion,
 )
 from app.domain.sales.item_builder import (
     ErrorConstruccionItem,
-    es_producto_refresco,
 )
 from app.domain.sales.order_states import (
     orden_archivada,
     puede_modificar_orden as puede_modificar_estado_orden,
 )
 from app.domain.sales.order_totals import (
-    calcular_totales_visuales_delivery,
+    calcular_totales_visuales_delivery,  # re-exported para web_app.calcular_totales_visuales_delivery (usado en tests)
     calcular_totales_visuales_orden,
 )
 from app.infrastructure.database.sales.orders import SqlSalesOrderRepository
@@ -86,7 +72,6 @@ from app.domain.sales.print_queue import (
     roles_validos,
 )
 from app.infrastructure.database.print_queue import (
-    RESULTADO_LEASE_INVALIDO,
     RESULTADO_NO_ENCONTRADO,
     RESULTADO_OK,
     RESULTADO_OK_IDEMPOTENTE,
@@ -94,14 +79,8 @@ from app.infrastructure.database.print_queue import (
     crear_tabla_print_jobs,
 )
 from app.domain.sales.kitchen_ticket_times import formatear_hora_visible
-from app.domain.sales.service_alerts import (
-    TIPO_BEBIDA_ADICIONAL,
-    agrupar_items_alerta,
-    debe_evaluar_alerta,
-)
 from app.infrastructure.database.service_alerts import (
     SqlServiceAlertsRepository,
-    crear_alerta_en_cursor,
     crear_tabla_service_alerts,
 )
 from app.infrastructure.database.notifications import (
@@ -120,11 +99,9 @@ from app.infrastructure.database.clientes import (
     obtener_cliente_para_cxc,
 )
 from app.infrastructure.database.cxc import (
-    agregar_cargo_cuenta_existente,
     crear_cuenta_por_cobrar_inicial,
     crear_tablas_cuentas_por_cobrar,
     obtener_cuenta_cxc_por_orden,
-    orden_tiene_cxc,
     validar_recobro_cxc,
 )
 from app.infrastructure.database.payments import calcular_pendiente_post_cobro
@@ -190,7 +167,6 @@ from app.domain.delivery.rules import (
     ESTADO_DELIVERY_ASIGNADO_INTERNO,
     ESTADO_DELIVERY_EXTERNO,
     ESTADO_DELIVERY_NECESITA_CONDUCTOR,
-    normalizar_nombre_repartidor,
 )
 from app.infrastructure.database.delivery import (
     actualizar_delivery_orden,
@@ -205,13 +181,9 @@ from app.infrastructure.database.delivery import (
     listar_repartidores,
     obtener_conductor_delivery_por_defecto,
     obtener_repartidor,
-    orden_tiene_delivery_legacy,
-    orden_tiene_movimientos_delivery,
     registrar_pago_delivery_repartidor,
     resumen_delivery_admin,
-    resumen_delivery_movimientos,
     resumen_delivery_por_repartidor,
-    validar_orden_delivery_modificable,
     validar_recobro_delivery,
     validar_repartidor_delivery_cobro,
 )
@@ -4741,15 +4713,7 @@ def orden(orden_id):
         tasa,
         descuento,
     )
-    total_usd = totales_visuales["total_usd"]
-    total_bs = totales_visuales["total_bs"]
-    total_cliente_usd = totales_visuales["total_cliente_usd"]
-    total_cliente_bs = totales_visuales["total_cliente_bs"]
-    delivery_legacy_usd = totales_visuales["delivery_legacy_usd"]
     tiene_delivery_legacy = totales_visuales["tiene_delivery_legacy"]
-    descuento = totales_visuales["descuento"]
-    total_bs_final = totales_visuales["total_bs_final"]
-    total_delivery_bs = totales_visuales["total_delivery_bs"]
     total_orden_bs = totales_visuales["total_orden_bs"]
     total_orden_usd = totales_visuales["total_orden_usd"]
     bloqueada_por_cierre = orden_archivada(o[10])
@@ -5305,7 +5269,6 @@ def cobrar(orden_id):
         mensaje = str(exc) if "delivery" in str(exc).lower() else "Tasa de cobro invalida. Corrige la tasa antes de cobrar."
         return mensaje, 400
     total_usd = totales_cobro["subtotal_restaurante_usd"]
-    total_bs = round(total_usd * tasa, 2)
     total_bs_final = totales_cobro["total_cliente_bs"]
     total_cliente_usd = totales_cobro["total_cliente_usd"]
     total_cliente_bs = totales_cobro["total_cliente_bs"]
