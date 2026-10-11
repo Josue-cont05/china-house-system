@@ -101,3 +101,17 @@ def validar_seleccion_modificadores(grupos, seleccion):
             )
 
     return grupos_resultado, round(precio_adicional_total, 2)
+
+
+def producto_agotado_por_modificadores(grupos):
+    """True si el producto NO se puede vender ahora mismo porque algun
+    grupo activo y obligatorio (minimo >= 1) no tiene ninguna opcion
+    activa y disponible: validar_seleccion_modificadores rechazaria
+    cualquier intento de agregarlo. No es una regla nueva -- solo
+    anticipa en la UI (badge AGOTADO) lo que el backend ya impone."""
+    for grupo in grupos or ():
+        if not grupo.activo or not grupo.obligatorio or grupo.minimo < 1:
+            continue
+        if not any(o.activa and o.disponible for o in grupo.opciones):
+            return True
+    return False

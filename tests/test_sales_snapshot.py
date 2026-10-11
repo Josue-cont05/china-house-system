@@ -1922,7 +1922,9 @@ class SalesSnapshotTest(unittest.TestCase):
 
         page = self.client.get(f"/orden/{orden_id}")
         self.assertEqual(page.status_code, 200)
-        self.assertEqual(page.data.count(b"Cerveza Polar - $2.5"), 1)
+        # El resumen agrupa unidades identicas en una sola fila "1×".
+        self.assertEqual(page.data.count(b'data-item-producto="Cerveza Polar"'), 1)
+        self.assertIn(b'data-item-producto="Cerveza Polar" data-cantidad="1"', page.data)
 
         charge_response = self._charge(orden_id, "usd", 2.5)
         self.assertEqual(charge_response.status_code, 302)
@@ -1937,7 +1939,9 @@ class SalesSnapshotTest(unittest.TestCase):
             self.assertEqual(self.client.get(f"/agregar/{orden_id}/{beer_id}").status_code, 302)
 
         page = self.client.get(f"/orden/{orden_id}")
-        self.assertEqual(page.data.count(b"Cerveza Polar - $2.5"), 4)
+        # El resumen agrupa unidades identicas en una sola fila "4×".
+        self.assertEqual(page.data.count(b'data-item-producto="Cerveza Polar"'), 1)
+        self.assertIn(b'data-item-producto="Cerveza Polar" data-cantidad="4"', page.data)
 
         conn = self._conn()
         cursor = conn.cursor()
@@ -1961,7 +1965,9 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual([row[1] for row in remaining], ["Cerveza Polar"] * 3)
 
         page = self.client.get(f"/orden/{orden_id}")
-        self.assertEqual(page.data.count(b"Cerveza Polar - $2.5"), 3)
+        # El resumen agrupa unidades identicas en una sola fila "3×".
+        self.assertEqual(page.data.count(b'data-item-producto="Cerveza Polar"'), 1)
+        self.assertIn(b'data-item-producto="Cerveza Polar" data-cantidad="3"', page.data)
 
     def test_open_order_with_legacy_delivery_is_not_auto_converted_and_blocks_explicit_delivery(self):
         repartidor_id = self._insert_repartidor("Bloqueo Legacy", activo=1)

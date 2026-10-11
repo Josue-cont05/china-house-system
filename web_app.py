@@ -234,17 +234,6 @@ ORDEN_CATEGORIAS_POS = [
     "Extras",
 ]
 
-COLORES_CATEGORIAS_POS = {
-    "Neko Combos":      "#0d4a32",
-    "Promociones Neko": "#be123c",
-    "Neko Dúo":         "#c2410c",
-    "Neko Clan":        "#1e3a8a",
-    "Favoritos de Neko": "#0f766e",
-    "Bebidas":          "#0284c7",
-    "Delivery":         "#6d28d9",
-    "Extras":           "#374151",
-}
-
 FAVORITOS_COMBO_1 = [
     "Pollo Agridulce",
     "Chop Suey de Pollo",
@@ -5097,7 +5086,6 @@ def orden(orden_id):
         conductor_delivery_info=conductor_delivery_info,
         conductores_delivery_activos=conductores_delivery_activos,
         ORDEN_CATEGORIAS_POS=ORDEN_CATEGORIAS_POS,
-        COLORES_CATEGORIAS_POS=COLORES_CATEGORIAS_POS,
         COMBOS_PERSONALES=COMBOS_PERSONALES,
         ACOMPANANTES_COMBO=ACOMPANANTES_COMBO,
         BEBIDAS_COMBO=BEBIDAS_COMBO,
@@ -5115,6 +5103,7 @@ def orden(orden_id):
         usuario_puede_reimprimir_cocina=usuario_puede_reimprimir_cocina,
         _render_panel_conductor_delivery=_render_panel_conductor_delivery,
         modificadores_por_producto=modificadores_por_producto,
+        imagenes_por_producto=sales_catalog_repo.listar_imagenes_productos(),
     )
 
 
