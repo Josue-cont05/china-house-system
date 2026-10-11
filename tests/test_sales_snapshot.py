@@ -3354,8 +3354,8 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertNotIn("{{", html)
         self.assertNotIn("}}", html)
         # Controles reales deben seguir apareciendo para el rol master.
-        self.assertIn('href="/cerrar_jornada" class="btn-cierre-jornada"', html)
-        self.assertIn('href="/ordenes_listas" class="btn-cierre-jornada"', html)
+        self.assertIn('href="/cerrar_jornada" class="btn-cierre-jornada ', html)
+        self.assertIn('href="/ordenes_listas" class="btn-cierre-jornada ', html)
         self.assertIn("Accesos rápidos", html)
         self.assertIn("campanaNotifBtn", html)
 

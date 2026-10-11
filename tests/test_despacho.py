@@ -951,7 +951,7 @@ class CierreJornadaConfirmacionTest(DespachoRoutesTest):
         self.assertIn('<form method="post" action="/cerrar_jornada"', cuerpo)
         self.assertIn('name="confirmar" value="1"', cuerpo)
         self.assertIn("Confirmar cierre", cuerpo)
-        self.assertIn('href="/" class="btn-cancelar-cierre">Cancelar</a>', cuerpo)
+        self.assertIn('href="/" class="ds-btn ds-btn-secondary btn-cancelar-cierre">Cancelar</a>', cuerpo)
         self.assertEqual(self._estado_cierre(orden_id), (None, 0))
 
     def test_confirmar_cierre_si_cierra(self):

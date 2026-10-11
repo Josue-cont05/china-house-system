@@ -757,45 +757,14 @@ def render_detalle_orden(
 
 
 # ----------------------------------------------------------------------
-# Estilos. Tokens propios en body.pagina-orden (no en :root): barra_superior
-# vuelve a inyectar estilos_base() dentro del <body>, y una redefinicion en
-# :root posterior pisaria la nuestra; declararlos en <body> gana por herencia.
-# Las variables legacy (--panel, --borde, --verde-neko...) se remapean para
-# que los paneles compartidos (self-ordering, conductor) tomen la paleta.
+# Estilos propios de la pantalla. Colores y tokens vienen del design system
+# global (app.presentation.web.design_system, via estilos_base()).
 # ----------------------------------------------------------------------
 _CSS_ORDEN = """
 body.pagina-orden {
-    --bg-main: #0F1115;
-    --bg-panel: #161A22;
-    --bg-card: #1C2230;
-    --bg-hover: #242C3B;
-    --border: #2E3747;
-    --text-primary: #F5F7FA;
-    --text-secondary: #AAB3C2;
-    --text-muted: #8A94A6;
-    --accent-primary: #35D07F;
-    --accent-secondary: #F2B94B;
-    --success: #35D07F;
-    --warning: #F2B94B;
-    --danger: #EF4444;
-    --info: #4DA3FF;
-    --gris-fondo: var(--bg-main);
-    --fondo-principal: var(--bg-main);
-    --panel: var(--bg-panel);
-    --panel-secundario: var(--bg-card);
-    --tarjeta: var(--bg-card);
-    --borde: var(--border);
-    --texto: var(--text-primary);
-    --texto-secundario: var(--text-secondary);
-    --carbon: var(--text-primary);
-    --verde-neko: var(--accent-primary);
-    --naranja: var(--accent-secondary);
     --header-h: 0px;
     --nav-h: 0px;
     margin: 0;
-    background: var(--bg-main);
-    color: var(--text-primary);
-    font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 }
 .pagina-orden [hidden] { display: none !important; }
 .pagina-orden a:focus-visible, .pagina-orden button:focus-visible,
@@ -1070,7 +1039,7 @@ body.sin-catalogo .resumen { position: static; max-height: none; }
 .btn-accion.ancho { grid-column: 1 / -1; }
 .btn-sec { background: var(--bg-card); border: 1px solid var(--border); color: var(--text-primary); min-height: 44px; font-size: 14px; }
 .btn-sec:hover { background: var(--bg-hover); }
-.btn-sec.peligro { color: #FCA5A5; border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.08); }
+.btn-sec.peligro { color: var(--danger-text); border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.08); }
 .btn-mini { width: 100%; min-height: 40px; padding: 6px 10px; font-size: 13px; flex: 1 1 auto; }
 .acciones-superiores > a.btn-mini, .acciones-superiores > div.btn-mini { width: auto; }
 .acciones-secundarias { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -1176,7 +1145,7 @@ details.delivery-panel[open] > summary::after { content: "▴"; }
 /* Header compartido (barra_superior) mas bajo en esta pantalla: es sticky
    y cada pixel cuenta durante la toma de ordenes. Sus estilos de columna
    son inline, de ahi el !important. */
-.pagina-orden .header { padding: 8px 20px; background: #12151C; }
+.pagina-orden .header { padding: 8px 20px; }
 .pagina-orden .header > div:last-child { flex-direction: row !important; align-items: center !important; gap: 12px !important; }
 .pagina-orden .titulo { font-size: 21px; }
 @media (max-width: 860px) {

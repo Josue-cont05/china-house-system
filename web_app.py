@@ -93,6 +93,7 @@ from app.infrastructure.database.notifications import (
 )
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.cxc_routes import crear_cxc_blueprint
+from app.presentation.web.design_system import estilos_design_system
 from app.presentation.web.order_detail_view import render_detalle_orden
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 from app.infrastructure.database.clientes import (
@@ -1379,133 +1380,10 @@ def parsear_insumos_extra(texto):
 
 
 def estilos_base():
-    return """
-    :root {
-        --fondo-principal: #0F1115;
-        --panel: #181B20;
-        --panel-secundario: #20242B;
-        --tarjeta: #20242B;
-        --verde-neko: #3DDC84;
-        --verde-oscuro: #2AC96F;
-        --hover-neko: #2AC96F;
-        --naranja: #F59E0B;
-        --dorado: #f59e0b;
-        --crema: #fef3c7;
-        --verde: #3DDC84;
-        --azul: #2563EB;
-        --rojo: #DC2626;
-        --carbon: #F4F4F4;
-        --gris-fondo: #0F1115;
-        --texto: #F4F4F4;
-        --texto-secundario: #B0B6BE;
-        --borde: #31363F;
-        --sombra: 0 10px 24px rgba(0, 0, 0, 0.22);
-        --sombra-suave: 0 1px 2px rgba(0, 0, 0, 0.20), 0 8px 20px rgba(0, 0, 0, 0.14);
-    }
-    * { box-sizing: border-box; }
-    body {
-        font-family: 'Segoe UI', Arial, Helvetica, sans-serif;
-        color: var(--texto);
-        background:
-            radial-gradient(circle at top right, rgba(61, 220, 132, 0.035), transparent 28rem),
-            linear-gradient(180deg, var(--fondo-principal) 0%, #11141A 100%);
-        min-height: 100vh;
-    }
-    .header {
-        background: rgba(24, 27, 32, 0.96);
-        color: var(--texto);
-        padding: 14px 22px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 16px;
-        border-bottom: 1px solid var(--borde);
-        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.20);
-        position: sticky;
-        top: 0;
-        z-index: 20;
-    }
-    .titulo {
-        font-size: 24px;
-        font-weight: 900;
-        letter-spacing: 0;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        color: var(--verde-neko);
-        text-shadow: 0 0 10px rgba(61, 220, 132, 0.14);
-    }
-    .titulo span.brand-dot { color: var(--verde-neko); }
-    a.titulo-inicio { text-decoration: none; white-space: nowrap; flex-shrink: 0; border-radius: 10px; padding: 4px 6px; margin: -4px -6px; transition: background 0.15s ease, opacity 0.15s ease; }
-    a.titulo-inicio:hover { background: rgba(61, 220, 132, 0.08); }
-    a.titulo-inicio:active { opacity: 0.8; }
-    a.titulo-inicio:focus-visible { outline: 3px solid var(--verde-neko); outline-offset: 2px; }
-    .menu-top { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
-    .menu-top a, .volver, .btn-accion, .btn-ver, .btn-cobrar, .btn-acceso {
-        color: white;
-        text-decoration: none;
-        font-weight: 700;
-        border-radius: 8px;
-        min-height: 40px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 5px;
-        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
-    }
-    .menu-top a { background: var(--panel-secundario); border: 1px solid var(--borde); padding: 8px 12px; font-size: 13px; transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease; }
-    .menu-top a:hover { background: #262B33; border-color: #3C4350; color: var(--texto); }
-    .contenido, .contenedor { max-width: 1280px; margin: 0 auto; }
-    .card, .panel-izq, .panel-der, .panel, .login-box {
-        background: var(--panel);
-        color: var(--texto);
-        border: 1px solid var(--borde);
-        box-shadow: var(--sombra-suave);
-    }
-    h1, h2, h3 { letter-spacing: -0.3px; color: var(--carbon); }
-    input, select, textarea {
-        border: 1px solid var(--borde);
-        min-height: 46px;
-        background: var(--panel-secundario);
-        color: var(--texto);
-        border-radius: 8px;
-        padding: 10px 14px;
-        font-size: 15px;
-    }
-    input::placeholder, textarea::placeholder { color: #7F8791; }
-    input:focus, select:focus, textarea:focus {
-        outline: none;
-        border-color: var(--verde-neko);
-        box-shadow: 0 0 0 3px rgba(61, 220, 132, 0.12);
-    }
-    button, .btn, .btn-agregar, .btn-guardar {
-        font-weight: 800;
-        min-height: 48px;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
-        border-radius: 10px;
-        cursor: pointer;
-        transition: background 0.18s ease, border-color 0.18s ease, transform 0.1s, box-shadow 0.18s ease;
-    }
-    button:hover, .btn:hover, .btn-agregar:hover, .btn-guardar:hover { box-shadow: 0 8px 18px rgba(0, 0, 0, 0.20); }
-    button:active, .btn:active { transform: scale(0.97); }
-    table { color: var(--texto); }
-    th { background: var(--panel-secundario); color: var(--verde-neko); border-bottom: 1px solid var(--borde); }
-    td { border-bottom: 1px solid var(--borde); }
-    tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.025); }
-    tbody tr:hover { background: rgba(255, 255, 255, 0.055); }
-    @media (min-width: 900px) {
-        .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
-        .panel-izq { flex: 0 0 360px; }
-        .panel-der { flex: 1; }
-        .card { flex-direction: row !important; justify-content: space-between; align-items: center; }
-    }
-    @media (max-width: 768px) {
-        .header { position: static; flex-direction: column; align-items: stretch; }
-        .titulo { font-size: 21px; }
-        .menu-top { justify-content: stretch; }
-        .menu-top a { flex: 1 1 42%; }
-    }
-    """
+    """CSS comun de TODAS las pantallas: el design system oficial
+    (app.presentation.web.design_system). Se mantiene el nombre porque
+    ~35 pantallas ya lo inyectan."""
+    return estilos_design_system()
 
 
 def barra_superior(extra_links=""):
@@ -1515,12 +1393,12 @@ def barra_superior(extra_links=""):
         campana_html = f"""
         <div class="campana-wrap" style="position:relative;">
             <button type="button" id="campanaNotifBtn" style="background:none;border:none;font-size:20px;cursor:pointer;position:relative;color:inherit;">
-                🔔<span id="campanaNotifContador" style="display:none;position:absolute;top:-6px;right:-8px;background:#ef4444;color:white;border-radius:999px;font-size:10px;font-weight:800;padding:2px 5px;">0</span>
+                🔔<span id="campanaNotifContador" style="display:none;position:absolute;top:-6px;right:-8px;background:var(--danger);color:white;border-radius:999px;font-size:10px;font-weight:800;padding:2px 5px;">0</span>
             </button>
-            <div id="campanaNotifPanel" style="display:none;position:absolute;right:0;top:32px;width:300px;max-height:360px;overflow-y:auto;background:#20242B;border:1px solid #31363F;border-radius:10px;box-shadow:0 10px 24px rgba(0,0,0,0.3);z-index:1000;padding:6px;">
+            <div id="campanaNotifPanel" style="display:none;position:absolute;right:0;top:32px;width:300px;max-height:360px;overflow-y:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 24px rgba(0,0,0,0.3);z-index:1000;padding:6px;">
                 <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 8px;">
-                    <b style="font-size:13px;color:#F4F4F4;">Notificaciones</b>
-                    <button type="button" id="campanaMarcarTodas" style="background:none;border:none;color:#3DDC84;font-size:12px;cursor:pointer;">Marcar todas leidas</button>
+                    <b style="font-size:13px;color:var(--text-primary);">Notificaciones</b>
+                    <button type="button" id="campanaMarcarTodas" style="background:none;border:none;color:var(--accent-primary);font-size:12px;cursor:pointer;">Marcar todas leidas</button>
                 </div>
                 <div id="campanaNotifLista" style="display:flex;flex-direction:column;gap:4px;"></div>
             </div>
@@ -1561,17 +1439,17 @@ def barra_superior(extra_links=""):
 
             function render(notificaciones) {{
                 if (!notificaciones.length) {{
-                    lista.innerHTML = '<div style="padding:14px;color:#7C828C;font-size:13px;">Sin notificaciones.</div>';
+                    lista.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:13px;">Sin notificaciones.</div>';
                     return;
                 }}
                 lista.innerHTML = notificaciones.map(function(n) {{
-                    var estilo = n.leida ? "opacity:0.6;" : "border-left:3px solid #3DDC84;";
-                    var enlace = n.orden_id ? '<a href="/orden/' + encodeURIComponent(n.orden_id) + '" style="color:#3DDC84;font-size:11px;">Ver orden</a>' : '';
-                    return '<div class="campana-item" data-id="' + n.id + '" data-leida="' + (n.leida ? "1" : "0") + '" style="padding:8px;border-radius:6px;background:#181B20;cursor:pointer;' + estilo + '">' +
-                        '<div style="font-size:13px;font-weight:800;color:#F4F4F4;">' + escapeHtml(n.titulo) + '</div>' +
+                    var estilo = n.leida ? "opacity:0.6;" : "border-left:3px solid var(--accent-primary);";
+                    var enlace = n.orden_id ? '<a href="/orden/' + encodeURIComponent(n.orden_id) + '" style="color:var(--accent-primary);font-size:11px;">Ver orden</a>' : '';
+                    return '<div class="campana-item" data-id="' + n.id + '" data-leida="' + (n.leida ? "1" : "0") + '" style="padding:8px;border-radius:6px;background:var(--bg-panel);cursor:pointer;' + estilo + '">' +
+                        '<div style="font-size:13px;font-weight:800;color:var(--text-primary);">' + escapeHtml(n.titulo) + '</div>' +
                         '<div style="font-size:12px;color:#B0B6BE;white-space:pre-line;margin-top:2px;">' + escapeHtml(n.mensaje) + '</div>' +
                         '<div style="display:flex;justify-content:space-between;margin-top:4px;">' +
-                        '<span style="font-size:11px;color:#7C828C;">' + tiempoTranscurrido(n.created_at) + '</span>' + enlace +
+                        '<span style="font-size:11px;color:var(--text-muted);">' + tiempoTranscurrido(n.created_at) + '</span>' + enlace +
                         '</div></div>';
                 }}).join("");
                 lista.querySelectorAll(".campana-item").forEach(function(el) {{
@@ -2532,40 +2410,54 @@ def rol_desde_formulario():
 
 
 def estilos_admin_cxc():
+    """Layout de CxC y Delivery admin sobre el design system: mismas
+    clases que ya usan esas pantallas, colores solo via tokens."""
     return """
-    body { margin:0; background:var(--gris-fondo); color:var(--texto); }
+    body { margin:0; }
     .contenido { padding:18px; max-width:1180px; margin:auto; }
-    .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin:0 0 14px; }
+    .contenido h1 { font-size:26px; font-weight:900; margin:4px 0 12px; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin:0; }
     .toolbar > div { flex:1 1 180px; }
-    .card-admin { background:var(--tarjeta); border:1px solid var(--borde); border-radius:10px; padding:16px; box-shadow:var(--sombra-suave); margin-bottom:14px; overflow:auto; }
-    .descripcion-cxc { color:var(--texto-secundario); font-size:13px; line-height:1.35; min-width:180px; max-width:360px; }
-    .descripcion-cxc-destacada { background:var(--panel-secundario); border:1px solid var(--borde); border-left:4px solid var(--verde-neko); border-radius:10px; padding:12px 14px; margin:0 0 14px; font-size:15px; font-weight:700; color:var(--texto); }
-    .descripcion-cxc-destacada small { display:block; color:var(--texto-secundario); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; }
-    .metricas { display:grid; grid-template-columns:repeat(4, minmax(140px, 1fr)); gap:10px; margin:12px 0; }
-    .metrica { background:var(--panel-secundario); border:1px solid var(--borde); border-radius:8px; padding:14px; }
-    .metrica small { color:var(--texto-secundario); font-weight:800; text-transform:uppercase; font-size:11px; }
-    .metrica b { display:block; font-size:24px; margin-top:6px; }
-    table { width:100%; border-collapse:collapse; min-width:760px; }
-    th, td { padding:10px; border-bottom:1px solid var(--borde); text-align:left; vertical-align:top; }
-    th { color:var(--verde-neko); background:var(--panel-secundario); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
-    .monto { text-align:right; white-space:nowrap; font-weight:800; }
+    .toolbar label { display:block; color:var(--text-secondary); font-size:13px; font-weight:700; margin-bottom:6px; }
+    .toolbar input, .toolbar select { width:100%; }
+    .card-admin { background:var(--bg-panel); border:1px solid var(--border); border-radius:var(--radius-lg); padding:16px; margin-bottom:14px; overflow:auto; }
+    .card-admin h2 { margin:0 0 12px; font-size:18px; }
+    .descripcion-cxc { color:var(--text-secondary); font-size:13px; line-height:1.35; min-width:180px; max-width:360px; }
+    .descripcion-cxc-destacada { background:var(--bg-card); border:1px solid var(--border); border-left:4px solid var(--accent-primary); border-radius:var(--radius-md); padding:12px 14px; margin:0 0 14px; font-size:15px; font-weight:700; color:var(--text-primary); }
+    .descripcion-cxc-destacada small { display:block; color:var(--text-secondary); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; }
+    .metricas { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:10px; margin:12px 0; }
+    .metrica { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md); padding:14px; }
+    .metrica small { color:var(--text-secondary); font-weight:800; text-transform:uppercase; font-size:11px; letter-spacing:0.5px; }
+    .metrica b { display:block; font-size:24px; margin-top:6px; font-variant-numeric:tabular-nums; }
+    .contenido table { width:100%; border-collapse:collapse; min-width:760px; }
+    .contenido th, .contenido td { padding:10px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+    .contenido th { color:var(--text-secondary); background:var(--bg-card); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+    .contenido td a { color:var(--accent-primary); }
+    .toolbar button { min-height:46px; padding:0 18px; border-radius:var(--radius-sm); border:1px solid var(--accent-primary); background:var(--accent-primary); color:var(--text-on-accent); font-weight:800; }
+    .toolbar button:hover { background:var(--accent-primary-hover); }
+    .monto { text-align:right; white-space:nowrap; font-weight:800; font-variant-numeric:tabular-nums; }
     .acciones { display:flex; gap:8px; flex-wrap:wrap; }
-    .btn-mini { display:inline-block; padding:8px 12px; border-radius:7px; background:var(--azul); color:white; text-decoration:none; font-weight:800; border:0; cursor:pointer; }
-    .btn-sec { background:var(--panel-secundario); color:var(--texto); border:1px solid var(--borde); }
-    .btn-danger { background:#b91c1c; color:white; }
-    .badge-estado { display:inline-block; padding:4px 9px; border-radius:999px; font-size:12px; font-weight:900; text-transform:uppercase; }
-    .estado-pendiente { background:#fef3c7; color:#92400e; }
-    .estado-pagada { background:#dcfce7; color:#166534; }
-    .estado-anulada { background:#fee2e2; color:#991b1b; }
-    .tabs-cxc { display:grid; grid-template-columns:repeat(3, minmax(150px, 1fr)); gap:10px; margin:12px 0 16px; }
-    .tab-cxc { background:var(--panel-secundario); border:1px solid var(--borde); border-radius:8px; color:var(--texto); min-height:58px; padding:12px; text-decoration:none; display:flex; align-items:center; justify-content:center; text-align:center; font-weight:900; }
-    .tab-cxc.activo { background:var(--verde-neko); color:#0F1115; border-color:var(--verde-neko); }
+    .btn-mini { display:inline-flex; align-items:center; justify-content:center; min-height:40px; padding:8px 14px; border-radius:var(--radius-sm); background:var(--accent-primary); color:var(--text-on-accent) !important; text-decoration:none; font-weight:800; border:1px solid var(--accent-primary); cursor:pointer; box-shadow:none; }
+    .btn-mini:hover { background:var(--accent-primary-hover); }
+    .btn-sec { background:var(--bg-card); color:var(--text-primary) !important; border:1px solid var(--border); }
+    .btn-sec:hover { background:var(--bg-hover); }
+    .btn-danger { background:var(--danger-soft); color:var(--danger-text) !important; border:1px solid rgba(239,68,68,0.5); }
+    .badge-estado { display:inline-block; padding:3px 10px; border-radius:var(--radius-pill); font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:0.4px; border:1px solid; }
+    .estado-pendiente { color:var(--warning); background:var(--warning-soft); border-color:rgba(242,185,75,0.45); }
+    .estado-pagada { color:var(--success); background:var(--success-soft); border-color:rgba(53,208,127,0.45); }
+    .estado-anulada { color:var(--danger-text); background:var(--danger-soft); border-color:rgba(239,68,68,0.45); }
+    .tabs-cxc { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 16px; }
+    .tab-cxc { display:inline-flex; align-items:center; justify-content:center; min-height:var(--touch-min); padding:8px 18px; border-radius:var(--radius-pill); border:1px solid var(--border); background:var(--bg-panel); color:var(--text-secondary); text-decoration:none; font-weight:800; }
+    .tab-cxc:hover { background:var(--bg-hover); color:var(--text-primary); }
+    .tab-cxc.activo { background:var(--accent-primary-soft); color:var(--accent-primary); border-color:var(--accent-primary); }
     .form-grid { display:grid; grid-template-columns:repeat(2, minmax(180px, 1fr)); gap:12px; }
     .full { grid-column:1 / -1; }
-    .nota-alerta { background:#fff7ed; color:#7c2d12; border:1px solid #fed7aa; border-radius:8px; padding:12px; margin:10px 0; }
+    .nota-alerta { background:var(--warning-soft); color:var(--text-primary); border:1px solid rgba(242,185,75,0.45); border-left:4px solid var(--warning); border-radius:var(--radius-md); padding:12px; margin:10px 0; }
     @media (max-width: 760px) {
-        .metricas, .form-grid { grid-template-columns:1fr; }
+        .metricas { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+        .form-grid { grid-template-columns:1fr; }
         .contenido { padding:12px; }
+        .contenido h1 { font-size:22px; }
     }
     """
 
@@ -2857,43 +2749,31 @@ def index():
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
     """ + estilos_base() + """
-    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: var(--gris-fondo); color: var(--texto); }
+    body { margin: 0; }
     .contenedor { display: flex; padding: 14px; gap: 14px; flex-direction: column; max-width: 1280px; margin: 0 auto; }
-    .panel-izq { background: var(--panel); padding: 20px; border-radius: 14px; box-shadow: var(--sombra); border: 1px solid var(--borde); }
-    .panel-der { background: transparent; }
-    .panel-izq h3, .panel-der h3 { margin: 0 0 14px; font-size: 16px; font-weight: 800; color: var(--texto); display: flex; align-items: center; gap: 6px; }
-    input, select { width: 100%; padding: 12px 14px; margin: 5px 0 10px; border-radius: 10px; border: 1.5px solid var(--borde); font-size: 15px; box-sizing: border-box; background: var(--panel-secundario); color: var(--texto); }
-    input:focus, select:focus { outline: none; border-color: var(--verde-neko); box-shadow: 0 0 0 3px rgba(61,220,132,0.12); }
-    .btn-nueva-orden { width: 100%; padding: 15px; background: var(--verde-neko); color: #0F1115; border: none; border-radius: 10px; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.20); transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.1s; }
-    .btn-nueva-orden:hover { background: var(--hover-neko); box-shadow: 0 8px 18px rgba(0,0,0,0.22); }
-    .tipo-orden-titulo { font-size: 13px; font-weight: 700; color: var(--texto-secundario); }
-    .tipo-orden { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0 12px; }
-    .tipo-orden-opcion { position: relative; display: block; cursor: pointer; }
-    .tipo-orden-opcion input { position: absolute; opacity: 0; width: 1px; height: 1px; min-height: 0; margin: 0; padding: 0; pointer-events: none; }
-    .tipo-orden-opcion span { display: flex; align-items: center; justify-content: center; min-height: 52px; padding: 8px 6px; border-radius: 12px; border: 1.5px solid var(--borde); background: var(--panel-secundario); color: var(--texto-secundario); font-size: 15px; font-weight: 800; text-align: center; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
-    .tipo-orden-opcion:hover span { border-color: #3C4350; color: var(--texto); }
-    .tipo-orden-opcion input:checked + span { background: rgba(61, 220, 132, 0.16); border-color: var(--verde-neko); color: var(--verde-neko); box-shadow: inset 0 0 0 1px var(--verde-neko); }
-    .tipo-orden-opcion input:focus-visible + span { outline: 3px solid var(--verde-neko); outline-offset: 2px; }
-    .card { background: var(--tarjeta); color: var(--texto); padding: 16px; margin-bottom: 10px; border-radius: 12px; box-shadow: var(--sombra-suave); display: flex; flex-direction: column; gap: 10px; font-size: 16px; border: 1px solid var(--borde); border-left: 4px solid var(--borde); }
-    .card.abierta { border-left-color: var(--naranja); }
-    .card.en-cocina { border-left-color: var(--verde-neko); background: var(--tarjeta); }
-    .card.listo { border-left-color: var(--azul); background: var(--tarjeta); }
-    .estado { padding: 4px 10px; border-radius: 20px; color: white; font-size: 11px; font-weight: 800; display: inline-block; letter-spacing: 0.5px; text-transform: uppercase; }
-    .btn-ver { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; margin-bottom: 6px; font-weight: 700; background: #1d4ed8; color: white; }
-    .btn-cobrar { display: block; width: 100%; text-align: center; padding: 11px; border-radius: 9px; text-decoration: none; font-weight: 700; background: var(--verde-neko); color: #0F1115; }
-    .btn-cierre-jornada { display:block; width:100%; padding:14px; background: var(--panel-secundario); color:var(--texto); text-decoration:none; text-align:center; border-radius:10px; margin-top:12px; font-size:16px; font-weight:800; box-sizing:border-box; border:1px solid var(--borde); box-shadow:var(--sombra-suave); }
-    .mesonera { font-size: 13px; color: var(--texto-secundario); margin-top: 3px; }
-    .seccion-titulo { font-size: 13px; font-weight: 800; color: var(--texto-secundario); letter-spacing: 1px; text-transform: uppercase; margin: 16px 0 8px; }
-    .historial-item { background: var(--tarjeta); color: var(--texto); padding: 12px 14px; margin-bottom: 8px; border-radius: 10px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); display: flex; justify-content: space-between; align-items: center; }
-    .historial-item a { color: var(--azul); text-decoration: none; font-weight: 700; font-size: 14px; }
+    .contenedor > .panel-izq { background: var(--bg-panel); padding: 20px; border-radius: var(--radius-lg); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
+    .contenedor > .panel-der { background: transparent; border: none; box-shadow: none; }
+    .panel-izq h3, .panel-der h3 { margin: 0 0 14px; font-size: 16px; font-weight: 800; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
+    .panel-izq input, .panel-izq select { width: 100%; margin: 0 0 12px; }
+    .btn-nueva-orden { width: 100%; margin-top: 4px; }
+    .btn-cierre-jornada { margin-top: 12px; }
+    .panel-der .card { background: var(--bg-card); color: var(--text-primary); padding: 16px; margin-bottom: 10px; border-radius: var(--radius-md); box-shadow: none; display: flex; flex-direction: column; gap: 10px; font-size: 16px; border: 1px solid var(--border); border-left: 4px solid var(--border); }
+    .panel-der .card.abierta { border-left-color: var(--info); }
+    .panel-der .card.en-cocina { border-left-color: var(--warning); }
+    .panel-der .card.listo { border-left-color: var(--success); }
+    .card-ref { color: var(--text-secondary); font-size: 14px; }
+    .card-acciones { min-width: 170px; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+    .card-acciones .ds-badge { align-self: flex-start; }
+    .mesonera { font-size: 13px; color: var(--text-secondary); margin-top: 3px; }
+    .seccion-titulo { font-size: 12px; font-weight: 800; color: var(--text-muted); letter-spacing: 0.8px; text-transform: uppercase; margin: 16px 0 8px; }
+    .historial-item { background: var(--bg-card); color: var(--text-primary); padding: 12px 14px; margin-bottom: 8px; border-radius: var(--radius-md); border: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
     .menu-master { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .menu-card { background: var(--tarjeta); border-radius: 12px; padding: 16px 14px; text-decoration: none; color: var(--texto); font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 10px; box-shadow: var(--sombra-suave); border: 1.5px solid var(--borde); transition: background 0.15s, box-shadow 0.15s, transform 0.1s, border-color 0.15s; }
-    .menu-card:hover { background:#252A32; box-shadow: 0 8px 18px rgba(0,0,0,0.22); border-color:#3C4350; transform: translateY(-1px); }
-    .menu-card .mc-icon { font-size: 22px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; border-radius: 10px; flex-shrink: 0; }
-    .mc-verde, .mc-naranja, .mc-azul, .mc-morado, .mc-gris { background: var(--panel-secundario); color: var(--texto-secundario); box-shadow: inset 0 0 0 1px var(--borde); }
+    .menu-card { background: var(--bg-card); border-radius: var(--radius-md); padding: 14px; text-decoration: none; color: var(--text-primary); font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); min-height: var(--touch-lg); transition: background 0.15s ease, border-color 0.15s ease; }
+    .menu-card:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+    .menu-card .mc-icon { font-size: 22px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; border-radius: 10px; flex-shrink: 0; background: var(--bg-panel); box-shadow: inset 0 0 0 1px var(--border); }
     @media (min-width: 900px) {
         .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
-        .panel-izq { flex: 0 0 340px; }
+        .contenedor > .panel-izq { flex: 0 0 340px; position: sticky; top: 84px; }
         .panel-der { flex: 1; }
         .card { flex-direction: row !important; justify-content: space-between; align-items: center; }
     }
@@ -2944,20 +2824,20 @@ def index():
     boton_cerrar_jornada = ""
     if usuario_es_admin_cierre():
         boton_cerrar_jornada = (
-            '<a href="/cerrar_jornada" class="btn-cierre-jornada">🔒 Cerrar jornada</a>'
+            '<a href="/cerrar_jornada" class="btn-cierre-jornada ds-btn ds-btn-secondary ds-btn-block">🔒 Cerrar jornada</a>'
         )
 
     boton_ordenes_listas = ""
     if usuario_es_master():
         boton_ordenes_listas = (
-            '<a href="/ordenes_listas" class="btn-cierre-jornada">Listas por cobrar</a>'
+            '<a href="/ordenes_listas" class="btn-cierre-jornada ds-btn ds-btn-secondary ds-btn-block">Listas por cobrar</a>'
         )
 
     panel_izq_extra = ""
     if rol_actual == "master":
         panel_izq_extra = """
         <div style="margin-top:20px;">
-            <div class="seccion-titulo">Accesos rápidos</div>
+            <div class="ds-section-title">Accesos rápidos</div>
             <div class="menu-master">
                 <a href="/" class="menu-card"><div class="mc-icon mc-verde">🏠</div><span>Inicio</span></a>
                 <a href="/cambiar_tasa" class="menu-card"><div class="mc-icon mc-naranja">💲</div><span>Tasa</span></a>
@@ -2980,7 +2860,7 @@ def index():
     elif rol_actual == "mesonera_reportes":
         panel_izq_extra = """
         <div style="margin-top:20px;">
-            <div class="seccion-titulo">Accesos rápidos</div>
+            <div class="ds-section-title">Accesos rápidos</div>
             <div class="menu-master">
                 <a href="/reportes" class="menu-card"><div class="mc-icon mc-azul">📊</div><span>Reportes</span></a>
                 <a href="/dashboard" class="menu-card"><div class="mc-icon mc-verde">📈</div><span>Dashboard</span></a>
@@ -2990,7 +2870,7 @@ def index():
     elif rol_actual == "cocina_reportes":
         panel_izq_extra = """
         <div style="margin-top:20px;">
-            <div class="seccion-titulo">Accesos rápidos</div>
+            <div class="ds-section-title">Accesos rápidos</div>
             <div class="menu-master">
                 <a href="/cocina" class="menu-card"><div class="mc-icon mc-naranja">🍳</div><span>Cocina</span></a>
                 <a href="/produccion" class="menu-card"><div class="mc-icon mc-verde">👨‍🍳</div><span>Producción</span></a>
@@ -3006,25 +2886,25 @@ def index():
         <div class="panel-izq">
             <h3>🧾 Nueva orden</h3>
             <form action="/crear_orden" method="post">
-                <div class="tipo-orden-titulo" id="tipoOrdenTitulo">Tipo</div>
-                <div class="tipo-orden" id="tipoOrden" role="radiogroup" aria-labelledby="tipoOrdenTitulo">
-                    <label class="tipo-orden-opcion"><input type="radio" name="tipo" value="Mesa" checked><span>🪑 Mesa</span></label>
-                    <label class="tipo-orden-opcion"><input type="radio" name="tipo" value="Delivery"><span>🛵 Delivery</span></label>
-                    <label class="tipo-orden-opcion"><input type="radio" name="tipo" value="Para llevar"><span>🥡 Pick Up</span></label>
+                <div class="ds-label" id="tipoOrdenTitulo">Tipo</div>
+                <div class="ds-segmented" id="tipoOrden" role="radiogroup" aria-labelledby="tipoOrdenTitulo">
+                    <label class="ds-segmented-option"><input type="radio" name="tipo" value="Mesa" checked><span>🪑 Mesa</span></label>
+                    <label class="ds-segmented-option"><input type="radio" name="tipo" value="Delivery"><span>🛵 Delivery</span></label>
+                    <label class="ds-segmented-option"><input type="radio" name="tipo" value="Para llevar"><span>🥡 Pick Up</span></label>
                 </div>
                 <div id="grupoMesaOrden">
-                    <label style="font-size:13px;font-weight:700;color:#6b7280;">Mesa</label>
+                    <label class="ds-label">Mesa</label>
                     <select name="referencia_mesa" id="referenciaMesaOrden" required>
                         {opciones_mesa_html()}
                     </select>
                 </div>
                 <div id="grupoReferenciaOrden" style="display:none;">
-                    <label style="font-size:13px;font-weight:700;color:#6b7280;">Referencia</label>
+                    <label class="ds-label">Referencia</label>
                     <input name="referencia" id="referenciaLibreOrden" placeholder="Nombre, telefono o referencia">
                 </div>
-                <label style="font-size:13px;font-weight:700;color:#6b7280;">👤 Cliente</label>
+                <label class="ds-label">👤 Cliente</label>
                 <input name="cliente" placeholder="Nombre del cliente">
-                <button class="btn-nueva-orden" type="submit">➕ Crear orden</button>
+                <button class="ds-btn ds-btn-primary ds-btn-lg ds-btn-block btn-nueva-orden" type="submit">➕ Crear orden</button>
             </form>
             <script>
             (function() {{
@@ -3064,14 +2944,14 @@ def index():
             abierta_html += f"""
             <div class="card abierta">
                 <div>
-                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} · {o[4]}</span><br>
+                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span class="card-ref">{o[3]} · {o[4]}</span><br>
                     <span style="font-size:15px;">👤 {o[5] if o[5] else '—'}</span>
                     <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
                 </div>
-                <div style="min-width:160px;">
-                    <span class="estado" style="background:#f97316; margin-bottom:8px;">Abierta</span>
-                    <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
-                    <a href="/cobrar/{o[0]}" class="btn-cobrar" onclick="return confirm('⚠️ Esta orden aún no ha sido enviada a cocina. ¿Continuar?')">💵 Cobrar</a>
+                <div class="card-acciones">
+                    <span class="ds-badge ds-badge-info">Abierta</span>
+                    <a href="/orden/{o[0]}" class="ds-btn ds-btn-secondary btn-ver">🔍 Ver detalle</a>
+                    <a href="/cobrar/{o[0]}" class="ds-btn ds-btn-primary btn-cobrar" onclick="return confirm('⚠️ Esta orden aún no ha sido enviada a cocina. ¿Continuar?')">💵 Cobrar</a>
                 </div>
             </div>
             """
@@ -3079,14 +2959,14 @@ def index():
             cocina_html += f"""
             <div class="card en-cocina">
                 <div>
-                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} · {o[4]}</span><br>
+                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span class="card-ref">{o[3]} · {o[4]}</span><br>
                     <span style="font-size:15px;">👤 {o[5] if o[5] else '—'}</span>
                     <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
                 </div>
-                <div style="min-width:160px;">
-                    <span class="estado" style="background:#1a6b4a; margin-bottom:8px;">En cocina</span>
-                    <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
-                    <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
+                <div class="card-acciones">
+                    <span class="ds-badge ds-badge-warning">En cocina</span>
+                    <a href="/orden/{o[0]}" class="ds-btn ds-btn-secondary btn-ver">🔍 Ver detalle</a>
+                    <a href="/cobrar/{o[0]}" class="ds-btn ds-btn-primary btn-cobrar">💵 Cobrar</a>
                 </div>
             </div>
             """
@@ -3094,14 +2974,14 @@ def index():
             listo_html += f"""
             <div class="card listo">
                 <div>
-                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span style="color:#6b7280;font-size:14px;">{o[3]} · {o[4]}</span><br>
+                    <b>Orden {texto_numero_orden(o[1])}</b> &nbsp; <span class="card-ref">{o[3]} · {o[4]}</span><br>
                     <span style="font-size:15px;">👤 {o[5] if o[5] else '—'}</span>
                     <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
                 </div>
-                <div style="min-width:160px;">
-                    <span class="estado" style="background:#1d4ed8; margin-bottom:8px;">Lista</span>
-                    <a href="/orden/{o[0]}" class="btn-ver">🔍 Ver detalle</a>
-                    <a href="/cobrar/{o[0]}" class="btn-cobrar">💵 Cobrar</a>
+                <div class="card-acciones">
+                    <span class="ds-badge ds-badge-success">Lista</span>
+                    <a href="/orden/{o[0]}" class="ds-btn ds-btn-secondary btn-ver">🔍 Ver detalle</a>
+                    <a href="/cobrar/{o[0]}" class="ds-btn ds-btn-primary btn-cobrar">💵 Cobrar</a>
                 </div>
             </div>
             """
@@ -3112,7 +2992,7 @@ def index():
                     <b>Orden {texto_numero_orden(o[1])}</b> — {o[5] if o[5] else '—'}
                     <div class="mesonera">👩 {o[9] if o[9] else '—'}</div>
                 </div>
-                <a href="/orden/{o[0]}">🔍 Ver</a>
+                <a href="/orden/{o[0]}" class="ds-btn ds-btn-ghost ds-btn-sm">🔍 Ver</a>
             </div>
             """
 
@@ -3125,7 +3005,7 @@ def index():
     if historial_html:
         html += f'<div class="seccion-titulo">📚 Historial del día</div>{historial_html}'
     if not abierta_html and not cocina_html and not listo_html:
-        html += '<div style="text-align:center;padding:40px;color:#9ca3af;font-size:16px;">Sin órdenes activas</div>'
+        html += '<div class="ds-empty">Sin órdenes activas</div>'
 
     html += """
         </div>
@@ -7423,42 +7303,24 @@ def _html_confirmar_cierre_jornada(resumen):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cerrar jornada · Neko Wok POS</title>
-    <style>
-    {estilos_base()}
-    body {{ margin: 0; background: var(--gris-fondo); }}
-    .confirmar-fondo {{ min-height: calc(100vh - 80px); display: flex; align-items: center; justify-content: center; padding: 20px; }}
-    .confirmar-cierre {{ width: min(520px, 100%); background: var(--panel); border: 1px solid var(--borde); border-radius: 16px; padding: 24px; box-shadow: 0 24px 50px rgba(0,0,0,0.45); }}
-    .confirmar-cierre h1 {{ margin: 0 0 10px; font-size: 24px; color: var(--texto); }}
-    .confirmar-cierre p {{ margin: 0 0 8px; color: var(--texto-secundario); font-size: 16px; line-height: 1.45; }}
-    .confirmar-cierre .pregunta {{ color: var(--texto); font-weight: 700; }}
-    .resumen-cierre {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0 20px; }}
-    .resumen-cierre div {{ background: var(--panel-secundario); border: 1px solid var(--borde); border-radius: 12px; padding: 12px; }}
-    .resumen-cierre small {{ display: block; color: var(--texto-secundario); font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; }}
-    .resumen-cierre b {{ font-size: 20px; color: var(--texto); }}
-    .confirmar-acciones {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
-    .confirmar-acciones form {{ margin: 0; }}
-    .btn-cancelar-cierre, .btn-confirmar-cierre {{ display: flex; align-items: center; justify-content: center; width: 100%; min-height: 52px; border-radius: 12px; font-size: 16px; font-weight: 800; text-decoration: none; box-sizing: border-box; cursor: pointer; }}
-    .btn-cancelar-cierre {{ background: var(--panel-secundario); color: var(--texto); border: 1px solid var(--borde); }}
-    .btn-confirmar-cierre {{ background: var(--naranja); color: #0F1115; border: none; }}
-    .btn-confirmar-cierre:disabled {{ opacity: 0.6; cursor: wait; }}
-    </style>
+    <style>{estilos_base()} body {{ margin: 0; }}</style>
     </head>
     <body>
     {barra_superior('<a href="/">🏠 Inicio</a>')}
-    <div class="confirmar-fondo">
-        <div class="confirmar-cierre" role="dialog" aria-modal="true" aria-labelledby="tituloCierre">
-            <h1 id="tituloCierre">🔒 Cerrar jornada</h1>
-            <p class="pregunta">¿Seguro que deseas cerrar la jornada actual?</p>
-            <p>Verifica que no queden pedidos, cobros o movimientos pendientes. Esta acción archiva las órdenes cerradas de la jornada.</p>
-            <div class="resumen-cierre">
-                <div><small>Órdenes cerradas</small><b>{resumen["cantidad_ordenes_cerradas"]}</b></div>
-                <div><small>Ventas</small><b>${resumen["total_ventas_usd"]:.2f}</b></div>
+    <div class="ds-modal-page">
+        <div class="ds-modal" role="dialog" aria-modal="true" aria-labelledby="tituloCierre">
+            <h1 class="ds-modal-title" id="tituloCierre">🔒 Cerrar jornada</h1>
+            <p class="ds-modal-text"><strong>¿Seguro que deseas cerrar la jornada actual?</strong></p>
+            <p class="ds-modal-text">Verifica que no queden pedidos, cobros o movimientos pendientes. Esta acción archiva las órdenes cerradas de la jornada.</p>
+            <div class="ds-kpi-grid">
+                <div class="ds-kpi"><small>Órdenes cerradas</small><b>{resumen["cantidad_ordenes_cerradas"]}</b></div>
+                <div class="ds-kpi ds-kpi-accent"><small>Ventas</small><b>${resumen["total_ventas_usd"]:.2f}</b></div>
             </div>
-            <div class="confirmar-acciones">
-                <a href="/" class="btn-cancelar-cierre">Cancelar</a>
+            <div class="ds-modal-actions">
+                <a href="/" class="ds-btn ds-btn-secondary btn-cancelar-cierre">Cancelar</a>
                 <form method="post" action="/cerrar_jornada" id="formConfirmarCierre">
                     <input type="hidden" name="confirmar" value="1">
-                    <button type="submit" class="btn-confirmar-cierre" id="btnConfirmarCierre">Confirmar cierre</button>
+                    <button type="submit" class="ds-btn ds-btn-warning" id="btnConfirmarCierre">Confirmar cierre</button>
                 </form>
             </div>
         </div>
@@ -7473,6 +7335,26 @@ def _html_confirmar_cierre_jornada(resumen):
     """
 
 
+def _html_bloqueo_cierre_jornada(titulo, mensaje, detalle="", acciones='<a href="/" class="ds-btn ds-btn-secondary volver">🏠 Volver</a>'):
+    """Pantallas de 'no se puede cerrar' de /cerrar_jornada con el design system."""
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>{estilos_base()} body {{ margin: 0; }}</style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">🏠 Inicio</a>')}
+    <div class="ds-page ds-page-narrow">
+        <h1 class="ds-page-title">{titulo}</h1>
+        <div class="ds-alert ds-alert-warning" style="margin-top:16px;"><div><p style="margin:0;">{mensaje}</p>{detalle}</div></div>
+        <div class="ds-btn-group">{acciones}</div>
+    </div>
+    </body>
+    </html>
+    """
+
 @app.route("/cerrar_jornada", methods=["GET", "POST"])
 def cerrar_jornada():
     if not usuario_es_admin_cierre():
@@ -7481,55 +7363,27 @@ def cerrar_jornada():
     resumen = resumen_cierre_pendiente()
 
     if resumen["ordenes_activas"] > 0:
-        return f"""
-        <html>
-        <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>{estilos_base()}</style>
-        </head>
-        <body style="font-family:Arial; padding:20px;">
-        <h1>🔒 No se puede cerrar la jornada</h1>
-        <p>Hay órdenes activas pendientes, debes cerrarlas o eliminarlas antes de cerrar jornada.</p>
-        <p>Total pendientes: {resumen['ordenes_activas']}</p>
-        <a href="/" class="volver">🏠 Volver</a>
-        </body>
-        </html>
-        """
+        return _html_bloqueo_cierre_jornada(
+            "🔒 No se puede cerrar la jornada",
+            "Hay órdenes activas pendientes, debes cerrarlas o eliminarlas antes de cerrar jornada.",
+            f"<p style='margin:6px 0 0;'>Total pendientes: <b>{resumen['ordenes_activas']}</b></p>",
+        )
 
     pendientes_despacho = contar_pedidos_pendientes_despacho()
     if pendientes_despacho > 0:
-        return f"""
-        <html>
-        <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>{estilos_base()}</style>
-        </head>
-        <body style="font-family:Arial; padding:20px;">
-        <h1>🔒 No se puede cerrar la jornada</h1>
-        <p>No se puede cerrar la jornada: hay pedidos pendientes en Despacho.</p>
-        <p>Total pendientes: {pendientes_despacho}</p>
-        <a href="/despacho" class="volver">🛎️ Ir a Despacho</a>
-        <a href="/" class="volver">🏠 Volver</a>
-        </body>
-        </html>
-        """
+        return _html_bloqueo_cierre_jornada(
+            "🔒 No se puede cerrar la jornada",
+            "No se puede cerrar la jornada: hay pedidos pendientes en Despacho.",
+            f"<p style='margin:6px 0 0;'>Total pendientes: <b>{pendientes_despacho}</b></p>",
+            '<a href="/despacho" class="ds-btn ds-btn-primary volver">🛎️ Ir a Despacho</a>'
+            '<a href="/" class="ds-btn ds-btn-secondary volver">🏠 Volver</a>',
+        )
 
     if resumen["cantidad_ordenes_cerradas"] == 0:
-        return f"""
-        <html>
-        <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>{estilos_base()}</style>
-        </head>
-        <body style="font-family:Arial; padding:20px;">
-        <h1>📊 No hay ordenes cerradas para esta jornada</h1>
-        <a href="/" class="volver">🏠 Volver</a>
-        </body>
-        </html>
-        """
+        return _html_bloqueo_cierre_jornada(
+            "📊 No hay ordenes cerradas para esta jornada",
+            "No hay ventas cobradas que archivar todavía.",
+        )
 
     # Las validaciones de arriba corren tanto en GET como en POST; el
     # cierre real solo ocurre con un POST confirmado explicitamente.
@@ -7549,41 +7403,38 @@ def cerrar_jornada():
 
     productos_html = ""
     for producto, cantidad in resumen["productos"]:
-        productos_html += f"<li>{producto}: {cantidad}</li>"
+        productos_html += f"<li><span>{html_lib.escape(str(producto))}</span><b>{cantidad}</b></li>"
 
     if not productos_html:
-        productos_html = "<li>Sin productos registrados</li>"
+        productos_html = "<li><span>Sin productos registrados</span></li>"
 
     return f"""
     <html>
     <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-    {estilos_base()}
-    body {{ font-family: Arial; background: #f5f6fa; padding: 20px; }}
-    .card {{ max-width: 760px; margin: auto; background: white; padding: 28px; border-radius: 16px; box-shadow: 0 8px 24px rgba(13,74,50,0.10); border: 1px solid #e5e0d8; }}
-    h1 {{ margin-top: 0; color: #1a6b4a; }}
-    .total {{ font-size: 20px; font-weight: 800; color: #1a6b4a; margin-bottom: 8px; }}
-    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:var(--panel-secundario); color:var(--texto); text-decoration:none; border-radius:10px; font-weight:800; border:1px solid var(--borde); }}
-    </style>
+    <style>{estilos_base()} body {{ margin: 0; }}</style>
     </head>
     <body>
-    <div class="card">
-        <h1>✅ CIERRE REALIZADO</h1>
-        <p>Cierre #{cierre_id}</p>
-        <p>Inicio de jornada: {resumen["inicio_jornada"]}</p>
-        <p>Fecha de cierre: {fecha_cierre}</p>
-        <p>Ordenes cerradas: {resumen["cantidad_ordenes_cerradas"]}</p>
-        <div class="total">Venta Neko Wok: $ {round(resumen["total_ventas_usd"], 2)}</div>
-        <div class="total">Delivery generado: $ {round(resumen["delivery_generado_usd"], 2)}</div>
-        <div class="total">Delivery pagado: $ {round(resumen["delivery_pagado_usd"], 2)}</div>
-        <div class="total">Delivery pendiente actual: $ {round(resumen["delivery_pendiente_actual_usd"], 2)}</div>
-        <div class="total">Total cobrado equivalente: Bs {round(resumen["total_cobrado_equiv_bs"], 2)} / $ {round(resumen["total_cobrado_equiv_usd"], 2)}</div>
-        <div class="total">Diferencia: $ {round(resumen["diferencia_usd"], 2)}</div>
-        <h2>🍽️ Productos vendidos</h2>
-        <ul>{productos_html}</ul>
-        <a href="/" class="volver">🏠 Volver</a>
+    {barra_superior('<a href="/">🏠 Inicio</a>')}
+    <div class="ds-page ds-page-narrow">
+        <div class="ds-alert ds-alert-success"><b>✅ CIERRE REALIZADO</b>&nbsp;· Cierre #{cierre_id}</div>
+        <div class="ds-panel">
+            <p style="margin:0 0 4px;color:var(--text-secondary);">Inicio de jornada: {resumen["inicio_jornada"]}</p>
+            <p style="margin:0 0 4px;color:var(--text-secondary);">Fecha de cierre: {fecha_cierre}</p>
+            <p style="margin:0;color:var(--text-secondary);">Ordenes cerradas: {resumen["cantidad_ordenes_cerradas"]}</p>
+            <div class="ds-kpi-grid">
+                <div class="ds-kpi ds-kpi-accent"><small>Venta Neko Wok</small><b>$ {round(resumen["total_ventas_usd"], 2)}</b></div>
+                <div class="ds-kpi"><small>Total cobrado equivalente</small><b>$ {round(resumen["total_cobrado_equiv_usd"], 2)}</b><span style="color:var(--text-secondary);font-size:13px;">Bs {round(resumen["total_cobrado_equiv_bs"], 2)}</span></div>
+                <div class="ds-kpi"><small>Diferencia</small><b>$ {round(resumen["diferencia_usd"], 2)}</b></div>
+                <div class="ds-kpi"><small>Delivery generado</small><b>$ {round(resumen["delivery_generado_usd"], 2)}</b></div>
+                <div class="ds-kpi"><small>Delivery pagado</small><b>$ {round(resumen["delivery_pagado_usd"], 2)}</b></div>
+                <div class="ds-kpi"><small>Delivery pendiente actual</small><b>$ {round(resumen["delivery_pendiente_actual_usd"], 2)}</b></div>
+            </div>
+            <div class="ds-section-title">🍽️ Productos vendidos</div>
+            <ul class="ds-list">{productos_html}</ul>
+        </div>
+        <div class="ds-btn-group" style="margin-top:16px;"><a href="/" class="ds-btn ds-btn-primary volver">🏠 Volver</a></div>
     </div>
     </body>
     </html>
@@ -7591,6 +7442,7 @@ def cerrar_jornada():
 
 
 @app.route("/cocina")
+
 def pantalla_cocina():
     repository = SqlKitchenComandaRepository(get_connection, obtener_ultimo_id, siguiente_numero)
     comandas = repository.listar_comandas_cocina()
@@ -7620,6 +7472,7 @@ def pantalla_cocina():
         .topbar-brand { font-weight:900; font-size:18px; display:flex; align-items:center; gap:8px; }
         .topbar-brand span { color:#3DDC84; text-shadow:0 0 8px rgba(61,220,132,0.12); }
         .topbar-user { font-size:14px; opacity:0.8; }
+        .topbar a.topbar-brand { background:none; border:none; padding:4px 6px; font-size:18px; color:#F5F7FA; }
         .topbar a { color:white; text-decoration:none; background:#20242B; border:1px solid #31363F; padding:8px 12px; border-radius:8px; font-size:13px; font-weight:700; transition:background 0.18s ease, border-color 0.18s ease; }
         .topbar a:hover { background:#262B33; border-color:#3C4350; }
         .container { display:flex; }
@@ -7649,7 +7502,7 @@ def pantalla_cocina():
     </head>
     <body>
     <div class="topbar">
-        <div class="topbar-brand">🐱 Neko <span>Wok</span> · 🍳 Cocina</div>
+        <a href='""" + ruta_inicio_rol(usuario_rol()) + """' class="topbar-brand" title="Ir a Inicio">🐱 Neko <span>Wok</span> · 🍳 Cocina</a>
         <div style="display:flex; align-items:center; gap:10px;">
             <div class="topbar-user">👤 """ + usuario_activo() + """</div>
             <div style="display:flex; gap:6px;">
@@ -7968,6 +7821,7 @@ def pantalla_despacho():
         .topbar-brand {{ font-weight:900; font-size:18px; display:flex; align-items:center; gap:8px; }}
         .topbar-brand span {{ color:#3DDC84; }}
         .topbar a {{ color:white; text-decoration:none; background:#20242B; border:1px solid #31363F; padding:8px 12px; border-radius:8px; font-size:13px; font-weight:700; }}
+        .topbar a.topbar-brand {{ background:none; border:none; padding:4px 6px; font-size:18px; color:#F5F7FA; }}
         .contador {{ background:#ef4444; color:white; border-radius:999px; padding:4px 10px; font-weight:800; font-size:13px; }}
         .seccion-titulo {{ padding:12px 16px 4px; font-size:14px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:#B0B6BE; }}
         #alertas {{ padding:0 12px; }}
@@ -7999,7 +7853,7 @@ def pantalla_despacho():
     </head>
     <body>
     <div class="topbar">
-        <div class="topbar-brand">🐱 Neko <span>Wok</span> · 🛎️ Despacho</div>
+        <a href="{ruta_inicio_rol(usuario_rol())}" class="topbar-brand" title="Ir a Inicio">🐱 Neko <span>Wok</span> · 🛎️ Despacho</a>
         <div style="display:flex; align-items:center; gap:10px;">
             <span id="contador-alertas" class="contador" style="display:{'inline-block' if datos['contador_alertas'] else 'none'}">🔔 {datos['contador_alertas']}</span>
             <div style="font-size:14px; opacity:0.8;">👤 {html_lib.escape(usuario_activo())}</div>
