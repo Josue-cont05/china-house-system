@@ -3245,7 +3245,7 @@ class SalesSnapshotTest(unittest.TestCase):
         self.assertEqual(self._charge(orden_id, "usd", 10).status_code, 302)
         before, _ = self._snapshot(orden_id)
 
-        response = self.client.get("/cerrar_jornada", follow_redirects=False)
+        response = self.client.post("/cerrar_jornada", data={"confirmar": "1"}, follow_redirects=False)
         self.assertEqual(response.status_code, 200)
         after, _ = self._snapshot(orden_id)
         self.assertEqual(after[1:7], before[1:7])

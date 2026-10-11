@@ -7390,7 +7390,66 @@ def cierre():
     """
 
 
-@app.route("/cerrar_jornada")
+def _html_confirmar_cierre_jornada(resumen):
+    """Paso de confirmacion de /cerrar_jornada: el GET nunca cierra,
+    solo un POST con confirmar=1 (ver cerrar_jornada)."""
+    return f"""
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cerrar jornada · Neko Wok POS</title>
+    <style>
+    {estilos_base()}
+    body {{ margin: 0; background: var(--gris-fondo); }}
+    .confirmar-fondo {{ min-height: calc(100vh - 80px); display: flex; align-items: center; justify-content: center; padding: 20px; }}
+    .confirmar-cierre {{ width: min(520px, 100%); background: var(--panel); border: 1px solid var(--borde); border-radius: 16px; padding: 24px; box-shadow: 0 24px 50px rgba(0,0,0,0.45); }}
+    .confirmar-cierre h1 {{ margin: 0 0 10px; font-size: 24px; color: var(--texto); }}
+    .confirmar-cierre p {{ margin: 0 0 8px; color: var(--texto-secundario); font-size: 16px; line-height: 1.45; }}
+    .confirmar-cierre .pregunta {{ color: var(--texto); font-weight: 700; }}
+    .resumen-cierre {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0 20px; }}
+    .resumen-cierre div {{ background: var(--panel-secundario); border: 1px solid var(--borde); border-radius: 12px; padding: 12px; }}
+    .resumen-cierre small {{ display: block; color: var(--texto-secundario); font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; }}
+    .resumen-cierre b {{ font-size: 20px; color: var(--texto); }}
+    .confirmar-acciones {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+    .confirmar-acciones form {{ margin: 0; }}
+    .btn-cancelar-cierre, .btn-confirmar-cierre {{ display: flex; align-items: center; justify-content: center; width: 100%; min-height: 52px; border-radius: 12px; font-size: 16px; font-weight: 800; text-decoration: none; box-sizing: border-box; cursor: pointer; }}
+    .btn-cancelar-cierre {{ background: var(--panel-secundario); color: var(--texto); border: 1px solid var(--borde); }}
+    .btn-confirmar-cierre {{ background: var(--naranja); color: #0F1115; border: none; }}
+    .btn-confirmar-cierre:disabled {{ opacity: 0.6; cursor: wait; }}
+    </style>
+    </head>
+    <body>
+    {barra_superior('<a href="/">🏠 Inicio</a>')}
+    <div class="confirmar-fondo">
+        <div class="confirmar-cierre" role="dialog" aria-modal="true" aria-labelledby="tituloCierre">
+            <h1 id="tituloCierre">🔒 Cerrar jornada</h1>
+            <p class="pregunta">¿Seguro que deseas cerrar la jornada actual?</p>
+            <p>Verifica que no queden pedidos, cobros o movimientos pendientes. Esta acción archiva las órdenes cerradas de la jornada.</p>
+            <div class="resumen-cierre">
+                <div><small>Órdenes cerradas</small><b>{resumen["cantidad_ordenes_cerradas"]}</b></div>
+                <div><small>Ventas</small><b>${resumen["total_ventas_usd"]:.2f}</b></div>
+            </div>
+            <div class="confirmar-acciones">
+                <a href="/" class="btn-cancelar-cierre">Cancelar</a>
+                <form method="post" action="/cerrar_jornada" id="formConfirmarCierre">
+                    <input type="hidden" name="confirmar" value="1">
+                    <button type="submit" class="btn-confirmar-cierre" id="btnConfirmarCierre">Confirmar cierre</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <script>
+    document.getElementById("formConfirmarCierre").addEventListener("submit", function() {{
+        document.getElementById("btnConfirmarCierre").disabled = true;
+    }});
+    </script>
+    </body>
+    </html>
+    """
+
+
+@app.route("/cerrar_jornada", methods=["GET", "POST"])
 def cerrar_jornada():
     if not usuario_es_admin_cierre():
         return "Acceso denegado", 403
@@ -7447,6 +7506,11 @@ def cerrar_jornada():
         </body>
         </html>
         """
+
+    # Las validaciones de arriba corren tanto en GET como en POST; el
+    # cierre real solo ocurre con un POST confirmado explicitamente.
+    if request.method != "POST" or request.form.get("confirmar") != "1":
+        return _html_confirmar_cierre_jornada(resumen)
 
     conn = get_connection()
     cursor = conn.cursor()

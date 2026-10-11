@@ -829,7 +829,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         self._marcar_cobrada(orden_id)
         self.client.post(f"/despacho/{orden_id}/entregado")
 
-        respuesta = self.client.get("/cerrar_jornada")
+        respuesta = self.client.post("/cerrar_jornada", data={"confirmar": "1"})
 
         cuerpo = respuesta.get_data(as_text=True)
         self.assertNotIn("No se puede cerrar la jornada", cuerpo)
@@ -843,7 +843,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         self.client.get(f"/enviar_cocina/{orden_id}")
         self._marcar_cobrada(orden_id)
         self.client.post(f"/despacho/{orden_id}/entregado")
-        self.client.get("/cerrar_jornada")
+        self.client.post("/cerrar_jornada", data={"confirmar": "1"})
 
         html = self._despacho_html()
         self.assertNotIn(f'data-orden-id="{orden_id}"', html)
@@ -856,7 +856,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         self.client.post(f"/despacho/{orden_id}/entregado")
         _id, _cierre_id, despachado_antes = self._cierre_ids()[0]
 
-        self.client.get("/cerrar_jornada")
+        self.client.post("/cerrar_jornada", data={"confirmar": "1"})
 
         _id, _cierre_id, despachado_despues = self._cierre_ids()[0]
         self.assertEqual(despachado_antes, despachado_despues)
@@ -898,7 +898,7 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
             data={"clave": web_app.CLAVE_SUPERVISOR},
         )
 
-        respuesta = self.client.get("/cerrar_jornada")
+        respuesta = self.client.post("/cerrar_jornada", data={"confirmar": "1"})
 
         cuerpo = respuesta.get_data(as_text=True)
         self.assertNotIn("No se puede cerrar la jornada", cuerpo)
@@ -908,6 +908,106 @@ class CierreJornadaDespachoTest(DespachoRoutesTest):
         existe = cursor.fetchone()[0]
         conn.close()
         self.assertEqual(existe, 0)
+
+
+class CierreJornadaConfirmacionTest(DespachoRoutesTest):
+    """Nivel 1: /cerrar_jornada ya no cierra al primer clic. El GET
+    (boton del inicio, menu, /cerrar_dia) solo valida y muestra la
+    confirmacion; el cierre real exige POST con confirmar=1, y ese POST
+    vuelve a pasar por TODAS las validaciones existentes."""
+
+    def setUp(self):
+        super().setUp()
+        self._login(rol="master")
+
+    def _orden_lista_para_cierre(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+        self._marcar_cobrada(orden_id)
+        self.client.post(f"/despacho/{orden_id}/entregado")
+        return orden_id
+
+    def _estado_cierre(self, orden_id):
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT cierre_id FROM ordenes WHERE id=?", (orden_id,))
+        cierre_id = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM cierres_caja")
+        cierres = cursor.fetchone()[0]
+        conn.close()
+        return cierre_id, cierres
+
+    def test_primer_clic_muestra_confirmacion_y_no_cierra(self):
+        orden_id = self._orden_lista_para_cierre()
+
+        respuesta = self.client.get("/cerrar_jornada")
+
+        self.assertEqual(respuesta.status_code, 200)
+        cuerpo = respuesta.get_data(as_text=True)
+        self.assertIn("Cerrar jornada", cuerpo)
+        self.assertIn("¿Seguro que deseas cerrar la jornada actual?", cuerpo)
+        self.assertIn("Verifica que no queden pedidos, cobros o movimientos pendientes.", cuerpo)
+        self.assertIn('<form method="post" action="/cerrar_jornada"', cuerpo)
+        self.assertIn('name="confirmar" value="1"', cuerpo)
+        self.assertIn("Confirmar cierre", cuerpo)
+        self.assertIn('href="/" class="btn-cancelar-cierre">Cancelar</a>', cuerpo)
+        self.assertEqual(self._estado_cierre(orden_id), (None, 0))
+
+    def test_confirmar_cierre_si_cierra(self):
+        orden_id = self._orden_lista_para_cierre()
+        self.client.get("/cerrar_jornada")
+
+        respuesta = self.client.post("/cerrar_jornada", data={"confirmar": "1"})
+
+        self.assertEqual(respuesta.status_code, 200)
+        cierre_id, cierres = self._estado_cierre(orden_id)
+        self.assertIsNotNone(cierre_id)
+        self.assertEqual(cierres, 1)
+
+    def test_cancelar_no_modifica_estado(self):
+        orden_id = self._orden_lista_para_cierre()
+        self.client.get("/cerrar_jornada")
+
+        # "Cancelar" es solo navegar al inicio: ningun cambio de estado.
+        self.assertEqual(self.client.get("/").status_code, 200)
+
+        self.assertEqual(self._estado_cierre(orden_id), (None, 0))
+
+    def test_post_sin_confirmar_no_cierra(self):
+        orden_id = self._orden_lista_para_cierre()
+
+        respuesta = self.client.post("/cerrar_jornada", data={})
+
+        self.assertIn("Confirmar cierre", respuesta.get_data(as_text=True))
+        self.assertEqual(self._estado_cierre(orden_id), (None, 0))
+
+    def test_cerrar_dia_legacy_tampoco_cierra_directo(self):
+        orden_id = self._orden_lista_para_cierre()
+
+        respuesta = self.client.get("/cerrar_dia", follow_redirects=True)
+
+        self.assertIn("Confirmar cierre", respuesta.get_data(as_text=True))
+        self.assertEqual(self._estado_cierre(orden_id), (None, 0))
+
+    def test_post_confirmado_mantiene_bloqueo_por_pendientes(self):
+        orden_id = self._crear_orden()
+        self._agregar_item(orden_id)
+        self.client.get(f"/enviar_cocina/{orden_id}")
+
+        respuesta = self.client.post("/cerrar_jornada", data={"confirmar": "1"})
+
+        self.assertIn("No se puede cerrar la jornada", respuesta.get_data(as_text=True))
+        self.assertEqual(self._estado_cierre(orden_id), (None, 0))
+
+    def test_post_confirmado_requiere_master(self):
+        orden_id = self._orden_lista_para_cierre()
+        self._login(rol="mesonera")
+
+        respuesta = self.client.post("/cerrar_jornada", data={"confirmar": "1"})
+
+        self.assertEqual(respuesta.status_code, 403)
+        self.assertEqual(self._estado_cierre(orden_id), (None, 0))
 
 
 class IncrementalKitchenRegressionTest(DespachoRoutesTest):
