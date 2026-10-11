@@ -174,6 +174,55 @@ class PantallasMigradasTest(unittest.TestCase):
         self.assertNotRegex(html, r"body\.pagina-orden \{\s*--bg-main")
         self.assertIn("--bg-main: #0F1115;", html)
 
+    def _venta_cerrada_y_despachada(self, producto="Neko Combo 3"):
+        orden_id = self._orden("cerrada")
+        conn = web_app.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE ordenes SET fecha_hora=?, listo_despacho_at=? WHERE id=?",
+            (web_app.ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S"), "2026-10-11 13:00:00", orden_id),
+        )
+        cursor.execute(
+            "INSERT INTO orden_items (orden_id, producto, precio, indicacion) VALUES (?, ?, 7.0, '')",
+            (orden_id, producto),
+        )
+        conn.commit()
+        conn.close()
+        return orden_id
+
+    def test_cierre_del_dia_integrado_al_sistema(self):
+        html = self.client.get("/cierre").get_data(as_text=True)
+        self.assertIn('id="navMenuBtn"', html)
+        self.assertIn('class="titulo titulo-inicio"', html)
+        self.assertIn('<h1 class="ds-page-title">📦 Cierre del Día</h1>', html)
+        self.assertIn('class="ds-kpi ds-kpi-accent"', html)
+        for viejo in ("#f7f5f0", "background: white", "#f0fdf4", "#bbf7d0"):
+            self.assertNotIn(viejo, html)
+        # Sin ventas: estado informativo, sin boton de cierre.
+        self.assertIn('class="ds-alert ds-alert-info cierre-estado"', html)
+        self.assertIn('<span class="ds-badge ds-badge-neutral">Sin ventas</span>', html)
+        self.assertNotIn('href="/cerrar_jornada"', html.split('id="navDrawer"')[0])
+
+    def test_cierre_del_dia_estado_lista_y_bloqueada(self):
+        self._venta_cerrada_y_despachada()
+        html = self.client.get("/cierre").get_data(as_text=True)
+        self.assertIn('class="ds-alert ds-alert-success cierre-estado"', html)
+        self.assertIn("✅ Jornada lista para cierre", html)
+        self.assertIn('<span class="ds-badge ds-badge-success">Lista</span>', html)
+        self.assertIn('<a href="/cerrar_jornada" class="ds-btn ds-btn-warning ds-btn-lg">', html)
+
+        self._orden("abierta")
+        html = self.client.get("/cierre").get_data(as_text=True)
+        self.assertIn('class="ds-alert ds-alert-warning cierre-estado"', html)
+        self.assertIn('<span class="ds-badge ds-badge-warning">Bloqueada</span>', html)
+        self.assertNotIn('class="ds-btn ds-btn-warning ds-btn-lg"', html)
+
+    def test_cierre_del_dia_escapa_nombres(self):
+        self._venta_cerrada_y_despachada(producto="<script>alert(1)</script>")
+        html = self.client.get("/cierre").get_data(as_text=True)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+
     def test_logo_de_cocina_y_despacho_lleva_al_inicio(self):
         for path in ("/cocina", "/despacho"):
             with self.subTest(path=path):

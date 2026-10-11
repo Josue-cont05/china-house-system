@@ -330,6 +330,11 @@ DS_COMPONENTES = """
 .ds-kpi small { display: block; color: var(--text-secondary); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
 .ds-kpi b { display: block; margin-top: 6px; font-size: 24px; font-weight: 900; color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .ds-kpi-accent b { color: var(--accent-primary); }
+.ds-kpi-warning { border-color: rgba(242, 185, 75, 0.45); }
+.ds-kpi-warning b { color: var(--warning); }
+.ds-kpi-danger { border-color: rgba(239, 68, 68, 0.45); }
+.ds-kpi-danger b { color: var(--danger-text); }
+.ds-kpi-note { margin-top: 4px; color: var(--text-muted); font-size: 12px; line-height: 1.35; }
 .ds-total { font-size: 26px; font-weight: 900; color: var(--accent-primary); letter-spacing: -0.4px; }
 
 /* ---- Pestanas ---- */

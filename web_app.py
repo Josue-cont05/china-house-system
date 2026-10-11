@@ -7049,170 +7049,194 @@ def cierre():
     ordenes_activas = resumen["ordenes_activas"]
     cantidad_ordenes_cerradas = resumen["cantidad_ordenes_cerradas"]
     pendientes_despacho = contar_pedidos_pendientes_despacho()
+    puede_cerrar = ordenes_activas == 0 and pendientes_despacho == 0 and cantidad_ordenes_cerradas > 0
 
+    # Misma decision que antes (mismas condiciones y mismo orden); solo
+    # cambia la presentacion: alertas/badges del design system.
+    acciones_estado = '<a href="/" class="ds-btn ds-btn-secondary">🏠 Volver al inicio</a>'
     if ordenes_activas > 0:
-        mensaje = (
-            f"<h2 style='color:#e67e22;'>Hay {ordenes_activas} órdenes activas pendientes, "
-            "debes cerrarlas o eliminarlas antes de cerrar jornada.</h2>"
+        badge_estado = '<span class="ds-badge ds-badge-warning">Bloqueada</span>'
+        alerta_estado = (
+            '<div class="ds-alert ds-alert-warning cierre-estado"><div>'
+            f"<strong>Hay {ordenes_activas} órdenes activas pendientes</strong>"
+            "<p>Debes cerrarlas o eliminarlas antes de cerrar jornada.</p></div></div>"
         )
     elif pendientes_despacho > 0:
-        mensaje = (
-            "<h2 style='color:#e67e22;'>No se puede cerrar la jornada: hay "
-            f"{pendientes_despacho} pedido(s) pendientes en Despacho.</h2>"
+        badge_estado = '<span class="ds-badge ds-badge-warning">Bloqueada</span>'
+        alerta_estado = (
+            '<div class="ds-alert ds-alert-warning cierre-estado"><div>'
+            "<strong>No se puede cerrar la jornada</strong>"
+            f"<p>Hay {pendientes_despacho} pedido(s) pendientes en Despacho.</p></div></div>"
+        )
+        acciones_estado = (
+            '<a href="/despacho" class="ds-btn ds-btn-primary">🛎️ Ir a Despacho</a>' + acciones_estado
         )
     elif cantidad_ordenes_cerradas == 0:
-        mensaje = "<h2 style='color:#dc2626;'>No hay ordenes cerradas para esta jornada.</h2>"
+        badge_estado = '<span class="ds-badge ds-badge-neutral">Sin ventas</span>'
+        alerta_estado = (
+            '<div class="ds-alert ds-alert-info cierre-estado"><div>'
+            "<strong>No hay ordenes cerradas para esta jornada.</strong>"
+            "<p>Si ya cerraste la jornada, las ventas nuevas aparecerán aquí a medida que se cobren.</p></div></div>"
+        )
     else:
-        mensaje = "<h2 style='color:#1a6b4a;'>✅ Jornada lista para cierre</h2>"
-
-    boton = ""
-    if ordenes_activas == 0 and pendientes_despacho == 0 and cantidad_ordenes_cerradas > 0:
-        boton = '<br><br><a href="/cerrar_jornada" class="volver" style="background:#3DDC84; color:#0F1115; padding:14px 20px; border-radius:12px; font-weight:800; text-decoration:none;">🔒 Confirmar cierre de jornada</a>'
+        badge_estado = '<span class="ds-badge ds-badge-success">Lista</span>'
+        alerta_estado = (
+            '<div class="ds-alert ds-alert-success cierre-estado"><div>'
+            "<strong>✅ Jornada lista para cierre</strong>"
+            f"<p>{cantidad_ordenes_cerradas} órdenes cerradas, sin pendientes en cocina ni en Despacho.</p></div></div>"
+        )
+        acciones_estado = (
+            '<a href="/cerrar_jornada" class="ds-btn ds-btn-warning ds-btn-lg">🔒 Confirmar cierre de jornada</a>'
+            + acciones_estado
+        )
 
     auditoria_html = ""
     if not resumen["auditoria_pagos"]:
-        auditoria_html = "<div class='vacio'>No hay pagos registrados para esta jornada.</div>"
+        auditoria_html = "<div class='ds-empty'>No hay pagos registrados para esta jornada.</div>"
     else:
-        auditoria_html += """
-        <div class="tabla-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Orden</th>
-                    <th>Cliente</th>
-                    <th>Metodo</th>
-                    <th>Monto</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
+        filas_auditoria = ""
         for pago in resumen["auditoria_pagos"]:
-            auditoria_html += f"""
-            <tr>
-                <td>{texto_numero_orden(pago["numero_orden"])}</td>
-                <td>{pago["cliente"] if pago["cliente"] else '-'}</td>
-                <td>{pago["metodo_label"]}</td>
-                <td>{monto_formateado_segun_metodo(pago["metodo"], pago["monto"])}</td>
-            </tr>
-            """
-        auditoria_html += """
-            </tbody>
-        </table>
-        </div>
-        """
+            filas_auditoria += f"""
+                <tr>
+                    <td>{html_lib.escape(texto_numero_orden(pago["numero_orden"]))}</td>
+                    <td>{html_lib.escape(pago["cliente"] or '-')}</td>
+                    <td>{html_lib.escape(pago["metodo_label"] or '-')}</td>
+                    <td class="ds-num">{monto_formateado_segun_metodo(pago["metodo"], pago["monto"])}</td>
+                </tr>"""
+        auditoria_html = f"""
+        <div class="ds-table-wrap">
+            <table class="ds-table">
+                <thead><tr><th>Orden</th><th>Cliente</th><th>Método</th><th class="ds-num">Monto</th></tr></thead>
+                <tbody>{filas_auditoria}</tbody>
+            </table>
+        </div>"""
 
     productos_html = ""
     if not resumen["productos"]:
-        productos_html = "<div class='vacio'>No hay platos vendidos en la jornada.</div>"
+        productos_html = "<div class='ds-empty'>No hay platos vendidos en la jornada.</div>"
     else:
-        productos_html += "<div class='tabla-wrap'><table><thead><tr><th>Producto</th><th>Cantidad</th></tr></thead><tbody>"
-        for producto, cantidad in resumen["productos"]:
-            productos_html += f"<tr><td>{producto}</td><td>{cantidad}</td></tr>"
-        productos_html += "</tbody></table></div>"
+        filas_productos = "".join(
+            f'<tr><td>{html_lib.escape(str(producto))}</td><td class="ds-num">{cantidad}</td></tr>'
+            for producto, cantidad in resumen["productos"]
+        )
+        productos_html = f"""
+        <div class="ds-table-wrap">
+            <table class="ds-table">
+                <thead><tr><th>Producto</th><th class="ds-num">Cantidad</th></tr></thead>
+                <tbody>{filas_productos}</tbody>
+            </table>
+        </div>"""
+
+    diferencia_usd = round(resumen["diferencia_usd"], 2)
+    clase_diferencia = "ds-kpi" if abs(diferencia_usd) <= TOLERANCIA_COBRO else "ds-kpi ds-kpi-warning"
 
     return f"""
     <html>
     <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cierre del Día · Neko Wok POS</title>
     <style>
     {estilos_base()}
-    body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f7f5f0; padding: 20px; }}
-    .card {{ max-width: 980px; margin: auto; background: white; padding: 25px; border-radius: 16px; box-shadow: var(--sombra); border: 1px solid #e5e0d8; }}
-    .bloque {{ background: #f0fdf4; padding: 14px; border-radius: 12px; margin-bottom: 14px; border: 1px solid #bbf7d0; }}
-    .titulo-bloque {{ font-size: 17px; font-weight: 800; margin-bottom: 10px; color: #1a6b4a; }}
-    .dato {{ margin: 6px 0; font-size: 16px; }}
-    .metricas-cierre {{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }}
-    .metrica-cierre {{ background:white; border:1px solid #bbf7d0; border-radius:10px; padding:12px; }}
-    .metrica-cierre small {{ display:block; color:#4b5563; font-weight:800; margin-bottom:6px; }}
-    .metrica-cierre b {{ display:block; color:#111827; font-size:22px; }}
-    .metrica-cierre .nota {{ color:#6b7280; font-size:12px; margin-top:4px; }}
-    .volver {{ display:inline-block; margin-top:20px; padding:12px 18px; background:var(--panel-secundario); color:var(--texto); text-decoration:none; border-radius:10px; font-weight:800; border:1px solid var(--borde); }}
-    .tabla-wrap {{ overflow:auto; }}
-    table {{ width:100%; border-collapse: collapse; background:white; border-radius:10px; overflow:hidden; }}
-    th, td {{ border-bottom:1px solid #e5e7eb; padding:10px 14px; text-align:left; }}
-    th {{ background:#f0fdf4; color:#1a6b4a; font-weight:800; font-size:12px; text-transform:uppercase; letter-spacing:0.5px; }}
-    .vacio {{ color:#9ca3af; }}
+    body {{ margin: 0; }}
+    .cierre-pagina {{ max-width: 1080px; }}
+    .cierre-estado {{ align-items: center; }}
+    .cierre-estado strong {{ display: block; font-size: 18px; }}
+    .cierre-estado p {{ margin: 4px 0 0; color: var(--text-secondary); }}
+    .cierre-acciones {{ margin: 0 0 var(--space-5); }}
+    .cierre-seccion {{ margin-bottom: var(--space-4); }}
+    .cierre-seccion > .ds-section-title {{ margin-top: 0; }}
+    .cierre-seccion .ds-kpi-grid {{ margin-bottom: 0; }}
+    @media (max-width: 760px) {{ .cierre-acciones .ds-btn, .cierre-pagina > .ds-btn-group .ds-btn {{ flex: 1 1 100%; }} }}
     </style>
     </head>
     <body>
-    <div class="card">
-        <h1>📦 Cierre del Día</h1>
-        {mensaje}
+    {barra_superior()}
+    <main class="ds-page cierre-pagina">
+        <div class="ds-page-header">
+            <div>
+                <h1 class="ds-page-title">📦 Cierre del Día</h1>
+                <p class="ds-page-subtitle">Inicio de jornada: {html_lib.escape(str(resumen["inicio_jornada"]))} · Ordenes cerradas: {cantidad_ordenes_cerradas}</p>
+            </div>
+            {badge_estado}
+        </div>
 
-        <div class="dato"><b>Inicio de jornada:</b> {resumen["inicio_jornada"]}</div>
-        <div class="dato"><b>Ordenes cerradas:</b> {cantidad_ordenes_cerradas}</div>
+        {alerta_estado}
+        <div class="ds-btn-group cierre-acciones">{acciones_estado}</div>
 
-        <div class="bloque">
-            <div class="titulo-bloque">💵 VENTAS</div>
-            <div class="metricas-cierre">
-                <div class="metrica-cierre">
+        <section class="ds-panel cierre-seccion">
+            <div class="ds-section-title">💵 Ventas</div>
+            <div class="ds-kpi-grid">
+                <div class="ds-kpi ds-kpi-accent">
                     <small>Venta Neko Wok</small>
-                    <b>${round(resumen["total_ventas_usd"], 2)}</b>
-                    <div class="nota">Excluye delivery explicito.</div>
+                    <b>${resumen["total_ventas_usd"]:.2f}</b>
+                    <div class="ds-kpi-note">Excluye delivery explicito.</div>
+                </div>
+                <div class="ds-kpi">
+                    <small>Ordenes cerradas</small>
+                    <b>{cantidad_ordenes_cerradas}</b>
+                    <div class="ds-kpi-note">Desde el inicio de la jornada.</div>
                 </div>
             </div>
-        </div>
+        </section>
 
-        <div class="bloque">
-            <div class="titulo-bloque">DELIVERY</div>
-            <div class="metricas-cierre">
-                <div class="metrica-cierre">
+        <section class="ds-panel cierre-seccion">
+            <div class="ds-section-title">🛵 Delivery</div>
+            <div class="ds-kpi-grid">
+                <div class="ds-kpi">
                     <small>Delivery generado</small>
-                    <b>${round(resumen["delivery_generado_usd"], 2)}</b>
-                    <div class="nota">Cargos delivery de la jornada.</div>
+                    <b>${resumen["delivery_generado_usd"]:.2f}</b>
+                    <div class="ds-kpi-note">Cargos delivery de la jornada.</div>
                 </div>
-                <div class="metrica-cierre">
+                <div class="ds-kpi">
                     <small>Delivery pagado</small>
-                    <b>${round(resumen["delivery_pagado_usd"], 2)}</b>
-                    <div class="nota">Pagos a repartidores de la jornada.</div>
+                    <b>${resumen["delivery_pagado_usd"]:.2f}</b>
+                    <div class="ds-kpi-note">Pagos a repartidores de la jornada.</div>
                 </div>
-                <div class="metrica-cierre">
+                <div class="ds-kpi">
                     <small>Delivery pendiente actual</small>
-                    <b>${round(resumen["delivery_pendiente_actual_usd"], 2)}</b>
-                    <div class="nota">Saldo actual historico de delivery_movimientos.</div>
+                    <b>${resumen["delivery_pendiente_actual_usd"]:.2f}</b>
+                    <div class="ds-kpi-note">Saldo actual historico de delivery_movimientos.</div>
                 </div>
             </div>
-        </div>
+        </section>
 
-        <div class="bloque">
-            <div class="titulo-bloque">💳 COBRADO</div>
-            <div class="dato"><b>Punto de venta:</b> Bs {round(resumen["total_punto_venta_bs"], 2)}</div>
-            <div class="dato"><b>Pago m&oacute;vil en Bs:</b> Bs {round(resumen["total_pago_movil_bs"], 2)}</div>
-            <div class="dato"><b>Efectivo en Bs:</b> Bs {round(resumen["total_efectivo_bs"], 2)}</div>
-            <div class="dato"><b>Efectivo en USD:</b> $ {round(resumen["total_efectivo_usd"], 2)}</div>
-        </div>
+        <section class="ds-panel cierre-seccion">
+            <div class="ds-section-title">💳 Cobrado</div>
+            <div class="ds-kpi-grid">
+                <div class="ds-kpi"><small>Punto de venta</small><b>Bs {formato_bs_resumen(resumen["total_punto_venta_bs"])}</b></div>
+                <div class="ds-kpi"><small>Pago m&oacute;vil en Bs</small><b>Bs {formato_bs_resumen(resumen["total_pago_movil_bs"])}</b></div>
+                <div class="ds-kpi"><small>Efectivo en Bs</small><b>Bs {formato_bs_resumen(resumen["total_efectivo_bs"])}</b></div>
+                <div class="ds-kpi"><small>Efectivo en USD</small><b>${resumen["total_efectivo_usd"]:.2f}</b></div>
+            </div>
+        </section>
 
-        <div class="bloque">
-            <div class="titulo-bloque">💲 TASA</div>
-            <div class="dato"><b>Tasa actual:</b> Bs {round(resumen["tasa"], 2)}</div>
-        </div>
+        <section class="ds-panel cierre-seccion">
+            <div class="ds-section-title">🧮 Equivalentes y diferencia</div>
+            <div class="ds-kpi-grid">
+                <div class="ds-kpi"><small>Tasa actual</small><b>Bs {formato_bs_resumen(resumen["tasa"])}</b></div>
+                <div class="ds-kpi"><small>Total cobrado equivalente en Bs</small><b>Bs {formato_bs_resumen(resumen["total_cobrado_equiv_bs"])}</b></div>
+                <div class="ds-kpi"><small>Total cobrado equivalente en USD</small><b>${resumen["total_cobrado_equiv_usd"]:.2f}</b></div>
+                <div class="{clase_diferencia}">
+                    <small>Diferencia en USD</small>
+                    <b>${diferencia_usd:.2f}</b>
+                    <div class="ds-kpi-note">Entre vendido y cobrado.</div>
+                </div>
+            </div>
+        </section>
 
-        <div class="bloque">
-            <div class="titulo-bloque">🧮 EQUIVALENTES</div>
-            <div class="dato"><b>Total cobrado equivalente en Bs:</b> Bs {round(resumen["total_cobrado_equiv_bs"], 2)}</div>
-            <div class="dato"><b>Total cobrado equivalente en USD:</b> $ {round(resumen["total_cobrado_equiv_usd"], 2)}</div>
-        </div>
-
-        <div class="bloque">
-            <div class="titulo-bloque">⚖️ DIFERENCIA</div>
-            <div class="dato"><b>Diferencia en USD entre vendido y cobrado:</b> $ {round(resumen["diferencia_usd"], 2)}</div>
-        </div>
-
-        <div class="bloque">
-            <div class="titulo-bloque">🔍 AUDITORIA DE PAGOS</div>
+        <section class="ds-panel cierre-seccion">
+            <div class="ds-section-title">🔍 Auditoria de pagos</div>
             {auditoria_html}
-        </div>
+        </section>
 
-        <div class="bloque">
-            <div class="titulo-bloque">🍽️ PLATOS VENDIDOS EN LA JORNADA</div>
+        <section class="ds-panel cierre-seccion">
+            <div class="ds-section-title">🍽️ Platos vendidos en la jornada</div>
             {productos_html}
-        </div>
+        </section>
 
-        {boton}
-        <br>
-        <a href="/" class="volver">🏠 Volver</a>
-    </div>
+        <div class="ds-btn-group">{acciones_estado}</div>
+    </main>
     </body>
     </html>
     """
