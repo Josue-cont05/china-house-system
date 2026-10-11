@@ -3333,7 +3333,11 @@ class SalesSnapshotTest(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'href="/cuentas_por_cobrar"', response.data)
-        self.assertIn("💰 Cuentas por cobrar".encode(), response.data)
+        # Ahora vive en el drawer de navegacion global (icono en su propio span).
+        self.assertIn(
+            '<a class="ds-nav-item" href="/cuentas_por_cobrar"><span class="ds-nav-icono" aria-hidden="true">💰</span><span>Cuentas por cobrar</span></a>'.encode(),
+            response.data,
+        )
         self.assertNotIn(b'href="/clientes"', response.data)
 
     def test_home_page_renders_without_literal_placeholders(self):
@@ -3356,7 +3360,10 @@ class SalesSnapshotTest(unittest.TestCase):
         # Controles reales deben seguir apareciendo para el rol master.
         self.assertIn('href="/cerrar_jornada" class="btn-cierre-jornada ', html)
         self.assertIn('href="/ordenes_listas" class="btn-cierre-jornada ', html)
-        self.assertIn("Accesos rápidos", html)
+        # "Accesos rapidos" se elimino: duplicaba la navegacion, que ahora
+        # vive en el drawer del boton Menu.
+        self.assertNotIn("Accesos rápidos", html)
+        self.assertIn('id="navMenuBtn"', html)
         self.assertIn("campanaNotifBtn", html)
 
     def test_inventario_page_renders_computed_total_not_literal_placeholder(self):

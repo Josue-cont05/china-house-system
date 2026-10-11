@@ -94,6 +94,7 @@ from app.infrastructure.database.notifications import (
 from app.presentation.web.self_ordering_routes import crear_self_ordering_blueprint
 from app.presentation.web.cxc_routes import crear_cxc_blueprint
 from app.presentation.web.design_system import estilos_design_system
+from app.presentation.web.navigation import render_menu_global
 from app.presentation.web.order_detail_view import render_detalle_orden
 from app.presentation.web.self_ordering_ui import render_self_ordering_panel
 from app.infrastructure.database.clientes import (
@@ -1499,18 +1500,31 @@ def barra_superior(extra_links=""):
         }})();
         </script>
         """
+    # Navegacion global: un boton "Menú" + drawer con las opciones del rol
+    # (mismas reglas que el antiguo menu de index(); la seguridad real sigue
+    # en proteger_sistema). Los enlaces contextuales de cada pantalla
+    # (extra_links) van al grupo "En esta pantalla" del drawer.
+    rol_actual = usuario_rol() if usuario_id else ""
+    ruta_inicio = ruta_inicio_rol(rol_actual)
+    boton_menu, drawer_menu = render_menu_global(
+        rol=rol_actual,
+        puede_tomar_ordenes=bool(usuario_id) and usuario_puede_tomar_ordenes(),
+        ruta_inicio=ruta_inicio,
+        ruta_actual=request.path,
+        usuario=usuario_activo(),
+        extra_links=extra_links,
+    )
     return f"""
     <style>{estilos_base()}</style>
     <div class="header">
-        <a href="{ruta_inicio_rol(usuario_rol())}" class="titulo titulo-inicio" title="Ir a Inicio" aria-label="Neko Wok POS: ir a Inicio">🐱 Neko Wok <span class="brand-dot">·</span> <span style="font-size:14px;font-weight:500;opacity:0.85;">POS</span></a>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
-            <div style="font-size:13px; opacity:0.85; display:flex; align-items:center; gap:10px;">{campana_html}👤 <b>{usuario_activo()}</b></div>
-            <div class="menu-top">
-                {extra_links}
-                <a href="/logout">🚪 Salir</a>
-            </div>
+        <a href="{ruta_inicio}" class="titulo titulo-inicio" title="Ir a Inicio" aria-label="Neko Wok POS: ir a Inicio">🐱 Neko Wok <span class="brand-dot">·</span> <span style="font-size:14px;font-weight:500;opacity:0.85;">POS</span></a>
+        <div class="header-acciones">
+            {campana_html}
+            <span class="header-usuario">👤 <b>{usuario_activo()}</b></span>
+            {boton_menu}
         </div>
     </div>
+    {drawer_menu}
     """
 
 
@@ -2750,13 +2764,15 @@ def index():
     <style>
     """ + estilos_base() + """
     body { margin: 0; }
-    .contenedor { display: flex; padding: 14px; gap: 14px; flex-direction: column; max-width: 1280px; margin: 0 auto; }
-    .contenedor > .panel-izq { background: var(--bg-panel); padding: 20px; border-radius: var(--radius-lg); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
-    .contenedor > .panel-der { background: transparent; border: none; box-shadow: none; }
+    .inicio-layout { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "nueva" "ordenes" "secundario"; gap: 14px; padding: 12px; max-width: 1280px; margin: 0 auto; }
+    .inicio-nueva-orden { grid-area: nueva; }
+    .inicio-ordenes { grid-area: ordenes; min-width: 0; }
+    .inicio-secundario { grid-area: secundario; display: grid; gap: 10px; }
+    .inicio-layout > .panel-izq { background: var(--bg-panel); padding: 18px; border-radius: var(--radius-lg); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
+    .inicio-layout > .panel-der { background: transparent; border: none; box-shadow: none; padding: 0; }
     .panel-izq h3, .panel-der h3 { margin: 0 0 14px; font-size: 16px; font-weight: 800; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }
     .panel-izq input, .panel-izq select { width: 100%; margin: 0 0 12px; }
     .btn-nueva-orden { width: 100%; margin-top: 4px; }
-    .btn-cierre-jornada { margin-top: 12px; }
     .panel-der .card { background: var(--bg-card); color: var(--text-primary); padding: 16px; margin-bottom: 10px; border-radius: var(--radius-md); box-shadow: none; display: flex; flex-direction: column; gap: 10px; font-size: 16px; border: 1px solid var(--border); border-left: 4px solid var(--border); }
     .panel-der .card.abierta { border-left-color: var(--info); }
     .panel-der .card.en-cocina { border-left-color: var(--warning); }
@@ -2766,60 +2782,18 @@ def index():
     .card-acciones .ds-badge { align-self: flex-start; }
     .mesonera { font-size: 13px; color: var(--text-secondary); margin-top: 3px; }
     .seccion-titulo { font-size: 12px; font-weight: 800; color: var(--text-muted); letter-spacing: 0.8px; text-transform: uppercase; margin: 16px 0 8px; }
+    .inicio-ordenes > .seccion-titulo:first-child { margin-top: 0; }
     .historial-item { background: var(--bg-card); color: var(--text-primary); padding: 12px 14px; margin-bottom: 8px; border-radius: var(--radius-md); border: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-    .menu-master { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .menu-card { background: var(--bg-card); border-radius: var(--radius-md); padding: 14px; text-decoration: none; color: var(--text-primary); font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); min-height: var(--touch-lg); transition: background 0.15s ease, border-color 0.15s ease; }
-    .menu-card:hover { background: var(--bg-hover); border-color: var(--border-strong); }
-    .menu-card .mc-icon { font-size: 22px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; border-radius: 10px; flex-shrink: 0; background: var(--bg-panel); box-shadow: inset 0 0 0 1px var(--border); }
     @media (min-width: 900px) {
-        .contenedor { flex-direction: row !important; align-items: flex-start; padding: 18px !important; }
-        .contenedor > .panel-izq { flex: 0 0 340px; position: sticky; top: 84px; }
-        .panel-der { flex: 1; }
-        .card { flex-direction: row !important; justify-content: space-between; align-items: center; }
+        .inicio-layout { grid-template-columns: 360px minmax(0, 1fr); grid-template-areas: "nueva ordenes" "secundario ordenes"; grid-template-rows: auto 1fr; align-items: start; padding: 18px; gap: 18px; }
+        .panel-der .card { flex-direction: row; justify-content: space-between; align-items: center; }
     }
     </style>
     </head>
     <body>
     """
 
-    menu_links = '<a href="/">🏠 Inicio</a>'
-    rol_actual = usuario_rol()
-    if rol_actual == "master":
-        menu_links += """
-        <a href="/cambiar_tasa">💲 Tasa</a>
-        <a href="/exportar">📤 Exportar</a>
-        <a href="/cierre">📦 Cierre</a>
-        <a href="/reportes">📊 Reportes</a>
-        <a href="/dashboard">📈 Dashboard</a>
-        <a href="/cerrar_jornada">🔒 Cerrar jornada</a>
-        <a href="/menu">🍜 Menú</a>
-        <a href="/inventario">📦 Inventario</a>
-        <a href="/compras">🛒 Compras</a>
-        <a href="/produccion">👨‍🍳 Producción</a>
-        <a href="/recetas">🧾 Recetas</a>
-        <a href="/movimientos_inventario">📋 Movimientos</a>
-        <a href="/usuarios">👥 Usuarios</a>
-        <a href="/cocina">🍳 Cocina</a>
-        """
-        menu_links += '<a href="/cuentas_por_cobrar">💰 Cuentas por cobrar</a>'
-        menu_links += '<a href="/delivery">🛵 Delivery</a>'
-    elif rol_actual == "socio":
-        menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
-    elif rol_actual == "mesonera_reportes":
-        menu_links += '<a href="/reportes">📊 Reportes</a><a href="/dashboard">📈 Dashboard</a>'
-    elif rol_actual == "cocina_reportes":
-        menu_links += (
-            '<a href="/cocina">🍳 Cocina</a>'
-            '<a href="/produccion">👨‍🍳 Producción</a>'
-            '<a href="/inventario">📦 Inventario</a>'
-            '<a href="/reportes">📊 Reportes</a>'
-            '<a href="/dashboard">📈 Dashboard</a>'
-        )
-
-    if usuario_puede_tomar_ordenes():
-        menu_links += '<a href="/despacho">🛎️ Despacho</a>'
-
-    html += barra_superior(menu_links)
+    html += barra_superior()
 
     boton_cerrar_jornada = ""
     if usuario_es_admin_cierre():
@@ -2833,57 +2807,9 @@ def index():
             '<a href="/ordenes_listas" class="btn-cierre-jornada ds-btn ds-btn-secondary ds-btn-block">Listas por cobrar</a>'
         )
 
-    panel_izq_extra = ""
-    if rol_actual == "master":
-        panel_izq_extra = """
-        <div style="margin-top:20px;">
-            <div class="ds-section-title">Accesos rápidos</div>
-            <div class="menu-master">
-                <a href="/" class="menu-card"><div class="mc-icon mc-verde">🏠</div><span>Inicio</span></a>
-                <a href="/cambiar_tasa" class="menu-card"><div class="mc-icon mc-naranja">💲</div><span>Tasa</span></a>
-                <a href="/exportar" class="menu-card"><div class="mc-icon mc-azul">📤</div><span>Exportar</span></a>
-                <a href="/cierre" class="menu-card"><div class="mc-icon mc-gris">📦</div><span>Cierre</span></a>
-                <a href="/reportes" class="menu-card"><div class="mc-icon mc-azul">📊</div><span>Reportes</span></a>
-                <a href="/dashboard" class="menu-card"><div class="mc-icon mc-verde">📈</div><span>Dashboard</span></a>
-                <a href="/menu" class="menu-card"><div class="mc-icon mc-naranja">🍜</div><span>Menú</span></a>
-                <a href="/inventario" class="menu-card"><div class="mc-icon mc-gris">📦</div><span>Inventario</span></a>
-                <a href="/compras" class="menu-card"><div class="mc-icon mc-naranja">🛒</div><span>Compras</span></a>
-                <a href="/produccion" class="menu-card"><div class="mc-icon mc-verde">👨‍🍳</div><span>Producción</span></a>
-                <a href="/recetas" class="menu-card"><div class="mc-icon mc-azul">🧾</div><span>Recetas</span></a>
-                <a href="/movimientos_inventario" class="menu-card"><div class="mc-icon mc-gris">📋</div><span>Movimientos</span></a>
-                <a href="/usuarios" class="menu-card"><div class="mc-icon mc-morado">👥</div><span>Usuarios</span></a>
-                <a href="/cocina" class="menu-card"><div class="mc-icon mc-naranja">🍳</div><span>Cocina</span></a>
-                <a href="/despacho" class="menu-card"><div class="mc-icon mc-verde">🛎️</div><span>Despacho</span></a>
-            </div>
-        </div>
-        """
-    elif rol_actual == "mesonera_reportes":
-        panel_izq_extra = """
-        <div style="margin-top:20px;">
-            <div class="ds-section-title">Accesos rápidos</div>
-            <div class="menu-master">
-                <a href="/reportes" class="menu-card"><div class="mc-icon mc-azul">📊</div><span>Reportes</span></a>
-                <a href="/dashboard" class="menu-card"><div class="mc-icon mc-verde">📈</div><span>Dashboard</span></a>
-            </div>
-        </div>
-        """
-    elif rol_actual == "cocina_reportes":
-        panel_izq_extra = """
-        <div style="margin-top:20px;">
-            <div class="ds-section-title">Accesos rápidos</div>
-            <div class="menu-master">
-                <a href="/cocina" class="menu-card"><div class="mc-icon mc-naranja">🍳</div><span>Cocina</span></a>
-                <a href="/produccion" class="menu-card"><div class="mc-icon mc-verde">👨‍🍳</div><span>Producción</span></a>
-                <a href="/inventario" class="menu-card"><div class="mc-icon mc-gris">📦</div><span>Inventario</span></a>
-                <a href="/reportes" class="menu-card"><div class="mc-icon mc-azul">📊</div><span>Reportes</span></a>
-                <a href="/dashboard" class="menu-card"><div class="mc-icon mc-verde">📈</div><span>Dashboard</span></a>
-            </div>
-        </div>
-        """
-
     html += f"""
-    <div class="contenedor">
-        <div class="panel-izq">
+    <div class="inicio-layout">
+        <div class="panel-izq inicio-nueva-orden">
             <h3>🧾 Nueva orden</h3>
             <form action="/crear_orden" method="post">
                 <div class="ds-label" id="tipoOrdenTitulo">Tipo</div>
@@ -2927,11 +2853,9 @@ def index():
                 actualizarReferenciaOrden();
             }})();
             </script>
-            {boton_cerrar_jornada}
-            {boton_ordenes_listas}
-            {panel_izq_extra}
         </div>
-        <div class="panel-der">
+        {f'<div class="inicio-secundario">{boton_ordenes_listas}{boton_cerrar_jornada}</div>' if (boton_ordenes_listas or boton_cerrar_jornada) else ''}
+        <div class="panel-der inicio-ordenes">
     """
 
     abierta_html = ""
