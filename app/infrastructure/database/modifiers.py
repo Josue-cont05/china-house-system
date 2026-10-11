@@ -354,3 +354,32 @@ def listar_grupos_por_producto_ids(cursor, producto_ids):
         producto_id: _armar_grupos_dominio(filas_grupo, opciones_por_grupo)
         for producto_id, filas_grupo in filas_por_producto.items()
     }
+
+
+def listar_productos_por_grupo(cursor):
+    """{grupo_id: [nombre_producto, ...]} para mostrar en la administracion
+    donde se usa cada grupo."""
+    cursor.execute(
+        """
+        SELECT pg.grupo_id, p.nombre
+        FROM producto_grupos_modificadores pg
+        JOIN productos p ON p.id = pg.producto_id
+        ORDER BY p.nombre
+        """
+    )
+    resultado = {}
+    for grupo_id, nombre in cursor.fetchall():
+        resultado.setdefault(grupo_id, []).append(nombre)
+    return resultado
+
+
+def contar_grupos_por_producto(cursor):
+    """{producto_id: cantidad de grupos asociados} para el listado de /menu."""
+    cursor.execute(
+        """
+        SELECT producto_id, COUNT(*)
+        FROM producto_grupos_modificadores
+        GROUP BY producto_id
+        """
+    )
+    return {fila[0]: fila[1] for fila in cursor.fetchall()}

@@ -115,3 +115,48 @@ def producto_agotado_por_modificadores(grupos):
         if not any(o.activa and o.disponible for o in grupo.opciones):
             return True
     return False
+
+
+# ---- reglas de configuracion desde la administracion (Menu) -----------
+
+MAXIMO_SIN_LIMITE = 99
+
+
+def normalizar_reglas_grupo(obligatorio, seleccion_multiple, minimo=None, maximo=None):
+    """(minimo, maximo) coherentes con lo que el admin eligio en lenguaje
+    de negocio ("Elegir una opcion" / "Permitir varias" + Obligatorio).
+
+    - Una opcion: siempre max=1; min=1 si es obligatorio, si no 0.
+    - Varias: respeta los valores avanzados (minimo/maximo) pero los deja
+      coherentes: obligatorio -> min>=1; opcional -> min=0 (el backend no
+      exige minimo en un grupo opcional, mostrar otro valor confundiria);
+      max>=max(min,1). Sin valores avanzados: max sin limite practico
+      (MAXIMO_SIN_LIMITE).
+    No cambia como se VALIDA una seleccion (validar_seleccion_modificadores)."""
+    if not seleccion_multiple:
+        return (1 if obligatorio else 0), 1
+
+    def _entero(valor, por_defecto):
+        try:
+            return int(valor)
+        except (TypeError, ValueError):
+            return por_defecto
+
+    minimo = max(_entero(minimo, 1), 1) if obligatorio else 0
+    maximo = _entero(maximo, MAXIMO_SIN_LIMITE)
+    maximo = max(maximo, minimo, 1)
+    return minimo, maximo
+
+
+def describir_reglas_grupo(obligatorio, seleccion_multiple, minimo, maximo):
+    """Texto corto para la administracion, p. ej. "Obligatorio · Elegir una opción"."""
+    requisito = "Obligatorio" if obligatorio and (minimo or 0) >= 1 else "Opcional"
+    if not seleccion_multiple:
+        return f"{requisito} · Elegir una opción"
+    if maximo and maximo < MAXIMO_SIN_LIMITE:
+        if minimo and minimo > 1:
+            return f"{requisito} · Elegir entre {minimo} y {maximo}"
+        return f"{requisito} · Elegir hasta {maximo}"
+    if minimo and minimo > 1:
+        return f"{requisito} · Elegir al menos {minimo}"
+    return f"{requisito} · Elegir varias"

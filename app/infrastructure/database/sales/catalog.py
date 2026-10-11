@@ -1,3 +1,10 @@
+from app.infrastructure.database.product_images import (
+    eliminar_imagen_producto,
+    listar_versiones_imagenes,
+    url_imagen_producto,
+)
+
+
 class SqlSalesCatalogRepository:
     def __init__(self, connection_factory):
         self._connection_factory = connection_factory
@@ -80,12 +87,16 @@ class SqlSalesCatalogRepository:
             conn.close()
 
     def listar_imagenes_productos(self):
-        """{producto_id: imagen_url} solo para productos con imagen.
-        Consulta aparte (y no una 5a columna en listar_catalogo_activo)
-        para no cambiar la forma de las tuplas que ya consumen otros."""
+        """{producto_id: url} solo para productos con imagen. Prioridad:
+        1) imagen guardada en BD (miniatura servida por /producto/<id>/imagen),
+        2) imagen_url manual. Sin imagen -> no aparece (placeholder en la UI).
+        Nunca lee bytes: solo version de producto_imagenes. Consulta aparte
+        (y no una 5a columna en listar_catalogo_activo) para no cambiar la
+        forma de las tuplas que ya consumen otros."""
         conn = self._connection_factory()
         cursor = conn.cursor()
         try:
+            urls = {}
             cursor.execute(
                 """
                 SELECT id, imagen_url
@@ -93,7 +104,43 @@ class SqlSalesCatalogRepository:
                 WHERE imagen_url IS NOT NULL AND imagen_url <> ''
                 """
             )
-            return {fila[0]: fila[1] for fila in cursor.fetchall()}
+            for producto_id, imagen_url in cursor.fetchall():
+                urls[producto_id] = imagen_url
+            for producto_id, version in listar_versiones_imagenes(cursor).items():
+                urls[producto_id] = url_imagen_producto(producto_id, version, miniatura=True)
+            return urls
+        finally:
+            conn.close()
+
+    def listar_productos_admin_detalle(self):
+        """Listado de /menu: (id, nombre, precio, categoria, activo, imagen_url),
+        ordenado por categoria y nombre. Sin bytes de imagen."""
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT p.id, p.nombre, p.precio, c.nombre, COALESCE(p.activo, 1), p.imagen_url
+                FROM productos p
+                LEFT JOIN categorias c ON p.categoria_id = c.id
+                ORDER BY COALESCE(c.nombre, ''), p.nombre
+                """
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def alternar_activo_producto(self, producto_id, activo):
+        """Activar/desactivar (no borra): un producto inactivo sale del POS
+        pero conserva historico, imagen y grupos de opciones."""
+        conn = self._connection_factory()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE productos SET activo=? WHERE id=?",
+                (1 if activo else 0, producto_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -124,6 +171,9 @@ class SqlSalesCatalogRepository:
         cursor = conn.cursor()
         try:
             cursor.execute("DELETE FROM productos WHERE id=?", (producto_id,))
+            # Sin FK declaradas: limpiar lo que colgaba del producto borrado.
+            eliminar_imagen_producto(cursor, producto_id)
+            cursor.execute("DELETE FROM producto_grupos_modificadores WHERE producto_id=?", (producto_id,))
             conn.commit()
         finally:
             conn.close()

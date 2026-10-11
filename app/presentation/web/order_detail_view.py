@@ -118,6 +118,7 @@ def _grupos_modificador_json(grupos):
                 "id": grupo.id,
                 "nombre": grupo.nombre,
                 "multiple": grupo.seleccion_multiple,
+                "obligatorio": grupo.obligatorio,
                 "minimo": grupo.minimo,
                 "maximo": grupo.maximo,
                 "opciones": [
@@ -1100,6 +1101,7 @@ details.delivery-panel[open] > summary::after { content: "▴"; }
 .sabor-naranja { background: #F97316; border-color: #F97316; color: #1c1917; }
 .sabor-uva { background: #6A0DAD; border-color: #6A0DAD; color: #fff; }
 .sabor-btn.otro { background: #5B21B6; border-color: #5B21B6; color: #fff; }
+.sabor-btn.opcion-omitir { background: transparent; border-style: dashed; color: var(--text-secondary); }
 .combo-config { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .combo-config-seccion { margin: 0; }
 .combo-config-seccion label { display: block; margin: 0 0 6px; color: var(--text-secondary); font-size: 13px; font-weight: 800; letter-spacing: 0.3px; text-transform: uppercase; }
@@ -1970,6 +1972,16 @@ _JS_ORDEN_LEGACY = """
             });
             configuracionOpcionesGrid.appendChild(boton);
         });
+        if (paso.minimo === 0) {
+            const omitir = document.createElement("button");
+            omitir.type = "button";
+            omitir.className = "sabor-btn opcion-omitir";
+            omitir.textContent = "Sin " + paso.titulo.toLowerCase();
+            omitir.addEventListener("click", function() {
+                seleccionarOpcionConfiguracion(paso, []);
+            });
+            configuracionOpcionesGrid.appendChild(omitir);
+        }
     }
 
     function tituloCombo(producto) {
@@ -2117,7 +2129,9 @@ _JS_ORDEN_LEGACY = """
                 parametro: "grupo_" + grupo.id,
                 opciones: grupo.opciones,
                 multiple: !!grupo.multiple,
-                minimo: grupo.minimo || 1,
+                // Un grupo opcional (o con minimo 0) se puede omitir; antes el
+                // JS exigia siempre 1 aunque el backend lo aceptaba.
+                minimo: (grupo.obligatorio === false || grupo.minimo === 0) ? 0 : (grupo.minimo || 1),
                 maximo: grupo.maximo || 1
             });
         });

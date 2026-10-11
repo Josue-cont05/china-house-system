@@ -126,6 +126,25 @@ from app.infrastructure.database.modifiers import (
     listar_grupos_modificadores_admin,
     listar_grupos_por_producto_ids,
     listar_opciones_de_grupo_admin,
+    contar_grupos_por_producto,
+    listar_productos_por_grupo,
+)
+from app.infrastructure.database.product_images import (
+    crear_tabla_producto_imagenes,
+    eliminar_imagen_producto as eliminar_imagen_producto_db,
+    guardar_imagen_producto,
+    obtener_imagen_producto as obtener_imagen_producto_db,
+    obtener_info_imagen_producto,
+)
+from app.infrastructure.images.product_image_processing import (
+    TAMANO_MAXIMO_ORIGINAL,
+    procesar_imagen_producto,
+)
+from app.domain.sales.modifiers import normalizar_reglas_grupo
+from app.presentation.web.menu_admin_views import (
+    render_editar_producto,
+    render_menu_modificadores,
+    render_menu_productos,
 )
 from app.application.payments.pendiente import dejar_pendiente_a_cliente, pagar_pendiente_ahora
 from app.application.payments.checkout import OrdenYaCerradaOArchivadaError, ejecutar_cobro
@@ -1667,6 +1686,9 @@ def proteger_sistema():
         "api_tasa",
         "self_ordering.self_order_publico",
         "self_ordering.submit_self_order",
+        # Imagen de producto: solo lectura de una foto del menu, publica a
+        # proposito para el futuro menu QR (sin sesion). No expone datos.
+        "imagen_producto",
         # Cola central de impresion (Neko Local / print_dispatcher.py):
         # cliente de maquina sin sesion de navegador, igual que los
         # endpoints legacy de arriba. Sin esto, before_request los
@@ -1707,6 +1729,9 @@ def proteger_sistema():
         "menu_modificadores_editar_opcion",
         "menu_modificadores_alternar_activa_opcion",
         "menu_modificadores_alternar_disponible_opcion",
+        "menu_producto_activo",
+        "menu_producto_imagen",
+        "menu_producto_imagen_quitar",
         "reimprimir_cocina",
         "reimprimir_comanda",
         "cambiar_tasa",
@@ -2052,6 +2077,9 @@ def init_db():
     # Imagen opcional de la tarjeta de /orden/<id> (URL http(s) o ruta
     # "/static/..."); NULL = placeholder. Ver app.domain.sales.product_images.
     asegurar_columna("productos", "imagen_url", "TEXT")
+    # Imagenes subidas desde Menu, guardadas en BD (tabla aparte, sin bytes
+    # en las consultas de catalogo). Ver app.infrastructure.database.product_images.
+    crear_tabla_producto_imagenes(get_connection, pk_autoincrement_sql)
     # Columnas HISTORICAS -- mision "correccion semantica de Despacho":
     # despachado_at/despachado_por se llamaban asi porque la pantalla
     # de Monica originalmente decia "ENTREGADO", pero esa etiqueta nunca
@@ -2951,82 +2979,132 @@ def menu():
         catalog_repo.crear_producto(nombre, precio, categoria_id)
 
     categorias = catalog_repo.listar_categorias()
-    productos = catalog_repo.listar_productos_admin()
+    productos = catalog_repo.listar_productos_admin_detalle()
+    imagenes = catalog_repo.listar_imagenes_productos()
+    conn = get_connection()
+    cursor = conn.cursor()
+    grupos_por_producto = contar_grupos_por_producto(cursor)
+    conn.close()
 
-    html = """
-    <html>
-    <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-    """ + estilos_base() + """
-    body { margin: 0; }
-    .contenido { padding: 18px; max-width: 960px; margin: 0 auto; }
-    .card { background: var(--tarjeta); color: var(--texto); padding: 20px; margin-bottom: 14px; border-radius: 14px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); }
-    .card h3 { margin: 0 0 14px; font-size: 16px; color: var(--texto); }
-    input, select { width: 100%; padding: 12px 14px; margin: 6px 0 10px; border-radius: 10px; border: 1.5px solid var(--borde); font-size: 15px; box-sizing: border-box; background: var(--panel-secundario); color: var(--texto); }
-    .btn-add { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 10px; background: var(--verde-neko); color: #0F1115; cursor: pointer; font-weight: 800; box-shadow: 0 4px 12px rgba(0,0,0,0.20); }
-    .productos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-    .producto { background: var(--tarjeta); color: var(--texto); padding: 14px 16px; border-radius: 12px; border: 1.5px solid var(--borde); box-shadow: var(--sombra-suave); transition:background 0.16s ease, border-color 0.16s ease, transform 0.1s ease; }
-    .producto:hover { background:#252A32; border-color:rgba(61,220,132,0.38); transform:translateY(-1px); }
-    .producto-nombre { font-size: 16px; font-weight: 700; color: var(--texto); margin-bottom: 2px; }
-    .producto-precio { font-size: 20px; font-weight: 800; color: var(--texto-secundario); margin-bottom: 4px; }
-    .producto-cat { font-size: 12px; color: var(--texto-secundario); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; background: var(--panel-secundario); display: inline-block; padding: 2px 8px; border-radius: 20px; margin-bottom: 10px; border:1px solid var(--borde); }
-    .acciones { display: flex; gap: 8px; }
-    .acciones a { text-decoration: none; color: white; padding: 8px 12px; border-radius: 8px; font-size: 13px; font-weight: 700; flex: 1; text-align: center; }
-    .editar { background: var(--azul); }
-    .eliminar { background: var(--rojo); }
-    .page-title { font-size: 22px; font-weight: 900; color: var(--texto); margin: 0 0 18px; display: flex; align-items: center; gap: 8px; }
-    </style>
-    </head>
-    <body>
-    """
+    return render_menu_productos(
+        productos=productos,
+        categorias=categorias,
+        imagenes=imagenes,
+        grupos_por_producto=grupos_por_producto,
+        estilos_base=estilos_base,
+        barra_superior=barra_superior,
+    )
 
-    html += barra_superior('<a href="/">🏠 Inicio</a>')
-    html += """
-    <div class="contenido">
-    <div class="page-title">🍜 Menú Neko Wok</div>
-    <div class="card">
-        <h3>➕ Agregar producto</h3>
-        <form method="post">
-            <input name="nombre" placeholder="Nombre del producto" required>
-            <input name="precio" type="number" step="0.01" placeholder="Precio USD" required>
-            <select name="categoria">
-    """
 
-    for c in categorias:
-        html += f"<option value='{c[0]}'>{c[1]}</option>"
+@app.route("/menu/producto/<int:producto_id>/activo", methods=["POST"])
+def menu_producto_activo(producto_id):
+    """Activar/desactivar en lugar de borrar: el producto conserva
+    historico, imagen y grupos; inactivo no aparece en el POS."""
+    SqlSalesCatalogRepository(get_connection).alternar_activo_producto(
+        producto_id, request.form.get("activo") == "1"
+    )
+    return redirect("/menu")
 
-    html += """
-            </select>
-            <button class="btn-add">➕ Agregar producto</button>
-        </form>
-    </div>
-    <div class="page-title" style="font-size:18px; margin-bottom:12px;">🍽️ Productos</div>
-    <div class="productos-grid">
-    """
 
-    for p in productos:
-        html += f"""
-        <div class="producto">
-            <div class="producto-nombre">{p[1]}</div>
-            <div class="producto-precio">${p[2]}</div>
-            <div class="producto-cat">{p[3] if p[3] else 'Sin categoría'}</div>
-            <div class="acciones">
-                <a class="editar" href="/editar_producto/{p[0]}">✏️ Editar</a>
-                <a class="eliminar" href="/eliminar_producto/{p[0]}">🗑️ Eliminar</a>
-            </div>
-        </div>
-        """
+@app.route("/menu/producto/<int:producto_id>/imagen", methods=["POST"])
+def menu_producto_imagen(producto_id):
+    catalog_repo = SqlSalesCatalogRepository(get_connection)
+    if not catalog_repo.obtener_producto(producto_id):
+        return "Producto no encontrado", 404
+    if (request.content_length or 0) > TAMANO_MAXIMO_ORIGINAL + 1024 * 1024:
+        return _render_editar_producto(producto_id, error="La imagen pesa demasiado (máximo 8 MB)."), 400
+    archivo = request.files.get("imagen")
+    try:
+        imagen = procesar_imagen_producto(archivo.read() if archivo else b"")
+    except ImagenProductoInvalida as exc:
+        return _render_editar_producto(producto_id, error=str(exc)), 400
 
-    html += """
-    </div>
-    <a href="/" class="volver" style="display:inline-block;margin-top:18px;padding:12px 16px;background:#1a6b4a;color:white;text-decoration:none;border-radius:10px;font-weight:700;">🏠 Volver al inicio</a>
-    </div>
-    </body>
-    </html>
-    """
-    return html
+    conn = get_connection()
+    cursor = conn.cursor()
+    guardar_imagen_producto(
+        cursor, producto_id, imagen, ahora_venezuela().strftime("%Y-%m-%d %H:%M:%S.%f")
+    )
+    conn.commit()
+    conn.close()
+    return redirect(f"/editar_producto/{producto_id}?ok=imagen")
+
+
+@app.route("/menu/producto/<int:producto_id>/imagen/quitar", methods=["POST"])
+def menu_producto_imagen_quitar(producto_id):
+    """Quita solo la imagen subida: el producto, su imagen_url manual y el
+    historico de ordenes quedan intactos."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    eliminar_imagen_producto_db(cursor, producto_id)
+    conn.commit()
+    conn.close()
+    return redirect(f"/editar_producto/{producto_id}?ok=imagen_quitada")
+
+
+@app.route("/producto/<int:producto_id>/imagen")
+def imagen_producto(producto_id):
+    """Sirve la imagen guardada en BD (t=mini -> miniatura de tarjetas).
+    Publica (ver rutas_publicas) para el futuro menu QR. Con ?v=<version>
+    la respuesta se puede cachear sin expirar: cada reemplazo cambia la
+    version y por lo tanto la URL."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    resultado = obtener_imagen_producto_db(cursor, producto_id, miniatura=request.args.get("t") == "mini")
+    conn.close()
+    if not resultado:
+        return "", 404
+    mime_type, datos, version = resultado
+    etag = f'"{version}"'
+    if request.headers.get("If-None-Match") == etag:
+        return Response(status=304, headers={"ETag": etag})
+    respuesta = Response(datos, mimetype=mime_type)
+    respuesta.headers["ETag"] = etag
+    respuesta.headers["X-Content-Type-Options"] = "nosniff"
+    respuesta.headers["Content-Disposition"] = "inline"
+    if request.args.get("v") == version:
+        respuesta.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        respuesta.headers["Cache-Control"] = "public, max-age=300"
+    return respuesta
+
+
+def _reglas_grupo_desde_formulario():
+    """(obligatorio, seleccion_multiple, minimo, maximo, orden) del formulario
+    de grupo. El formulario nuevo envia `tipo_seleccion` y se normaliza con
+    reglas de negocio (una opcion -> 0/1..1); los POST antiguos sin ese campo
+    conservan su comportamiento literal. ValueError si hay numeros invalidos."""
+    orden = int(request.form.get("orden", "0") or "0")
+    if "tipo_seleccion" in request.form:
+        obligatorio = request.form.get("obligatorio") == "1"
+        seleccion_multiple = request.form.get("tipo_seleccion") == "multiple"
+        minimo, maximo = normalizar_reglas_grupo(
+            obligatorio, seleccion_multiple, request.form.get("minimo"), request.form.get("maximo")
+        )
+        return obligatorio, seleccion_multiple, minimo, maximo, orden
+    return (
+        request.form.get("obligatorio") == "1",
+        request.form.get("seleccion_multiple") == "1",
+        int(request.form.get("minimo", "1")),
+        int(request.form.get("maximo", "1")),
+        orden,
+    )
+
+
+def _grupos_admin_con_opciones(cursor):
+    grupos = []
+    for grupo_id, nombre, activo, obligatorio, seleccion_multiple, minimo, maximo, orden in listar_grupos_modificadores_admin(cursor):
+        grupos.append({
+            "id": grupo_id,
+            "nombre": nombre,
+            "activo": bool(activo),
+            "obligatorio": bool(obligatorio),
+            "seleccion_multiple": bool(seleccion_multiple),
+            "minimo": minimo,
+            "maximo": maximo,
+            "orden": orden,
+            "opciones": listar_opciones_de_grupo_admin(cursor, grupo_id),
+        })
+    return grupos
 
 
 @app.route("/menu/modificadores", methods=["GET", "POST"])
@@ -3040,136 +3118,39 @@ def menu_modificadores():
             conn.close()
             return "Nombre requerido"
         try:
-            minimo = int(request.form.get("minimo", "1"))
-            maximo = int(request.form.get("maximo", "1"))
-            orden = int(request.form.get("orden", "0") or "0")
+            obligatorio, seleccion_multiple, minimo, maximo, orden = _reglas_grupo_desde_formulario()
         except ValueError:
             conn.close()
             return "Datos invalidos"
-        crear_grupo_modificador(
+        grupo_id = crear_grupo_modificador(
             cursor,
             obtener_ultimo_id,
             nombre=nombre,
-            obligatorio=request.form.get("obligatorio") == "1",
-            seleccion_multiple=request.form.get("seleccion_multiple") == "1",
+            obligatorio=obligatorio,
+            seleccion_multiple=seleccion_multiple,
             minimo=minimo,
             maximo=maximo,
             orden=orden,
         )
         conn.commit()
         conn.close()
-        return redirect("/menu/modificadores")
+        return redirect(f"/menu/modificadores#grupo-{grupo_id}")
 
-    grupos = listar_grupos_modificadores_admin(cursor)
-    grupos_html = ""
-    for grupo_id, nombre, activo, obligatorio, seleccion_multiple, minimo, maximo, orden in grupos:
-        opciones = listar_opciones_de_grupo_admin(cursor, grupo_id)
-        opciones_html = ""
-        for opcion_id, o_nombre, o_activa, o_disponible, o_precio, o_orden in opciones:
-            estado_activa = "Activa" if o_activa else "Inactiva"
-            estado_disponible = "Disponible" if o_disponible else "Agotada"
-            opciones_html += f"""
-            <div class="opcion-fila">
-                <form method="post" action="/menu/modificadores/opciones/{opcion_id}/editar" class="opcion-editar">
-                    <input name="nombre" value="{html_lib.escape(o_nombre, quote=True)}">
-                    <input name="precio_adicional" type="number" step="0.01" value="{o_precio or 0}">
-                    <input name="orden" type="number" value="{o_orden}">
-                    <button>💾</button>
-                </form>
-                <form method="post" action="/menu/modificadores/opciones/{opcion_id}/activa">
-                    <input type="hidden" name="activa" value="{0 if o_activa else 1}">
-                    <button class="btn-toggle">{estado_activa}</button>
-                </form>
-                <form method="post" action="/menu/modificadores/opciones/{opcion_id}/disponible">
-                    <input type="hidden" name="disponible" value="{0 if o_disponible else 1}">
-                    <button class="btn-toggle">{estado_disponible}</button>
-                </form>
-            </div>
-            """
-
-        estado_grupo = "Activo" if activo else "Inactivo"
-        grupos_html += f"""
-        <div class="card">
-            <form method="post" action="/menu/modificadores/{grupo_id}/editar" class="grupo-editar">
-                <input name="nombre" value="{html_lib.escape(nombre, quote=True)}">
-                <label><input type="checkbox" name="obligatorio" value="1" {"checked" if obligatorio else ""}> Obligatorio</label>
-                <label><input type="checkbox" name="seleccion_multiple" value="1" {"checked" if seleccion_multiple else ""}> Seleccion multiple</label>
-                Minimo <input name="minimo" type="number" value="{minimo}">
-                Maximo <input name="maximo" type="number" value="{maximo}">
-                Orden <input name="orden" type="number" value="{orden}">
-                <button>💾 Guardar grupo</button>
-            </form>
-            <form method="post" action="/menu/modificadores/{grupo_id}/activo" style="display:inline;">
-                <input type="hidden" name="activo" value="{0 if activo else 1}">
-                <button class="btn-toggle">{estado_grupo}</button>
-            </form>
-            <h4>Opciones</h4>
-            {opciones_html or "<p>Sin opciones todavia.</p>"}
-            <form method="post" action="/menu/modificadores/{grupo_id}/opciones/crear" class="opcion-crear">
-                <input name="nombre" placeholder="Nueva opcion" required>
-                <input name="precio_adicional" type="number" step="0.01" placeholder="+precio" value="0">
-                <input name="orden" type="number" placeholder="Orden" value="0">
-                <button>➕ Agregar opcion</button>
-            </form>
-        </div>
-        """
-
+    grupos = _grupos_admin_con_opciones(cursor)
+    productos_por_grupo = listar_productos_por_grupo(cursor)
     conn.close()
-
-    html = """
-    <html>
-    <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-    """ + estilos_base() + """
-    body { margin: 0; }
-    .contenido { padding: 18px; max-width: 760px; margin: 0 auto; }
-    .card { background: var(--tarjeta); color: var(--texto); padding: 16px; margin-bottom: 14px; border-radius: 14px; box-shadow: var(--sombra-suave); border: 1px solid var(--borde); }
-    .card input, .card select { padding: 8px 10px; margin: 4px 4px 4px 0; border-radius: 8px; border: 1.5px solid var(--borde); font-size: 14px; background: var(--panel-secundario); color: var(--texto); width: auto; display:inline-block; }
-    .card label { font-size: 13px; margin-right: 8px; }
-    .card button { padding: 8px 14px; border: none; border-radius: 8px; background: var(--verde-neko); color: #0F1115; cursor: pointer; font-weight: 700; }
-    .btn-toggle { background: var(--panel-secundario) !important; color: var(--texto) !important; border: 1px solid var(--borde) !important; }
-    .grupo-editar, .opcion-crear { margin-bottom: 8px; }
-    .opcion-fila { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
-    .opcion-editar { display: inline-flex; gap: 4px; }
-    .page-title { font-size: 22px; font-weight: 900; color: var(--texto); margin: 0 0 18px; }
-    </style>
-    </head>
-    <body>
-    """
-
-    html += barra_superior('<a href="/menu">🍜 Menú</a>')
-    html += f"""
-    <div class="contenido">
-    <div class="page-title">🧩 Modificadores</div>
-    <div class="card">
-        <h3>➕ Nuevo grupo de modificadores</h3>
-        <form method="post">
-            <input name="nombre" placeholder="Nombre (ej. Sabor, Azucar)" required>
-            <label><input type="checkbox" name="obligatorio" value="1" checked> Obligatorio</label>
-            <label><input type="checkbox" name="seleccion_multiple" value="1"> Seleccion multiple</label>
-            Minimo <input name="minimo" type="number" value="1">
-            Maximo <input name="maximo" type="number" value="1">
-            Orden <input name="orden" type="number" value="0">
-            <button>➕ Crear grupo</button>
-        </form>
-    </div>
-    {grupos_html}
-    <a href="/menu" class="volver" style="display:inline-block;margin-top:8px;padding:12px 16px;background:#1a6b4a;color:white;text-decoration:none;border-radius:10px;font-weight:700;">🏠 Volver a Menú</a>
-    </div>
-    </body>
-    </html>
-    """
-    return html
+    return render_menu_modificadores(
+        grupos=grupos,
+        productos_por_grupo=productos_por_grupo,
+        estilos_base=estilos_base,
+        barra_superior=barra_superior,
+    )
 
 
 @app.route("/menu/modificadores/<int:grupo_id>/editar", methods=["POST"])
 def menu_modificadores_editar_grupo(grupo_id):
     try:
-        minimo = int(request.form.get("minimo", "1"))
-        maximo = int(request.form.get("maximo", "1"))
-        orden = int(request.form.get("orden", "0") or "0")
+        obligatorio, seleccion_multiple, minimo, maximo, orden = _reglas_grupo_desde_formulario()
     except ValueError:
         return "Datos invalidos"
     nombre = request.form.get("nombre", "").strip()
@@ -3182,15 +3163,15 @@ def menu_modificadores_editar_grupo(grupo_id):
         cursor,
         grupo_id,
         nombre=nombre,
-        obligatorio=request.form.get("obligatorio") == "1",
-        seleccion_multiple=request.form.get("seleccion_multiple") == "1",
+        obligatorio=obligatorio,
+        seleccion_multiple=seleccion_multiple,
         minimo=minimo,
         maximo=maximo,
         orden=orden,
     )
     conn.commit()
     conn.close()
-    return redirect("/menu/modificadores")
+    return redirect(f"/menu/modificadores#grupo-{grupo_id}")
 
 
 @app.route("/menu/modificadores/<int:grupo_id>/activo", methods=["POST"])
@@ -3200,7 +3181,7 @@ def menu_modificadores_alternar_activo(grupo_id):
     alternar_activo_grupo_modificador(cursor, grupo_id, request.form.get("activo") == "1")
     conn.commit()
     conn.close()
-    return redirect("/menu/modificadores")
+    return redirect(f"/menu/modificadores#grupo-{grupo_id}")
 
 
 @app.route("/menu/modificadores/<int:grupo_id>/opciones/crear", methods=["POST"])
@@ -3226,7 +3207,7 @@ def menu_modificadores_crear_opcion(grupo_id):
     )
     conn.commit()
     conn.close()
-    return redirect("/menu/modificadores")
+    return redirect(f"/menu/modificadores#grupo-{grupo_id}")
 
 
 @app.route("/menu/modificadores/opciones/<int:opcion_id>/editar", methods=["POST"])
@@ -3247,7 +3228,7 @@ def menu_modificadores_editar_opcion(opcion_id):
     )
     conn.commit()
     conn.close()
-    return redirect("/menu/modificadores")
+    return redirect(f"/menu/modificadores#opcion-{opcion_id}")
 
 
 @app.route("/menu/modificadores/opciones/<int:opcion_id>/activa", methods=["POST"])
@@ -3257,7 +3238,7 @@ def menu_modificadores_alternar_activa_opcion(opcion_id):
     alternar_activa_opcion_modificador(cursor, opcion_id, request.form.get("activa") == "1")
     conn.commit()
     conn.close()
-    return redirect("/menu/modificadores")
+    return redirect(f"/menu/modificadores#opcion-{opcion_id}")
 
 
 @app.route("/menu/modificadores/opciones/<int:opcion_id>/disponible", methods=["POST"])
@@ -3267,7 +3248,7 @@ def menu_modificadores_alternar_disponible_opcion(opcion_id):
     alternar_disponible_opcion_modificador(cursor, opcion_id, request.form.get("disponible") == "1")
     conn.commit()
     conn.close()
-    return redirect("/menu/modificadores")
+    return redirect(f"/menu/modificadores#opcion-{opcion_id}")
 
 
 @app.route("/inventario")
@@ -4261,10 +4242,48 @@ def eliminar_producto(id):
     return redirect("/menu")
 
 
+def _render_editar_producto(producto_id, error="", mensaje=""):
+    catalog_repo = SqlSalesCatalogRepository(get_connection)
+    p = catalog_repo.obtener_producto(producto_id)
+    if not p:
+        return "Producto no encontrado"
+    categorias = catalog_repo.listar_categorias()
+    categoria_nombre = next((c[1] for c in categorias if c[0] == p[2]), "")
+    conn = get_connection()
+    cursor = conn.cursor()
+    grupos = _grupos_admin_con_opciones(cursor)
+    grupos_asociados = {fila[0] for fila in listar_grupos_de_producto_admin(cursor, producto_id)}
+    imagen_info = obtener_info_imagen_producto(cursor, producto_id)
+    cursor.execute("SELECT COALESCE(activo, 1) FROM productos WHERE id=?", (producto_id,))
+    activo = bool(cursor.fetchone()[0])
+    conn.close()
+    return render_editar_producto(
+        producto_id=producto_id,
+        producto=p,
+        categorias=categorias,
+        categoria_nombre=categoria_nombre,
+        activo=activo,
+        grupos=grupos,
+        grupos_asociados=grupos_asociados,
+        imagen_info=imagen_info,
+        imagen_url=catalog_repo.obtener_imagen_producto(producto_id),
+        estilos_base=estilos_base,
+        barra_superior=barra_superior,
+        error=error,
+        mensaje=mensaje,
+    )
+
+
+_MENSAJES_EDITAR_PRODUCTO = {
+    "imagen": "Imagen guardada y optimizada.",
+    "imagen_quitada": "Imagen quitada. El producto sigue igual.",
+    "datos": "Cambios guardados.",
+}
+
+
 @app.route("/editar_producto/<int:id>", methods=["GET", "POST"])
 def editar_producto(id):
     catalog_repo = SqlSalesCatalogRepository(get_connection)
-    categorias = catalog_repo.listar_categorias()
 
     if request.method == "POST":
         nombre = request.form.get("nombre", "").strip()
@@ -4302,86 +4321,9 @@ def editar_producto(id):
 
         return redirect("/menu")
 
-    p = catalog_repo.obtener_producto(id)
-
-    if not p:
-        return "Producto no encontrado"
-
-    conn = get_connection()
-    cursor = conn.cursor()
-    todos_los_grupos = listar_grupos_modificadores_admin(cursor)
-    grupos_asociados = {fila[0] for fila in listar_grupos_de_producto_admin(cursor, id)}
-    conn.close()
-
-    grupos_checkboxes = ""
-    for grupo_id, grupo_nombre, grupo_activo, *_resto in todos_los_grupos:
-        checked = "checked" if grupo_id in grupos_asociados else ""
-        etiqueta = html_lib.escape(grupo_nombre)
-        if not grupo_activo:
-            etiqueta += " (inactivo)"
-        grupos_checkboxes += (
-            f'<label style="display:block;font-weight:400;">'
-            f'<input type="checkbox" name="grupo_modificador" value="{grupo_id}" {checked} '
-            f'style="width:auto;display:inline;margin-right:6px;">{etiqueta}</label>'
-        )
-    if not grupos_checkboxes:
-        grupos_checkboxes = (
-            '<p style="color:#666;">No hay grupos de modificadores creados todavia. '
-            'Puedes crearlos en <a href="/menu/modificadores">Modificadores</a>.</p>'
-        )
-
-    html = f"""
-    <html>
-    <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-    body {{ font-family: Arial; padding: 20px; background: #f5f6fa; }}
-    .card {{ background: white; padding: 20px; max-width: 500px; margin: auto; border-radius: 10px; }}
-    input, select {{ width: 100%; padding: 12px; margin: 5px 0; box-sizing: border-box; }}
-    button {{ padding: 12px 20px; background: #27ae60; color: white; border: none; border-radius: 5px; }}
-    a {{ display: inline-block; margin-top: 10px; }}
-    </style>
-    </head>
-    <body>
-    <div class="card">
-    <h1>✏️ Editar producto</h1>
-    <form method="post">
-        Nombre: <input name="nombre" value="{p[0]}"><br><br>
-        Precio: <input name="precio" value="{p[1]}"><br><br>
-        Categoria:
-        <select name="categoria_id">
-    """
-
-    for c in categorias:
-        selected = "selected" if c[0] == p[2] else ""
-        html += f"<option value='{c[0]}' {selected}>{c[1]}</option>"
-
-    imagen_actual = catalog_repo.obtener_imagen_producto(id) or ""
-    imagen_actual_attr = html_lib.escape(imagen_actual, quote=True)
-    imagen_preview = (
-        f'<img src="{imagen_actual_attr}" alt="" '
-        'style="display:block;max-width:180px;max-height:135px;border-radius:8px;margin:6px 0;object-fit:cover;">'
-        if imagen_actual else ""
+    return _render_editar_producto(
+        id, mensaje=_MENSAJES_EDITAR_PRODUCTO.get(request.args.get("ok", ""), "")
     )
-
-    html += f"""
-        </select><br><br>
-        Imagen (opcional, URL https://... o ruta /static/...):
-        <input name="imagen_url" value="{imagen_actual_attr}" placeholder="Sin imagen: se muestra un icono de la categoria">
-        {imagen_preview}
-        <br>
-        Grupos de modificadores (sabor, azucar, etc.):
-        {grupos_checkboxes}
-        <br>
-        <button>💾 Guardar</button>
-    </form>
-    <a href="/menu">🏠 Volver</a>
-    </div>
-    </body>
-    </html>
-    """
-    return html
 
 
 def delivery_estado_badge(activo):
