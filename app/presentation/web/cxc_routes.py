@@ -23,6 +23,12 @@ import json
 
 from flask import Blueprint, redirect, request, session
 
+from app.domain.cxc.descripcion import (
+    agrupar_productos,
+    etiqueta_tipo_orden,
+    texto_descripcion_cxc,
+    texto_productos,
+)
 from app.domain.sales.calculations import TOLERANCIA_COBRO, etiqueta_metodo_pago
 from app.shared.constants.system import METODOS_PAGO_VALIDOS
 from app.application.cxc.abonos import registrar_abono_cuenta, registrar_pago_masivo_cliente
@@ -37,6 +43,7 @@ from app.infrastructure.database.clientes import (
 )
 from app.infrastructure.database.cxc import (
     listar_cuentas_por_cobrar_admin,
+    listar_datos_descripcion_cxc,
     listar_movimientos_de_pago_masivo,
     obtener_detalle_cuenta_cxc,
     obtener_pago_masivo_cxc,
@@ -122,6 +129,20 @@ def crear_cxc_blueprint(
     obtener_tasa_cobro,
 ):
     blueprint = Blueprint("cxc", __name__)
+
+    def descripciones_por_orden(cursor, orden_ids):
+        """{orden_id: texto} con la descripcion derivada de la venta origen."""
+        datos = listar_datos_descripcion_cxc(cursor, orden_ids)
+        return {
+            orden_id: texto_descripcion_cxc(
+                d["tipo"], d["referencia"], d["observacion"], agrupar_productos(d["productos"])
+            )
+            for orden_id, d in datos.items()
+        }
+
+    def celda_descripcion(descripciones, orden_id):
+        texto = descripciones.get(orden_id) or "Sin detalle de la venta"
+        return f'<td class="descripcion-cxc">{html_lib.escape(texto)}</td>'
 
     def formato_bs(monto):
         return f"Bs {a_float(monto):,.2f}"
@@ -268,8 +289,9 @@ def crear_cxc_blueprint(
         </body></html>
         """
 
-    def render_form_pago_masivo(cliente, cuentas_pendientes, error="", valores=None):
+    def render_form_pago_masivo(cliente, cuentas_pendientes, error="", valores=None, descripciones=None):
         valores = valores or {}
+        descripciones = descripciones or {}
         cliente_id = cliente[0]
         total_pendiente = round(sum(a_float(c[5]) for c in cuentas_pendientes), 2)
 
@@ -279,13 +301,14 @@ def crear_cxc_blueprint(
             filas += f"""
             <tr>
                 <td><label><input type="checkbox" name="cuenta_seleccionada" value="{cuenta_id}"> #{html_lib.escape(str(numero or orden_id))}</label></td>
+                {celda_descripcion(descripciones, orden_id)}
                 <td>{texto_fecha_corta(fecha)}</td>
                 <td class="monto">{formato_usd(saldo)}</td>
                 <td><input name="monto_{cuenta_id}" type="number" step="0.01" min="0" placeholder="0.00" class="monto-manual"></td>
             </tr>
             """
         if not filas:
-            filas = '<tr><td colspan="4">Este cliente no tiene cuentas pendientes.</td></tr>'
+            filas = '<tr><td colspan="5">Este cliente no tiene cuentas pendientes.</td></tr>'
 
         metodo = valores.get("metodo_pago") or "usd"
         monto_val = valores.get("monto") or ""
@@ -502,6 +525,7 @@ def crear_cxc_blueprint(
             return "Cliente no encontrado", 404
         resumen = obtener_resumen_cliente(cursor, cliente_id)
         cuentas = listar_cuentas_cliente(cursor, cliente_id)
+        descripciones = descripciones_por_orden(cursor, [c[1] for c in cuentas])
         conn.close()
 
         filas = ""
@@ -510,6 +534,7 @@ def crear_cxc_blueprint(
             filas += f"""
             <tr>
                 <td><a href="/cuentas_por_cobrar/{cuenta_id}">#{html_lib.escape(str(numero or orden_id))}</a></td>
+                {celda_descripcion(descripciones, orden_id)}
                 <td>{texto_fecha_corta(fecha)}</td>
                 <td class="monto">{formato_usd(original)}</td>
                 <td class="monto">{formato_usd(saldo)}</td>
@@ -518,7 +543,7 @@ def crear_cxc_blueprint(
             </tr>
             """
         if not filas:
-            filas = '<tr><td colspan="6">Este cliente no tiene cuentas por cobrar.</td></tr>'
+            filas = '<tr><td colspan="7">Este cliente no tiene cuentas por cobrar.</td></tr>'
 
         return f"""
         <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -551,7 +576,7 @@ def crear_cxc_blueprint(
             <div class="card-admin">
                 <h2>Cuentas por cobrar</h2>
                 <table>
-                    <thead><tr><th>Orden</th><th>Generada</th><th>Original</th><th>Pendiente</th><th>Estado</th><th>Snapshot cliente</th></tr></thead>
+                    <thead><tr><th>Orden</th><th>Descripción</th><th>Generada</th><th>Original</th><th>Pendiente</th><th>Estado</th><th>Snapshot cliente</th></tr></thead>
                     <tbody>{filas}</tbody>
                 </table>
             </div>
@@ -578,8 +603,9 @@ def crear_cxc_blueprint(
 
         if request.method == "GET":
             cuentas_pendientes = _cuentas_pendientes_cliente_ordenadas(cursor, cliente_id)
+            descripciones = descripciones_por_orden(cursor, [c[1] for c in cuentas_pendientes])
             conn.close()
-            return render_form_pago_masivo(cliente, cuentas_pendientes)
+            return render_form_pago_masivo(cliente, cuentas_pendientes, descripciones=descripciones)
 
         modo = request.form.get("modo", "automatico")
         cuentas_manual = []
@@ -622,8 +648,11 @@ def crear_cxc_blueprint(
         except ValueError as exc:
             conn.rollback()
             cuentas_pendientes = _cuentas_pendientes_cliente_ordenadas(cursor, cliente_id)
+            descripciones = descripciones_por_orden(cursor, [c[1] for c in cuentas_pendientes])
             conn.close()
-            return render_form_pago_masivo(cliente, cuentas_pendientes, error=str(exc), valores=valores), 400
+            return render_form_pago_masivo(
+                cliente, cuentas_pendientes, error=str(exc), valores=valores, descripciones=descripciones
+            ), 400
         except Exception:
             conn.rollback()
             conn.close()
@@ -696,6 +725,7 @@ def crear_cxc_blueprint(
         cliente_id = (request.args.get("cliente_id") or "").strip()
         resumen = resumen_cuentas_por_cobrar(cursor)
         cuentas = listar_cuentas_por_cobrar_admin(cursor, busqueda, estado, cliente_id)
+        descripciones = descripciones_por_orden(cursor, [row[6] for row in cuentas])
         clientes_filtro = listar_clientes_admin(cursor, "", "todos")
         conn.close()
 
@@ -714,6 +744,7 @@ def crear_cxc_blueprint(
             <tr>
                 <td><a href="/cuentas_por_cobrar/clientes/{cli_id}">{html_lib.escape(cliente_texto)}</a><br><small>{html_lib.escape(telefono or documento or '')}</small></td>
                 <td>#{html_lib.escape(str(numero or orden_id))}</td>
+                {celda_descripcion(descripciones, orden_id)}
                 <td>{texto_fecha_corta(fecha)}</td>
                 <td class="monto">{formato_usd(original)}</td>
                 <td class="monto">{formato_usd(saldo)}</td>
@@ -722,7 +753,7 @@ def crear_cxc_blueprint(
             </tr>
             """
         if not filas:
-            filas = '<tr><td colspan="7">No hay cuentas por cobrar para este filtro.</td></tr>'
+            filas = '<tr><td colspan="8">No hay cuentas por cobrar para este filtro.</td></tr>'
 
         return f"""
         <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -751,7 +782,7 @@ def crear_cxc_blueprint(
             <div class="card-admin">
                 <h2>Cuentas</h2>
                 <table>
-                    <thead><tr><th>Cliente</th><th>Orden</th><th>Generada</th><th>Original</th><th>Pendiente</th><th>Estado</th><th>Accion</th></tr></thead>
+                    <thead><tr><th>Cliente</th><th>Orden</th><th>Descripción</th><th>Generada</th><th>Original</th><th>Pendiente</th><th>Estado</th><th>Accion</th></tr></thead>
                     <tbody>{filas}</tbody>
                 </table>
             </div>
@@ -764,11 +795,26 @@ def crear_cxc_blueprint(
         conn = connection_factory()
         cursor = conn.cursor()
         detalle = obtener_detalle_cuenta_cxc(cursor, cuenta_id)
+        venta = None
+        if detalle:
+            orden_origen = detalle["cuenta"][1]
+            venta = listar_datos_descripcion_cxc(cursor, [orden_origen]).get(orden_origen)
         conn.close()
         if not detalle:
             return "Cuenta por cobrar no encontrada", 404
 
         c = detalle["cuenta"]
+        venta = venta or {"tipo": None, "referencia": None, "observacion": None, "productos": []}
+        productos_venta = agrupar_productos(venta["productos"])
+        descripcion_venta = texto_descripcion_cxc(
+            venta["tipo"], venta["referencia"], venta["observacion"], productos_venta
+        )
+        tipo_venta = " · ".join(
+            parte
+            for parte in (etiqueta_tipo_orden(venta["tipo"]), (venta["referencia"] or "").strip())
+            if parte and parte != "-"
+        )
+        observacion_venta = (venta["observacion"] or "").strip() or "-"
         movimientos = ""
         for mov in detalle["movimientos"]:
             fecha, tipo, monto_saldo, moneda_pago, monto_pago, tasa_mov, metodo, referencia, usuario, observacion = mov
@@ -825,6 +871,7 @@ def crear_cxc_blueprint(
             <h1>Cuenta por cobrar #{cuenta_id}</h1>
             {tabs_cuentas_por_cobrar("cuentas")}
             {alerta}
+            <div class="descripcion-cxc-destacada"><small>Descripción</small>{html_lib.escape(descripcion_venta)}</div>
             <div class="acciones" style="margin-bottom:12px;">
                 <a class="btn-mini" href="/cuentas_por_cobrar/clientes/{c[2]}">Ver cliente</a>
                 <a class="btn-mini btn-sec" href="/cuentas_por_cobrar">Volver a cuentas</a>
@@ -847,6 +894,9 @@ def crear_cxc_blueprint(
             <div class="card-admin">
                 <h2>Venta origen</h2>
                 <p><b>Orden:</b> #{html_lib.escape(str(numero_orden))}</p>
+                <p><b>Tipo:</b> {html_lib.escape(tipo_venta or '-')}</p>
+                <p><b>Productos:</b> {html_lib.escape(texto_productos(productos_venta) or '-')}</p>
+                <p><b>Observación de la orden:</b> {html_lib.escape(observacion_venta)}</p>
                 <p><b>Fecha de venta:</b> {texto_fecha_corta(fecha_venta)}</p>
                 <p><b>Total original de venta:</b> {formato_usd(c[19])} / {formato_bs(c[20])}</p>
                 <p><b>Pagado al momento:</b> {formato_usd(pagado["usd"])} / {formato_bs(pagado["bs"])}</p>

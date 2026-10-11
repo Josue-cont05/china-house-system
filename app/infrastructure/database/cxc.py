@@ -537,3 +537,40 @@ def listar_movimientos_de_pago_masivo(cursor, pago_masivo_id):
         (pago_masivo_id,),
     )
     return cursor.fetchall()
+
+
+def listar_datos_descripcion_cxc(cursor, orden_ids):
+    """{orden_id: {"tipo", "referencia", "observacion", "productos"}} para
+    construir la descripcion visible de cada cuenta (ver
+    app.domain.cxc.descripcion). Solo lectura de la venta origen; 2
+    consultas en total, sin N+1. "productos" es la lista de nombres
+    historicos de orden_items (una entrada por unidad)."""
+    orden_ids = sorted({oid for oid in orden_ids if oid is not None})
+    if not orden_ids:
+        return {}
+    placeholders = ",".join("?" * len(orden_ids))
+    cursor.execute(
+        f"""
+        SELECT id, tipo, referencia, observacion
+        FROM ordenes
+        WHERE id IN ({placeholders})
+        """,
+        orden_ids,
+    )
+    datos = {
+        fila[0]: {"tipo": fila[1], "referencia": fila[2], "observacion": fila[3], "productos": []}
+        for fila in cursor.fetchall()
+    }
+    cursor.execute(
+        f"""
+        SELECT orden_id, producto
+        FROM orden_items
+        WHERE orden_id IN ({placeholders})
+        ORDER BY id
+        """,
+        orden_ids,
+    )
+    for orden_id, producto in cursor.fetchall():
+        if orden_id in datos:
+            datos[orden_id]["productos"].append(producto)
+    return datos

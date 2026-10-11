@@ -954,6 +954,16 @@ def usuario_puede_tomar_ordenes():
     return usuario_rol() in ("master", "mesonera", "socio", "mesonera_reportes")
 
 
+def ruta_inicio_rol(rol):
+    """Pantalla de inicio de cada rol: destino del login y del logo
+    del header. Cocina/produccion no tienen acceso a "/" (403)."""
+    if rol == "produccion":
+        return "/produccion"
+    if rol in ("cocina", "cocina_reportes"):
+        return "/cocina"
+    return "/"
+
+
 def usuario_puede_ver_inventario():
     return usuario_rol() in ("master", "cocina", "cocina_reportes")
 
@@ -1426,6 +1436,10 @@ def estilos_base():
         text-shadow: 0 0 10px rgba(61, 220, 132, 0.14);
     }
     .titulo span.brand-dot { color: var(--verde-neko); }
+    a.titulo-inicio { text-decoration: none; white-space: nowrap; flex-shrink: 0; border-radius: 10px; padding: 4px 6px; margin: -4px -6px; transition: background 0.15s ease, opacity 0.15s ease; }
+    a.titulo-inicio:hover { background: rgba(61, 220, 132, 0.08); }
+    a.titulo-inicio:active { opacity: 0.8; }
+    a.titulo-inicio:focus-visible { outline: 3px solid var(--verde-neko); outline-offset: 2px; }
     .menu-top { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
     .menu-top a, .volver, .btn-accion, .btn-ver, .btn-cobrar, .btn-acceso {
         color: white;
@@ -1610,7 +1624,7 @@ def barra_superior(extra_links=""):
     return f"""
     <style>{estilos_base()}</style>
     <div class="header">
-        <div class="titulo">🐱 Neko Wok <span class="brand-dot">·</span> <span style="font-size:14px;font-weight:500;opacity:0.85;">POS</span></div>
+        <a href="{ruta_inicio_rol(usuario_rol())}" class="titulo titulo-inicio" title="Ir a Inicio" aria-label="Neko Wok POS: ir a Inicio">🐱 Neko Wok <span class="brand-dot">·</span> <span style="font-size:14px;font-weight:500;opacity:0.85;">POS</span></a>
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
             <div style="font-size:13px; opacity:0.85; display:flex; align-items:center; gap:10px;">{campana_html}👤 <b>{usuario_activo()}</b></div>
             <div class="menu-top">
@@ -2367,11 +2381,7 @@ def login():
             session["usuario"] = usuario[1]
             session["usuario_rol"] = usuario[2] or "mesonera"
             conn.close()
-            if session["usuario_rol"] == "produccion":
-                return redirect("/produccion")
-            if session["usuario_rol"] in ("cocina", "cocina_reportes"):
-                return redirect("/cocina")
-            return redirect("/")
+            return redirect(ruta_inicio_rol(session["usuario_rol"]))
 
         error = "Usuario o PIN incorrecto"
 
@@ -2528,6 +2538,9 @@ def estilos_admin_cxc():
     .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin:0 0 14px; }
     .toolbar > div { flex:1 1 180px; }
     .card-admin { background:var(--tarjeta); border:1px solid var(--borde); border-radius:10px; padding:16px; box-shadow:var(--sombra-suave); margin-bottom:14px; overflow:auto; }
+    .descripcion-cxc { color:var(--texto-secundario); font-size:13px; line-height:1.35; min-width:180px; max-width:360px; }
+    .descripcion-cxc-destacada { background:var(--panel-secundario); border:1px solid var(--borde); border-left:4px solid var(--verde-neko); border-radius:10px; padding:12px 14px; margin:0 0 14px; font-size:15px; font-weight:700; color:var(--texto); }
+    .descripcion-cxc-destacada small { display:block; color:var(--texto-secundario); font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:4px; }
     .metricas { display:grid; grid-template-columns:repeat(4, minmax(140px, 1fr)); gap:10px; margin:12px 0; }
     .metrica { background:var(--panel-secundario); border:1px solid var(--borde); border-radius:8px; padding:14px; }
     .metrica small { color:var(--texto-secundario); font-weight:800; text-transform:uppercase; font-size:11px; }
@@ -2853,6 +2866,14 @@ def index():
     input:focus, select:focus { outline: none; border-color: var(--verde-neko); box-shadow: 0 0 0 3px rgba(61,220,132,0.12); }
     .btn-nueva-orden { width: 100%; padding: 15px; background: var(--verde-neko); color: #0F1115; border: none; border-radius: 10px; font-size: 17px; font-weight: 800; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.20); transition: background 0.18s ease, box-shadow 0.18s ease, transform 0.1s; }
     .btn-nueva-orden:hover { background: var(--hover-neko); box-shadow: 0 8px 18px rgba(0,0,0,0.22); }
+    .tipo-orden-titulo { font-size: 13px; font-weight: 700; color: var(--texto-secundario); }
+    .tipo-orden { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 6px 0 12px; }
+    .tipo-orden-opcion { position: relative; display: block; cursor: pointer; }
+    .tipo-orden-opcion input { position: absolute; opacity: 0; width: 1px; height: 1px; min-height: 0; margin: 0; padding: 0; pointer-events: none; }
+    .tipo-orden-opcion span { display: flex; align-items: center; justify-content: center; min-height: 52px; padding: 8px 6px; border-radius: 12px; border: 1.5px solid var(--borde); background: var(--panel-secundario); color: var(--texto-secundario); font-size: 15px; font-weight: 800; text-align: center; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
+    .tipo-orden-opcion:hover span { border-color: #3C4350; color: var(--texto); }
+    .tipo-orden-opcion input:checked + span { background: rgba(61, 220, 132, 0.16); border-color: var(--verde-neko); color: var(--verde-neko); box-shadow: inset 0 0 0 1px var(--verde-neko); }
+    .tipo-orden-opcion input:focus-visible + span { outline: 3px solid var(--verde-neko); outline-offset: 2px; }
     .card { background: var(--tarjeta); color: var(--texto); padding: 16px; margin-bottom: 10px; border-radius: 12px; box-shadow: var(--sombra-suave); display: flex; flex-direction: column; gap: 10px; font-size: 16px; border: 1px solid var(--borde); border-left: 4px solid var(--borde); }
     .card.abierta { border-left-color: var(--naranja); }
     .card.en-cocina { border-left-color: var(--verde-neko); background: var(--tarjeta); }
@@ -2985,12 +3006,12 @@ def index():
         <div class="panel-izq">
             <h3>🧾 Nueva orden</h3>
             <form action="/crear_orden" method="post">
-                <label style="font-size:13px;font-weight:700;color:#6b7280;">Tipo</label>
-                <select name="tipo" id="tipoOrden">
-                    <option value="Mesa">🪑 Mesa</option>
-                    <option value="Delivery">🛵 Delivery</option>
-                    <option value="Para llevar">🥡 Pick Up</option>
-                </select>
+                <div class="tipo-orden-titulo" id="tipoOrdenTitulo">Tipo</div>
+                <div class="tipo-orden" id="tipoOrden" role="radiogroup" aria-labelledby="tipoOrdenTitulo">
+                    <label class="tipo-orden-opcion"><input type="radio" name="tipo" value="Mesa" checked><span>🪑 Mesa</span></label>
+                    <label class="tipo-orden-opcion"><input type="radio" name="tipo" value="Delivery"><span>🛵 Delivery</span></label>
+                    <label class="tipo-orden-opcion"><input type="radio" name="tipo" value="Para llevar"><span>🥡 Pick Up</span></label>
+                </div>
                 <div id="grupoMesaOrden">
                     <label style="font-size:13px;font-weight:700;color:#6b7280;">Mesa</label>
                     <select name="referencia_mesa" id="referenciaMesaOrden" required>
@@ -3007,19 +3028,22 @@ def index():
             </form>
             <script>
             (function() {{
-                const tipo = document.getElementById("tipoOrden");
+                const tiposOrden = document.querySelectorAll('#tipoOrden input[name="tipo"]');
                 const mesa = document.getElementById("grupoMesaOrden");
                 const referencia = document.getElementById("grupoReferenciaOrden");
                 const mesaSelect = document.getElementById("referenciaMesaOrden");
                 const referenciaInput = document.getElementById("referenciaLibreOrden");
                 function actualizarReferenciaOrden() {{
-                    const esMesa = tipo.value === "Mesa";
+                    const elegido = document.querySelector('#tipoOrden input[name="tipo"]:checked');
+                    const esMesa = !elegido || elegido.value === "Mesa";
                     mesa.style.display = esMesa ? "" : "none";
                     referencia.style.display = esMesa ? "none" : "";
                     mesaSelect.required = esMesa;
                     referenciaInput.required = !esMesa;
                 }}
-                tipo.addEventListener("change", actualizarReferenciaOrden);
+                tiposOrden.forEach(function(opcion) {{
+                    opcion.addEventListener("change", actualizarReferenciaOrden);
+                }});
                 actualizarReferenciaOrden();
             }})();
             </script>
