@@ -81,6 +81,7 @@ from app.infrastructure.database.print_queue import (
     crear_tabla_print_jobs,
 )
 from app.domain.sales.kitchen_ticket_times import formatear_hora_visible
+from app.domain.sales.product_images import ImagenProductoInvalida, normalizar_imagen_url
 from app.infrastructure.database.service_alerts import (
     SqlServiceAlertsRepository,
     crear_tabla_service_alerts,
@@ -2153,6 +2154,9 @@ def init_db():
     crear_datos_base_inventario(get_connection)
     asegurar_columna("categorias", "activo", "INTEGER DEFAULT 1")
     asegurar_columna("productos", "activo", "INTEGER DEFAULT 1")
+    # Imagen opcional de la tarjeta de /orden/<id> (URL http(s) o ruta
+    # "/static/..."); NULL = placeholder. Ver app.domain.sales.product_images.
+    asegurar_columna("productos", "imagen_url", "TEXT")
     # Columnas HISTORICAS -- mision "correccion semantica de Despacho":
     # despachado_at/despachado_por se llamaban asi porque la pantalla
     # de Monica originalmente decia "ENTREGADO", pero esa etiqueta nunca
@@ -4453,7 +4457,18 @@ def editar_producto(id):
         except Exception:
             return "Datos invalidos"
 
+        # Solo se toca la imagen si el formulario la trae: otros POST
+        # (scripts/tests antiguos) sin el campo no la borran.
+        cambiar_imagen = "imagen_url" in request.form
+        if cambiar_imagen:
+            try:
+                imagen_url = normalizar_imagen_url(request.form.get("imagen_url"))
+            except ImagenProductoInvalida as exc:
+                return str(exc), 400
+
         catalog_repo.actualizar_producto(id, nombre, precio, categoria_id)
+        if cambiar_imagen:
+            catalog_repo.actualizar_imagen_producto(id, imagen_url)
 
         conn = get_connection()
         cursor = conn.cursor()
@@ -4525,8 +4540,20 @@ def editar_producto(id):
         selected = "selected" if c[0] == p[2] else ""
         html += f"<option value='{c[0]}' {selected}>{c[1]}</option>"
 
+    imagen_actual = catalog_repo.obtener_imagen_producto(id) or ""
+    imagen_actual_attr = html_lib.escape(imagen_actual, quote=True)
+    imagen_preview = (
+        f'<img src="{imagen_actual_attr}" alt="" '
+        'style="display:block;max-width:180px;max-height:135px;border-radius:8px;margin:6px 0;object-fit:cover;">'
+        if imagen_actual else ""
+    )
+
     html += f"""
         </select><br><br>
+        Imagen (opcional, URL https://... o ruta /static/...):
+        <input name="imagen_url" value="{imagen_actual_attr}" placeholder="Sin imagen: se muestra un icono de la categoria">
+        {imagen_preview}
+        <br>
         Grupos de modificadores (sabor, azucar, etc.):
         {grupos_checkboxes}
         <br>
